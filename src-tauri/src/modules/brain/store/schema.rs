@@ -6,7 +6,8 @@
 /// Current durable schema version. Bumping it triggers `migrate`.
 /// v2: added the `notes` table (P1 native memory store).
 /// v3: added `proposals` + `reject_signatures` (P1 doctor → proposal review loop).
-pub const SCHEMA_VERSION: i64 = 3;
+/// v4: added the AST graph — `code_nodes` + `code_imports` + `code_edges` (P2).
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -90,4 +91,37 @@ CREATE TABLE IF NOT EXISTS reject_signatures (
     reject_sig TEXT NOT NULL,
     PRIMARY KEY (project_id, reject_sig)
 );
+
+-- AST graph (P2). `code_nodes` = tree-sitter definitions; `code_imports` = raw
+-- per-file import specifiers; `code_edges` = RESOLVED file→file import edges,
+-- rebuilt as a pure function of (code_imports, indexed file set) so incremental
+-- relink and a full rebuild provably converge.
+CREATE TABLE IF NOT EXISTS code_nodes (
+    project_id TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    PRIMARY KEY (project_id, path, name, kind, start_line)
+);
+CREATE INDEX IF NOT EXISTS code_nodes_name ON code_nodes(project_id, name);
+CREATE INDEX IF NOT EXISTS code_nodes_path ON code_nodes(project_id, path);
+
+CREATE TABLE IF NOT EXISTS code_imports (
+    project_id TEXT NOT NULL,
+    src_path   TEXT NOT NULL,
+    spec       TEXT NOT NULL,
+    PRIMARY KEY (project_id, src_path, spec)
+);
+CREATE INDEX IF NOT EXISTS code_imports_src ON code_imports(project_id, src_path);
+
+CREATE TABLE IF NOT EXISTS code_edges (
+    project_id TEXT NOT NULL,
+    src_path   TEXT NOT NULL,
+    dst_path   TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    PRIMARY KEY (project_id, src_path, dst_path, kind)
+);
+CREATE INDEX IF NOT EXISTS code_edges_dst ON code_edges(project_id, dst_path);
+CREATE INDEX IF NOT EXISTS code_edges_src ON code_edges(project_id, src_path);
 "#;

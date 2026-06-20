@@ -13,7 +13,8 @@ use std::path::Path;
 use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::store::{
-    list_notes_readonly, list_proposals_readonly, SearchIndex, SqliteIndex,
+    code_impact_readonly, get_symbol_readonly, list_notes_readonly, list_proposals_readonly,
+    SearchIndex, SqliteIndex,
 };
 use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
@@ -297,6 +298,71 @@ fn doctor_queues_proposals_and_reject_sticks() {
     assert!(
         pending2.iter().any(|p| p.title.contains("no type")),
         "un-rejected proposal stays pending"
+    );
+}
+
+fn ts_chain(root: &Path) {
+    write(root, "src/a.ts", b"export function alpha() {}");
+    write(root, "src/b.ts", b"import { alpha } from './a';\nexport function bravo() { alpha(); }");
+    write(root, "src/c.ts", b"import { bravo } from './b';\nexport function charlie() { bravo(); }");
+}
+
+/// P2 marquee: `code_impact` returns the AST reverse-import closure (tiered).
+#[test]
+fn code_impact_reverse_import_closure() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    ts_chain(root);
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+
+    let sym = get_symbol_readonly(&db, PID, "alpha").unwrap();
+    assert_eq!(sym.len(), 1);
+    assert_eq!(sym[0].path, "src/a.ts");
+    assert_eq!(sym[0].kind, "function");
+
+    // a defines alpha; b imports a; c imports b → dependents = {b, c}.
+    let imp = code_impact_readonly(&db, PID, "alpha", 5).unwrap();
+    assert_eq!(imp.defined_in, vec!["src/a.ts"]);
+    assert!(imp.ast_dependents.contains(&"src/b.ts".to_string()), "{:?}", imp.ast_dependents);
+    assert!(imp.ast_dependents.contains(&"src/c.ts".to_string()), "{:?}", imp.ast_dependents);
+}
+
+/// P2 gate: an incrementally-relinked graph equals a full rebuild over the same
+/// final on-disk state (identical nodes + edges).
+#[test]
+fn incremental_relink_equals_full_rebuild() {
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path();
+    ts_chain(root);
+
+    // Incremental: index, mutate b.ts on disk, relink only the changed file.
+    let inc_store = tempfile::tempdir().unwrap();
+    let inc = SqliteIndex::open(&inc_store.path().join("i.sqlite")).unwrap();
+    index_dir(&inc, PID, root);
+    std::fs::write(
+        root.join("src/b.ts"),
+        b"import { alpha } from './a';\nexport function bravo2() { alpha(); }",
+    )
+    .unwrap();
+    index_changed(&inc, PID, root, &[root.join("src/b.ts")]);
+
+    // Full rebuild over the SAME final disk state.
+    let full_store = tempfile::tempdir().unwrap();
+    let full = SqliteIndex::open(&full_store.path().join("i.sqlite")).unwrap();
+    index_dir(&full, PID, root);
+
+    assert_eq!(
+        inc.project_edges(PID).unwrap(),
+        full.project_edges(PID).unwrap(),
+        "edges diverge between incremental relink and full rebuild"
+    );
+    assert_eq!(
+        inc.project_node_keys(PID).unwrap(),
+        full.project_node_keys(PID).unwrap(),
+        "nodes diverge between incremental relink and full rebuild"
     );
 }
 

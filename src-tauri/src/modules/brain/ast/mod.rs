@@ -109,6 +109,154 @@ pub fn extract_defs(lang: Lang, source: &str) -> Vec<String> {
     out
 }
 
+/// A definition node (for the graph + `brain_get_symbol`).
+#[derive(Clone, Debug)]
+pub struct CodeNode {
+    pub name: String,
+    pub kind: String,
+    pub start_line: i64,
+}
+
+/// One file's AST analysis: definitions + raw import specifiers (one parse).
+#[derive(Clone, Debug, Default)]
+pub struct Analysis {
+    pub nodes: Vec<CodeNode>,
+    pub imports: Vec<String>,
+}
+
+impl Analysis {
+    /// Space-joined definition names for the FTS `symbols` column.
+    pub fn symbol_names(&self) -> String {
+        self.nodes
+            .iter()
+            .map(|n| n.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// A definition location (`brain_get_symbol` result).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SymbolInfo {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub start_line: i64,
+}
+
+/// Tiered impact (`brain_code_impact`): AST-confident reverse-import dependents
+/// vs the lexical over-approximation (CONCEPT §4.1b).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Impact {
+    pub symbol: String,
+    pub defined_in: Vec<String>,
+    pub ast_dependents: Vec<String>,
+    pub lexical_candidates: Vec<String>,
+}
+
+fn normalize_kind(raw: &str) -> &'static str {
+    match raw {
+        "function_item" | "function_declaration" | "function_signature_item" => "function",
+        "struct_item" => "struct",
+        "enum_item" | "enum_declaration" => "enum",
+        "union_item" => "union",
+        "trait_item" => "trait",
+        "type_item" | "type_alias_declaration" => "type",
+        "const_item" | "static_item" | "variable_declarator" => "const",
+        "mod_item" => "module",
+        "macro_definition" => "macro",
+        "class_declaration" | "abstract_class_declaration" => "class",
+        "method_definition" => "method",
+        "interface_declaration" => "interface",
+        "public_field_definition" => "field",
+        _ => "symbol",
+    }
+}
+
+// Static + re-export import specifiers (TS/JS/TSX). Rust `use` paths aren't file
+// paths and need module-tree resolution — deferred (Rust still gets nodes).
+const TS_IMPORTS: &str = r#"
+(import_statement source: (string) @src)
+(export_statement source: (string) @src)
+"#;
+
+fn imports_query(lang: Lang) -> Option<&'static str> {
+    match lang {
+        Lang::TypeScript | Lang::Tsx => Some(TS_IMPORTS),
+        Lang::Rust => None,
+    }
+}
+
+/// Parse once and extract both definitions and import specifiers. Fail-open.
+pub fn analyze(lang: Lang, source: &str) -> Analysis {
+    let Some(tree) = parse(lang, source) else {
+        return Analysis::default();
+    };
+    let language = language(lang);
+    let src = source.as_bytes();
+    Analysis {
+        nodes: run_defs(&language, lang, &tree, src),
+        imports: run_imports(&language, lang, &tree, src),
+    }
+}
+
+fn run_defs(language: &Language, lang: Lang, tree: &Tree, src: &[u8]) -> Vec<CodeNode> {
+    let query = match Query::new(language, defs_query(lang)) {
+        Ok(q) => q,
+        Err(e) => {
+            log::warn!("brain: defs query failed for {lang:?}: {e}");
+            return Vec::new();
+        }
+    };
+    let mut cursor = QueryCursor::new();
+    let mut out = Vec::new();
+    let mut it = cursor.matches(&query, tree.root_node(), src);
+    while let Some(m) = it.next() {
+        for cap in m.captures {
+            let node = cap.node;
+            if let Ok(name) = node.utf8_text(src) {
+                if name.is_empty() {
+                    continue;
+                }
+                let kind = node.parent().map(|p| normalize_kind(p.kind())).unwrap_or("symbol");
+                out.push(CodeNode {
+                    name: name.to_string(),
+                    kind: kind.to_string(),
+                    start_line: node.start_position().row as i64 + 1,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn run_imports(language: &Language, lang: Lang, tree: &Tree, src: &[u8]) -> Vec<String> {
+    let Some(q_src) = imports_query(lang) else {
+        return Vec::new();
+    };
+    let query = match Query::new(language, q_src) {
+        Ok(q) => q,
+        Err(e) => {
+            log::warn!("brain: imports query failed for {lang:?}: {e}");
+            return Vec::new();
+        }
+    };
+    let mut cursor = QueryCursor::new();
+    let mut out = Vec::new();
+    let mut it = cursor.matches(&query, tree.root_node(), src);
+    while let Some(m) = it.next() {
+        for cap in m.captures {
+            if let Ok(raw) = cap.node.utf8_text(src) {
+                let spec = raw.trim_matches(['"', '\'', '`']);
+                if !spec.is_empty() {
+                    out.push(spec.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +302,20 @@ mod tests {
         for n in ["alpha", "Bravo", "Charlie", "Delta", "echo", "Foxtrot"] {
             assert!(d.contains(&n.to_string()), "missing {n} in {d:?}");
         }
+    }
+
+    #[test]
+    fn analyze_extracts_nodes_and_imports() {
+        let a = analyze(
+            Lang::TypeScript,
+            "import { x } from './a';\nexport { y } from '../b';\nexport function foo() {}",
+        );
+        assert!(a.nodes.iter().any(|n| n.name == "foo" && n.kind == "function"));
+        assert!(a.imports.contains(&"./a".to_string()));
+        assert!(a.imports.contains(&"../b".to_string()));
+        // Rust: nodes extracted, but import edges deferred (use-path resolution).
+        let r = analyze(Lang::Rust, "use crate::foo;\npub fn bar() {}");
+        assert!(r.nodes.iter().any(|n| n.name == "bar"));
+        assert!(r.imports.is_empty());
     }
 }

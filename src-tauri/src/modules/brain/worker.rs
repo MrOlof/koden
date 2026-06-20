@@ -296,6 +296,8 @@ pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) 
             }
         }
     }
+    // Rebuild resolved import edges once (pure fn of imports + file set).
+    let _ = index.rebuild_edges(project_id);
     IndexStats { indexed, pruned }
 }
 
@@ -367,6 +369,8 @@ pub fn index_changed(
     if changed.iter().any(|p| to_canon(p).contains(&mem_marker)) {
         memory::scan_project_memory(index, project_id, root);
     }
+    // Rebuild resolved import edges (cheap; converges with a full rebuild).
+    let _ = index.rebuild_edges(project_id);
     IndexStats { indexed, pruned }
 }
 

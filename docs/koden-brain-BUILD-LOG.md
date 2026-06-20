@@ -333,7 +333,26 @@ caller churn. Tests: 4 AST (ext map, grammar smoke, Rust defs, TS defs) +
 Green: clippy `-D warnings` clean · `cargo test` 242 passed / 1 pre-existing ·
 brain lib 50 · brain_sandbox 9.
 
-⏭ P2 remaining: AST graph tables (nodes/edges) + imports/refs/calls extraction +
-module resolution (tsconfig paths / pkg exports / Cargo members) + forward/reverse
-adjacency with incremental relink + `brain_code_graph`/`brain_code_impact`/
-`brain_neighbors` + the property test "incremental relink == full rebuild".
+### P2.2 — AST graph: nodes, import edges, tiered impact + the gate ✅
+Schema v4: `code_nodes` (defs), `code_imports` (raw per-file specs), `code_edges`
+(resolved file→file). `ast::analyze` parses once → nodes (name/kind/line) + import
+specs. `index_file` stores nodes + import specs per file (in its tx); `remove_file`
+cleans them; **edges are rebuilt as a pure function of (imports, file set)**
+(`rebuild_edges`, called once per project pass) — so incremental relink and a full
+rebuild provably converge. Relative import resolution (extension + `/index`
+fallback); tsconfig-paths/pkg-exports/Cargo-member resolution + Rust `use` edges
+are a documented later refinement (Rust still gets nodes + lexical candidates).
+`code_impact` = AST reverse-import BFS closure (tiered above the lexical
+over-approximation, CONCEPT §4.1b); `get_symbol` = definition locations. Commands
+`brain_get_symbol`/`brain_code_impact` registered.
+**P2 gate proven** (`incremental_relink_equals_full_rebuild`): after a mutate +
+single-file relink, nodes AND edges are byte-identical to a full rebuild over the
+same final state. Plus `code_impact_reverse_import_closure` (a→b→c chain →
+impact(alpha) dependents = {b, c}). The `symbols` FTS column is now AST-fed.
+Green: clippy `-D warnings` clean · `cargo test` 243 passed / 1 pre-existing ·
+brain lib 51 · brain_sandbox 11.
+
+⏭ P2 remaining (refinements, gate already met): module resolution (tsconfig paths
+/ package exports / Cargo members) + Rust `use` edges; refs/calls edges +
+`brain_code_graph`/`brain_neighbors` (BFS depth-k); a frontend impact view; then a
+P2 verification pass. **P2's marquee (real AST graph + tiered impact) + gate are done.**

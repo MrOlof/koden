@@ -15,7 +15,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use super::SearchIndex;
-use crate::modules::brain::ast;
+use crate::modules::brain::ast::{self, Impact, SymbolInfo};
 use crate::modules::brain::memory::doctor::NoteRecord;
 use crate::modules::brain::memory::proposal::{reject_signature, MemoryProposal, ProposalAction};
 use crate::modules::brain::memory::{MemoryNote, NoteSummary};
@@ -76,10 +76,15 @@ impl SqliteIndex {
 
         let path_tokens = tokenize::tokenize(rel_path).join(" ");
         let content_tokens = tokenize::tokenize(content).join(" ");
-        // P2: tree-sitter definition names feed the `symbols` column (weighted
-        // above content) so identifier search ranks real defs. Only runs here on
-        // a new/changed file — the unchanged-hash early return skips it.
-        let symbol_tokens = symbol_tokens_for(rel_path, content);
+        // P2: parse once → definitions (the `symbols` FTS column + `code_nodes`)
+        // and raw import specs (`code_imports`). Only runs here on a new/changed
+        // file — the unchanged-hash early return skips it. Edges are NOT touched
+        // here; they're rebuilt as a pure function of imports+files (rebuild_edges).
+        let analysis = analyze_for(rel_path, content);
+        let symbol_tokens = analysis
+            .as_ref()
+            .map(|a| tokenize::tokenize(&a.symbol_names()).join(" "))
+            .unwrap_or_default();
 
         let tx = self.conn.unchecked_transaction()?;
         if let Some((_, old_rowid)) = existing {
@@ -96,6 +101,29 @@ impl SqliteIndex {
                 hash=excluded.hash, size=excluded.size, fts_rowid=excluded.fts_rowid",
             (project_id, rel_path, hash, size, rowid),
         )?;
+        // Replace this file's nodes + import specs.
+        tx.execute(
+            "DELETE FROM code_nodes WHERE project_id=?1 AND path=?2",
+            (project_id, rel_path),
+        )?;
+        tx.execute(
+            "DELETE FROM code_imports WHERE project_id=?1 AND src_path=?2",
+            (project_id, rel_path),
+        )?;
+        if let Some(a) = &analysis {
+            for n in &a.nodes {
+                tx.execute(
+                    "INSERT OR IGNORE INTO code_nodes(project_id,path,name,kind,start_line) VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![project_id, rel_path, n.name, n.kind, n.start_line],
+                )?;
+            }
+            for spec in &a.imports {
+                tx.execute(
+                    "INSERT OR IGNORE INTO code_imports(project_id,src_path,spec) VALUES(?1,?2,?3)",
+                    (project_id, rel_path, spec.as_str()),
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -296,6 +324,43 @@ impl SqliteIndex {
         Ok(crate::modules::brain::freshness::aggregate_fingerprint(&mut entries))
     }
 
+    /// Sorted resolved import edges `(src, dst)` — for diagnostics + the
+    /// incremental==full property test.
+    pub fn project_edges(&self, project_id: &str) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT src_path,dst_path FROM code_edges WHERE project_id=?1 ORDER BY src_path,dst_path",
+        )?;
+        let it = stmt.query_map([project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        Ok(v)
+    }
+
+    /// Sorted node keys `path|name|kind|line` — for the property test.
+    pub fn project_node_keys(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path,name,kind,start_line FROM code_nodes WHERE project_id=?1 ORDER BY path,name,kind,start_line",
+        )?;
+        let it = stmt.query_map([project_id], |r| {
+            Ok(format!(
+                "{}|{}|{}|{}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?
+            ))
+        })?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        Ok(v)
+    }
+
     /// All indexed paths for a project (used by reconcile to detect deletions).
     pub fn existing_paths(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self
@@ -330,8 +395,49 @@ impl SqliteIndex {
             "DELETE FROM files WHERE project_id=?1 AND path=?2",
             (project_id, rel_path),
         )?;
+        tx.execute(
+            "DELETE FROM code_nodes WHERE project_id=?1 AND path=?2",
+            (project_id, rel_path),
+        )?;
+        tx.execute(
+            "DELETE FROM code_imports WHERE project_id=?1 AND src_path=?2",
+            (project_id, rel_path),
+        )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Rebuild the resolved import edges for a project from `code_imports` + the
+    /// current file set. A pure function of (imports, files) — no parsing — so an
+    /// incrementally-relinked graph and a full rebuild converge to the same edges.
+    /// Called once per project pass (full or incremental).
+    pub fn rebuild_edges(&self, project_id: &str) -> rusqlite::Result<()> {
+        let files = self.indexed_path_set(project_id)?;
+        let imports: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT src_path, spec FROM code_imports WHERE project_id=?1")?;
+            let it = stmt.query_map([project_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut v = Vec::new();
+            for x in it {
+                v.push(x?);
+            }
+            v
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM code_edges WHERE project_id=?1", [project_id])?;
+        for (src, spec) in imports {
+            if let Some(dst) = resolve_import(&src, &spec, &files) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO code_edges(project_id,src_path,dst_path,kind) VALUES(?1,?2,?3,'imports')",
+                    (project_id, &src, &dst),
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -341,17 +447,149 @@ impl SearchIndex for SqliteIndex {
     }
 }
 
-/// Pre-tokenized stream of tree-sitter definition names for the `symbols` column
-/// (empty for non-AST languages). Derived from the file's extension + content.
-fn symbol_tokens_for(rel_path: &str, content: &str) -> String {
+/// One-parse AST analysis for a file, or `None` for non-AST languages.
+fn analyze_for(rel_path: &str, content: &str) -> Option<ast::Analysis> {
     let ext = std::path::Path::new(rel_path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    match ast::lang_for_ext(ext) {
-        Some(lang) => tokenize::tokenize(&ast::extract_defs(lang, content).join(" ")).join(" "),
-        None => String::new(),
+    ast::lang_for_ext(ext).map(|lang| ast::analyze(lang, content))
+}
+
+/// Resolve a relative import specifier to an indexed file path (extension +
+/// index fallback). Bare/external specifiers (e.g. `react`) return `None`.
+/// Module resolution via tsconfig paths / package exports / Cargo members is a
+/// later P2 refinement; relative resolution covers the common case.
+fn resolve_import(
+    importer: &str,
+    spec: &str,
+    files: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if !(spec.starts_with("./") || spec.starts_with("../")) {
+        return None;
     }
+    let dir = std::path::Path::new(importer)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let base = normalize_rel(&dir.join(spec));
+    if base.is_empty() {
+        return None;
+    }
+    const EXTS: &[&str] = &[
+        "", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js",
+    ];
+    EXTS.iter()
+        .map(|e| format!("{base}{e}"))
+        .find(|c| files.contains(c))
+}
+
+/// Lexically normalize a path (resolve `.`/`..`) to a forward-slash rel string.
+fn normalize_rel(p: &std::path::Path) -> String {
+    use std::path::Component;
+    let mut stack: Vec<String> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            Component::Normal(s) => stack.push(s.to_string_lossy().to_string()),
+            Component::ParentDir => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack.join("/")
+}
+
+/// All definition locations of a symbol (`brain_get_symbol`).
+pub fn get_symbol_readonly(
+    db_path: &Path,
+    project: &str,
+    symbol: &str,
+) -> rusqlite::Result<Vec<SymbolInfo>> {
+    let conn = open_readonly(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT path,name,kind,start_line FROM code_nodes WHERE project_id=?1 AND name=?2 ORDER BY path,start_line",
+    )?;
+    let it = stmt.query_map((project, symbol), |r| {
+        Ok(SymbolInfo {
+            path: r.get(0)?,
+            name: r.get(1)?,
+            kind: r.get(2)?,
+            start_line: r.get(3)?,
+        })
+    })?;
+    let mut v = Vec::new();
+    for x in it {
+        v.push(x?);
+    }
+    Ok(v)
+}
+
+/// Tiered impact of a symbol: the AST reverse-import closure (files that import,
+/// transitively, the file(s) defining the symbol) plus the lexical
+/// over-approximation (content mentions). CONCEPT §4.1b `code_impact`.
+pub fn code_impact_readonly(
+    db_path: &Path,
+    project: &str,
+    symbol: &str,
+    depth: usize,
+) -> rusqlite::Result<Impact> {
+    let conn = open_readonly(db_path)?;
+    let defined_in: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT path FROM code_nodes WHERE project_id=?1 AND name=?2")?;
+        let it = stmt.query_map((project, symbol), |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        v
+    };
+
+    // BFS the reverse-import closure (dst → src) from the defining files.
+    let mut seen: std::collections::HashSet<String> = defined_in.iter().cloned().collect();
+    let mut frontier: Vec<String> = defined_in.clone();
+    {
+        let mut stmt =
+            conn.prepare("SELECT src_path FROM code_edges WHERE project_id=?1 AND dst_path=?2")?;
+        for _ in 0..depth.max(1) {
+            let mut next = Vec::new();
+            for node in &frontier {
+                let it = stmt.query_map((project, node.as_str()), |r| r.get::<_, String>(0))?;
+                for x in it {
+                    let s = x?;
+                    if seen.insert(s.clone()) {
+                        next.push(s);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+    }
+    let def_set: std::collections::HashSet<&String> = defined_in.iter().collect();
+    let mut ast_dependents: Vec<String> =
+        seen.iter().filter(|p| !def_set.contains(*p)).cloned().collect();
+    ast_dependents.sort();
+
+    // Lexical over-approximation: content mentions not already covered.
+    let exclude: std::collections::HashSet<String> =
+        defined_in.iter().chain(ast_dependents.iter()).cloned().collect();
+    let mut lexical_candidates: Vec<String> = search_with_conn(&conn, Some(project), symbol, 50)?
+        .into_iter()
+        .map(|h| h.path)
+        .filter(|p| !exclude.contains(p))
+        .collect();
+    lexical_candidates.sort();
+    lexical_candidates.dedup();
+
+    Ok(Impact {
+        symbol: symbol.to_string(),
+        defined_in,
+        ast_dependents,
+        lexical_candidates,
+    })
 }
 
 /// Build the FTS5 column-filtered OR query for a set of pre-tokenized query terms.

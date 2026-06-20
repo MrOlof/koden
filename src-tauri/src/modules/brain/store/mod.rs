@@ -6,8 +6,8 @@ pub mod schema;
 pub mod sqlite;
 
 pub use sqlite::{
-    file_count_readonly, list_notes_readonly, list_proposals_readonly, search_readonly,
-    search_with_conn, SqliteIndex,
+    code_impact_readonly, file_count_readonly, get_symbol_readonly, list_notes_readonly,
+    list_proposals_readonly, search_readonly, search_with_conn, SqliteIndex,
 };
 
 use crate::modules::brain::Hit;

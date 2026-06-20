@@ -5,6 +5,7 @@
 
 use tauri::State;
 
+use crate::modules::brain::ast::{Impact, SymbolInfo};
 use crate::modules::brain::events::BrainEvent;
 use crate::modules::brain::memory::proposal::MemoryProposal;
 use crate::modules::brain::memory::NoteSummary;
@@ -93,6 +94,37 @@ pub fn brain_search(
             Ok(Vec::new())
         }
     }
+}
+
+/// Definition locations of a symbol (path/kind/line) — the AST graph (P2).
+#[tauri::command]
+pub fn brain_get_symbol(
+    state: State<BrainState>,
+    project: String,
+    symbol: String,
+) -> Vec<SymbolInfo> {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Vec::new();
+    };
+    store::get_symbol_readonly(&db, &project, &symbol).unwrap_or_default()
+}
+
+/// Tiered impact of a symbol: AST reverse-import dependents + lexical candidates.
+#[tauri::command]
+pub fn brain_code_impact(
+    state: State<BrainState>,
+    project: String,
+    symbol: String,
+    depth: Option<usize>,
+) -> Impact {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Impact { symbol, ..Default::default() };
+    };
+    let depth = depth.unwrap_or(5).clamp(1, 20);
+    store::code_impact_readonly(&db, &project, &symbol, depth).unwrap_or(Impact {
+        symbol,
+        ..Default::default()
+    })
 }
 
 /// Structured memory notes (review inbox / cards). `project = None` = all.
