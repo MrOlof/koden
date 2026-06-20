@@ -42,6 +42,8 @@ impl ProposalAction {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct MemoryProposal {
+    /// Owning project id (populated on read; the writer keys by the project arg).
+    pub project: String,
     pub signature: String,
     pub action: ProposalAction,
     pub target_id: Option<String>,

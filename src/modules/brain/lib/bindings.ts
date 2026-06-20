@@ -40,3 +40,52 @@ export function brainListProjects(): Promise<Project[]> {
 export function brainRescan(project: string | null = null): Promise<void> {
   return invoke<void>("brain_rescan", { project });
 }
+
+export type NoteSummary = {
+  id: string;
+  title: string;
+  note_type: string | null;
+  status: string | null;
+  path: string;
+  anchors: string[];
+};
+
+export type ProposalAction = "create" | "update" | "supersede" | "archive";
+
+export type MemoryProposal = {
+  project: string;
+  signature: string;
+  action: ProposalAction;
+  target_id: string | null;
+  title: string;
+  detail: string;
+  source: string;
+  status: string;
+};
+
+/** Structured memory notes (cards). `project = null` = all. */
+export function brainNotes(project: string | null = null): Promise<NoteSummary[]> {
+  return invoke<NoteSummary[]>("brain_notes", { project });
+}
+
+/** Pending memory proposals (the review inbox). `project = null` = all. */
+export function brainProposals(project: string | null = null): Promise<MemoryProposal[]> {
+  return invoke<MemoryProposal[]>("brain_proposals", { project });
+}
+
+/** Run the memory doctor (queues proposals). `nowDate` = ISO YYYY-MM-DD. */
+export function brainDoctor(
+  project: string | null = null,
+  nowDate: string | null = null,
+): Promise<void> {
+  return invoke<void>("brain_doctor", { project, nowDate });
+}
+
+/** Approve (reject=false) or decline (reject=true) a proposal. */
+export function brainResolveProposal(
+  project: string,
+  signature: string,
+  reject: boolean,
+): Promise<void> {
+  return invoke<void>("brain_resolve_proposal", { project, signature, reject });
+}

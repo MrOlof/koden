@@ -255,7 +255,18 @@ brain_sandbox 7.
 ⏭ The full 18-check port + `TYPED_CHECK_MAP` (§0.3) is tracked follow-up (subset
 shipped); applying a proposal is human/agent work (Librarian never edits user files).
 
+### P1 Brain pane: memory cards + review inbox ✅
+Backend: `MemoryProposal` now carries its `project` (populated on read) so the UI
+can resolve. Frontend: a Search/Memory mode toggle in the pane. Memory mode shows
+the **review inbox** (pending proposals with action badge + detail + Approve/Reject,
+plus a "Run doctor" button passing today's ISO date) and **note cards**
+(type/status/path), over the `brain_notes`/`brain_proposals`/`brain_doctor`/
+`brain_resolve_proposal` commands. Optimistic removal on resolve + a short
+settle-then-refetch (the worker applies async). Verified: `tsc --noEmit` clean,
+biome clean, Rust clippy clean, brain_sandbox 7/7. Runtime click-through pending a
+live `pnpm tauri dev` (cross-phase evidence).
+
 ⏭ P1 remaining: external seed importer (`~/.claude`/`.codex`/`.gemini` → project
-memory; source format TBD); 3-step setup wizard (`tauri-plugin-dialog`); memory
-cards + review inbox in the Brain pane; then a P1 adversarial-verification pass.
-Watcher re-arm re-creates on Rescan (fine for seeded roots).
+memory; source format TBD); 3-step setup wizard (`tauri-plugin-dialog` + a
+`brain_add_project` command); the full 18-check doctor port; then a P1
+adversarial-verification pass before P2. Watcher re-arm re-creates on Rescan.

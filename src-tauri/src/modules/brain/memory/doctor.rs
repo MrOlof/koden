@@ -120,6 +120,7 @@ pub fn run_doctor(
             continue; // declined before — don't resurrect it
         }
         let proposal = MemoryProposal {
+            project: project_id.to_string(),
             signature: proposal_signature(f.action, f.note_id.as_deref(), &f.title),
             action: f.action,
             target_id: f.note_id,

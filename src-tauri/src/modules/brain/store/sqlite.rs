@@ -456,15 +456,16 @@ fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {
 
 fn proposal_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryProposal> {
     let action =
-        ProposalAction::from_token(&r.get::<_, String>(1)?).unwrap_or(ProposalAction::Update);
+        ProposalAction::from_token(&r.get::<_, String>(2)?).unwrap_or(ProposalAction::Update);
     Ok(MemoryProposal {
-        signature: r.get(0)?,
+        project: r.get(0)?,
+        signature: r.get(1)?,
         action,
-        target_id: r.get(2)?,
-        title: r.get(3)?,
-        detail: r.get(4)?,
-        source: r.get(5)?,
-        status: r.get(6)?,
+        target_id: r.get(3)?,
+        title: r.get(4)?,
+        detail: r.get(5)?,
+        source: r.get(6)?,
+        status: r.get(7)?,
     })
 }
 
@@ -474,7 +475,7 @@ pub fn list_proposals_readonly(
     project: Option<&str>,
 ) -> rusqlite::Result<Vec<MemoryProposal>> {
     let conn = open_readonly(db_path)?;
-    let base = "SELECT signature,action,target_id,title,detail,source,status FROM proposals WHERE status='pending'";
+    let base = "SELECT project_id,signature,action,target_id,title,detail,source,status FROM proposals WHERE status='pending'";
     let mut rows = Vec::new();
     match project {
         Some(pid) => {
