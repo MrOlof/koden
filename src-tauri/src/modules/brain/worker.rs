@@ -125,6 +125,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             BrainEvent::Agent { pty_id, kind, agent } => handle_agent(&app, pty_id, &kind, agent),
             BrainEvent::Rescan { .. } => {
                 warm_population(&app, &index); // full reconcile (add/change/delete)
+                drop(watcher.take()); // drop the old watcher first → no double-watch window
                 watcher = arm_watcher(&app, &tx); // pick up any new project roots
             }
             BrainEvent::Tick => index.checkpoint(),
@@ -345,6 +346,18 @@ pub fn index_changed(
                 // gone (deleted / moved away) — prune the stale row + FTS doc.
                 if index.remove_file(project_id, &rel).unwrap_or(false) {
                     pruned += 1;
+                }
+                // The vanished path may have been a directory whose children were
+                // not individually reported — prune any indexed files under it.
+                if let Ok(existing) = index.existing_paths(project_id) {
+                    let prefix = format!("{rel}/");
+                    for p in existing {
+                        if p.starts_with(&prefix)
+                            && index.remove_file(project_id, &p).unwrap_or(false)
+                        {
+                            pruned += 1;
+                        }
+                    }
                 }
             }
         }

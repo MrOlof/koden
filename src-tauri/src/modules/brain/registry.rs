@@ -64,8 +64,12 @@ impl KodenBrainRegistry {
 }
 
 fn normalize(p: &Path) -> String {
-    p.to_string_lossy()
-        .replace('\\', "/")
+    // Route through `to_canon` so the Windows `\\?\` verbatim prefix is STRIPPED
+    // (not just backslash-swapped). The watcher's `group_by_project` and the
+    // worker's `rel_path` both canonicalize paths via `to_canon`; the stored root
+    // MUST use the same form or longest-prefix matching silently fails on Windows
+    // (the incremental watcher goes dead and full-vs-incremental rel keys diverge).
+    crate::modules::fs::to_canon(p)
         .trim_end_matches('/')
         .to_string()
 }
@@ -87,6 +91,16 @@ mod tests {
         let b = reg.add_root(dir.path()).unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(reg.projects().len(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_strips_windows_verbatim_prefix() {
+        // The bug: a `\\?\C:\...` root stored as `//?/C:/...` never matches a
+        // `to_canon`'d `C:/...` change path. `to_canon` must strip the prefix.
+        let n = normalize(Path::new(r"\\?\C:\Users\x\repo"));
+        assert_eq!(n, "C:/Users/x/repo");
+        assert!(!n.contains('?'), "verbatim prefix must be gone: {n}");
     }
 
     #[test]

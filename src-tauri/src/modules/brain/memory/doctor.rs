@@ -35,10 +35,21 @@ pub struct Finding {
     pub action: ProposalAction,
 }
 
-fn looks_like_path(anchor: &str) -> bool {
-    // Path-shaped anchors only (symbol anchors like `mod::fn` are validated by
-    // the AST graph in P2). A '/' is the unambiguous path marker.
-    anchor.contains('/')
+/// Extract the bare file path from an anchor, or `None` if it's a symbol/line
+/// anchor (`mod::fn`, `path#sym`) — those are validated by the AST graph in P2,
+/// not here. Strips a leading `./` and a trailing `:line` so `./a/b.rs:42`
+/// validates against the indexed `a/b.rs` instead of false-flagging.
+fn path_anchor(anchor: &str) -> Option<String> {
+    if anchor.contains("::") || anchor.contains('#') || !anchor.contains('/') {
+        return None;
+    }
+    let a = anchor.strip_prefix("./").unwrap_or(anchor);
+    let a = a.split(':').next().unwrap_or(a);
+    if a.is_empty() {
+        None
+    } else {
+        Some(a.to_string())
+    }
 }
 
 /// Pure check pass. `now_date` is an ISO `YYYY-MM-DD` string (ISO sorts
@@ -87,15 +98,17 @@ pub fn check(
             }
         }
         for a in &n.anchors {
-            if looks_like_path(a) && !indexed_paths.contains(a) {
-                out.push(Finding {
-                    check: "broken_anchor",
-                    severity: "medium",
-                    note_id: Some(n.id.clone()),
-                    title: format!("Note '{}' anchor not found: {}", n.id, a),
-                    detail: format!("Anchor `{a}` points to a path not in the index (moved or deleted?)."),
-                    action: ProposalAction::Update,
-                });
+            if let Some(p) = path_anchor(a) {
+                if !indexed_paths.contains(&p) {
+                    out.push(Finding {
+                        check: "broken_anchor",
+                        severity: "medium",
+                        note_id: Some(n.id.clone()),
+                        title: format!("Note '{}' anchor not found: {}", n.id, a),
+                        detail: format!("Anchor `{a}` points to a path not in the index (moved or deleted?)."),
+                        action: ProposalAction::Update,
+                    });
+                }
             }
         }
     }
@@ -174,6 +187,27 @@ mod tests {
         assert!(checks.contains(&"broken_anchor"));
         // the `mod::ok` symbol anchor is NOT path-shaped → not flagged in P1
         assert_eq!(f.iter().filter(|x| x.check == "broken_anchor").count(), 1);
+    }
+
+    #[test]
+    fn anchor_suffixes_validate_against_indexed_path() {
+        let mut n = note("a");
+        n.anchors = vec![
+            "./src/here.rs".into(),   // leading ./ → indexed
+            "src/here.rs:42".into(),  // :line → indexed
+            "src/here.rs#sym".into(), // symbol anchor → skipped (P2)
+            "mod::ok".into(),         // symbol anchor → skipped
+            "src/gone.rs".into(),     // genuinely missing → flagged
+        ];
+        let mut indexed = HashSet::new();
+        indexed.insert("src/here.rs".to_string());
+        let flagged: Vec<String> = check(&[n], &indexed, None)
+            .into_iter()
+            .filter(|x| x.check == "broken_anchor")
+            .map(|x| x.title)
+            .collect();
+        assert_eq!(flagged.len(), 1, "only the genuinely-missing path is flagged");
+        assert!(flagged[0].contains("src/gone.rs"));
     }
 
     #[test]

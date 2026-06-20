@@ -266,7 +266,49 @@ settle-then-refetch (the worker applies async). Verified: `tsc --noEmit` clean,
 biome clean, Rust clippy clean, brain_sandbox 7/7. Runtime click-through pending a
 live `pnpm tauri dev` (cross-phase evidence).
 
-⏭ P1 remaining: external seed importer (`~/.claude`/`.codex`/`.gemini` → project
-memory; source format TBD); 3-step setup wizard (`tauri-plugin-dialog` + a
-`brain_add_project` command); the full 18-check doctor port; then a P1
-adversarial-verification pass before P2. Watcher re-arm re-creates on Rescan.
+### `brain_add_project` + multi-project (commit 59ac8e7) ✅
+`brain_add_project(path)` validates a dir, registers it, enqueues a reconcile-all
+(indexes + re-arms watcher). Pane gains a "+ Add" path-input affordance. Folder
+PICKER dialog deferred (needs tauri-plugin-dialog capability + live verification).
+
+### P1 adversarial-verification round + hardening ✅
+8-reviewer + synthesis fan-out (~946k tokens) over the committed P1 surfaces; 29
+findings (2 CRITICAL, 5 HIGH). Verified each against code; fixed the must-fix set:
+
+- **CRITICAL (one root cause, two symptoms) — Windows watcher dead + split DB keys**:
+  `registry::normalize` swapped backslashes but did NOT strip the `\\?\` verbatim
+  prefix, so the stored root was `//?/C:/…` while `to_canon` (used by the watcher's
+  `group_by_project` and `rel_path`) yields `C:/…` → longest-prefix never matched →
+  every FS event silently dropped (incremental watcher dead on Windows) AND full
+  walk vs watcher produced divergent rel keys. **HONESTY NOTE:** my P0 hardening
+  commit (ee2f4ae) *claimed* this registry fix but it never actually landed — I'd
+  fixed `rel_path` but left `normalize` untouched. Now genuinely fixed: `normalize`
+  routes through `fs::to_canon`. Added a Windows regression test (the gap existed
+  because every prior test used Unix `/work/repo` literals with no verbatim-prefix
+  control).
+- **HIGH — one bad YAML field discarded the whole frontmatter**: replaced the
+  all-or-nothing `from_str::<Frontmatter>` with a tolerant per-field projection over
+  `serde_yaml::Value` (wrong-typed field → None for that field only; gray-matter
+  parity). + closing-fence tolerates trailing whitespace.
+- **HIGH — notes never pruned**: `scan_project_memory` now collects a seen-set and
+  deletes vanished notes (`existing_note_ids`/`remove_note`), mirroring the files
+  reconcile.
+- **HIGH — zombie proposals**: `remove_note` deletes the note's dependent PENDING
+  proposals in the same tx, so the doctor stops regenerating findings for a gone note.
+- **HIGH — `index_changed` ignored directory events**: a vanished path now also
+  prunes any indexed files under its prefix (covers dir delete/rename).
+- **MEDIUM (safety) — notes bypassed the secrets gate**: the note title is now
+  `secrets::redact`-ed before `upsert_note` (the notes table is a form of indexing).
+- **MEDIUM — `broken_anchor` false positives**: symbol/line-suffixed anchors
+  (`a/b.rs#sym`, `a/b.rs:42`, `./a/b.rs`, `mod::fn`) are normalized/skipped.
+- **MEDIUM/LOW (frontend)**: doctor/resolve now poll-refetch (not a single 500ms
+  shot); `today()` uses local date; unique note React keys; add-project errors
+  surfaced. Watcher re-arm drops the old watcher first (no double-watch window).
+
+Green: clippy `-D warnings` clean · `cargo test` 237 passed / 1 pre-existing ·
+brain lib 45 · brain_sandbox 9 · tsc + biome clean.
+
+⏭ P1 deferred (logged, not blocking P2): external seed importer; folder-picker
+dialog; full 18-check doctor port; Rescan coalescing + honor-single-project-field
+(perf; current behavior is a correct superset); applied-proposal audit retention
+vs recurrence; reject_signature GC. **P1 is functionally complete + verified.**

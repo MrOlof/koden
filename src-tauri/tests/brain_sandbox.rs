@@ -219,6 +219,45 @@ fn memory_notes_parsed_stored_and_searchable() {
     );
 }
 
+/// P1 safety: a secret-shaped memory-note title is redacted before it reaches the
+/// notes table (the table is a form of indexing — CONCEPT §7.1).
+#[test]
+fn memory_note_title_secret_is_redacted() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(
+        root,
+        ".koden-memory/leak.md",
+        b"---\nid: leak\ntitle: token sk-ABCD1234efgh5678IJKL9012mnop\n---\nbody\n",
+    );
+    let db = store.path().join("index.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    scan_project_memory(&idx, PID, root);
+    let notes = list_notes_readonly(&db, Some(PID)).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(!notes[0].title.contains("sk-ABCD"), "secret leaked in title: {}", notes[0].title);
+    assert!(notes[0].title.contains("REDACTED"));
+}
+
+/// P1: a deleted memory note is pruned from the structured store on the next scan.
+#[test]
+fn deleted_note_is_pruned() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, ".koden-memory/n1.md", b"---\nid: n1\ntitle: One\n---\nx\n");
+    write(root, ".koden-memory/n2.md", b"---\nid: n2\ntitle: Two\n---\ny\n");
+    let db = store.path().join("index.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    scan_project_memory(&idx, PID, root);
+    assert_eq!(idx.note_count(PID).unwrap(), 2);
+    std::fs::remove_file(root.join(".koden-memory/n2.md")).unwrap();
+    scan_project_memory(&idx, PID, root);
+    assert_eq!(idx.note_count(PID).unwrap(), 1, "deleted note pruned");
+    assert!(list_notes_readonly(&db, Some(PID)).unwrap().iter().all(|n| n.id != "n2"));
+}
+
 /// P1 gate: a doctor finding becomes a proposal the user can approve/reject, and
 /// a rejected proposal does not reappear on the next doctor pass.
 #[test]

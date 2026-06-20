@@ -14,6 +14,7 @@ pub mod proposal;
 
 use std::path::Path;
 
+use crate::modules::brain::secrets;
 use crate::modules::brain::store::SqliteIndex;
 
 /// Canonical per-project memory folder (ADR-006 proposed name).
@@ -47,11 +48,10 @@ pub struct NoteSummary {
     pub anchors: Vec<String>,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(Default)]
 struct Frontmatter {
     id: Option<String>,
     title: Option<String>,
-    #[serde(rename = "type")]
     note_type: Option<String>,
     scope: Option<String>,
     provenance: Option<String>,
@@ -60,17 +60,52 @@ struct Frontmatter {
     revalidate_after: Option<String>,
     supersedes: Option<String>,
     superseded_by: Option<String>,
-    #[serde(default)]
     anchors: Vec<String>,
+}
+
+/// Tolerant frontmatter projection: parse to a YAML value, then pull each field
+/// independently. A single wrong-typed field yields `None`/`[]` for THAT field
+/// only — it never discards the whole block (Conductr gray-matter parity,
+/// EXECUTION_PLAN). Malformed YAML → all-None (id falls back to the stem).
+fn parse_frontmatter_map(s: &str) -> Frontmatter {
+    let val: serde_yaml::Value = serde_yaml::from_str(s).unwrap_or(serde_yaml::Value::Null);
+    let get = |k: &str| val.get(k).and_then(scalar_to_string);
+    Frontmatter {
+        id: get("id"),
+        title: get("title"),
+        note_type: get("type"),
+        scope: get("scope"),
+        provenance: get("provenance"),
+        status: get("status"),
+        created: get("created"),
+        revalidate_after: get("revalidate_after"),
+        supersedes: get("supersedes"),
+        superseded_by: get("superseded_by"),
+        anchors: val.get("anchors").map(value_to_string_list).unwrap_or_default(),
+    }
+}
+
+fn scalar_to_string(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None, // Null / Sequence / Mapping / Tagged
+    }
+}
+
+fn value_to_string_list(v: &serde_yaml::Value) -> Vec<String> {
+    match v {
+        serde_yaml::Value::Sequence(seq) => seq.iter().filter_map(scalar_to_string).collect(),
+        other => scalar_to_string(other).into_iter().collect(),
+    }
 }
 
 /// Parse a markdown note (optional leading `---` YAML frontmatter + body).
 /// `fallback_id` (typically the filename stem) is used when frontmatter has no id.
 pub fn parse(raw: &str, fallback_id: &str) -> MemoryNote {
     let (fm_str, body) = split_frontmatter(raw);
-    let fm: Frontmatter = fm_str
-        .and_then(|s| serde_yaml::from_str::<Frontmatter>(s).ok())
-        .unwrap_or_default();
+    let fm = fm_str.map(parse_frontmatter_map).unwrap_or_default();
     let title = fm
         .title
         .clone()
@@ -104,12 +139,13 @@ fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
     for (idx, _) in after_open.match_indices("---") {
         let at_line_start = idx == 0 || after_open.as_bytes()[idx - 1] == b'\n';
         let after = &after_open[idx + 3..];
-        let closes_line = after.is_empty()
-            || after.starts_with('\n')
-            || after.starts_with('\r');
+        // Tolerate trailing horizontal whitespace on the closing fence ("--- ").
+        let after_ws = after.trim_start_matches([' ', '\t']);
+        let closes_line =
+            after_ws.is_empty() || after_ws.starts_with('\n') || after_ws.starts_with('\r');
         if at_line_start && closes_line {
             let fm = &after_open[..idx];
-            let body = after.trim_start_matches(['\r', '\n']);
+            let body = after_ws.trim_start_matches(['\r', '\n']);
             return (Some(fm), body);
         }
     }
@@ -127,27 +163,40 @@ fn heading_title(body: &str) -> Option<String> {
 /// The note files themselves are made searchable by the code walk.
 pub fn scan_project_memory(index: &SqliteIndex, project_id: &str, root: &Path) -> usize {
     let dir = root.join(MEMORY_DIR);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return 0;
-    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut count = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
+            let mut note = parse(&raw, stem);
+            // Secrets gate: the notes table is a form of indexing — redact the
+            // user-controlled title before it is stored/shown (CONCEPT §7.1).
+            note.title = secrets::redact(&note.title).0;
+            let hash = crate::modules::brain::freshness::hash::hash_bytes(raw.as_bytes());
+            let rel = format!(
+                "{MEMORY_DIR}/{}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+            );
+            if index.upsert_note(project_id, &note, &rel, &hash).is_ok() {
+                seen.insert(note.id.clone());
+                count += 1;
+            }
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
-        let note = parse(&raw, stem);
-        let hash = crate::modules::brain::freshness::hash::hash_bytes(raw.as_bytes());
-        let rel = format!(
-            "{MEMORY_DIR}/{}",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("")
-        );
-        if index.upsert_note(project_id, &note, &rel, &hash).is_ok() {
-            count += 1;
+    }
+    // Reconcile-delete: drop notes (and their pending proposals) no longer on disk
+    // — mirrors the `files` reconcile so a deleted/renamed note doesn't linger.
+    if let Ok(existing) = index.existing_note_ids(project_id) {
+        for id in existing {
+            if !seen.contains(&id) {
+                let _ = index.remove_note(project_id, &id);
+            }
         }
     }
     count
@@ -190,5 +239,29 @@ mod tests {
         // unterminated frontmatter → treat whole thing as body, fallback id
         let n = parse("---\nid: x\nno closing", "fb");
         assert_eq!(n.id, "fb");
+    }
+
+    #[test]
+    fn one_bad_field_does_not_discard_the_rest() {
+        // `type` is a sequence (wrong type) — it alone becomes None, others survive.
+        let raw = "---\nid: ok\ntype:\n  - not\n  - scalar\nstatus: active\n---\nbody\n";
+        let n = parse(raw, "fb");
+        assert_eq!(n.id, "ok");
+        assert_eq!(n.status.as_deref(), Some("active"));
+        assert_eq!(n.note_type, None);
+    }
+
+    #[test]
+    fn anchors_accept_scalar_or_list() {
+        assert_eq!(parse("---\nid: a\nanchors: solo\n---\nb", "fb").anchors, vec!["solo"]);
+        let list = parse("---\nid: a\nanchors:\n  - x\n  - y\n---\nb", "fb").anchors;
+        assert_eq!(list, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn closing_fence_tolerates_trailing_whitespace() {
+        let n = parse("---\nid: x\n--- \nbody\n", "fb");
+        assert_eq!(n.id, "x");
+        assert!(n.body.contains("body"));
     }
 }

@@ -130,6 +130,32 @@ impl SqliteIndex {
         )
     }
 
+    pub fn existing_note_ids(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM notes WHERE project_id=?1")?;
+        let it = stmt.query_map([project_id], |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        Ok(v)
+    }
+
+    /// Remove a note that vanished on disk, plus its dependent PENDING proposals
+    /// (so the doctor doesn't keep regenerating findings for a gone note). One tx.
+    pub fn remove_note(&self, project_id: &str, id: &str) -> rusqlite::Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM notes WHERE project_id=?1 AND id=?2",
+            (project_id, id),
+        )?;
+        tx.execute(
+            "DELETE FROM proposals WHERE project_id=?1 AND target_id=?2 AND status='pending'",
+            (project_id, id),
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
     /// Full note records for the doctor.
     pub fn list_note_records(&self, project_id: &str) -> rusqlite::Result<Vec<NoteRecord>> {
         let mut stmt = self.conn.prepare(

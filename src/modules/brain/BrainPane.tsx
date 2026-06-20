@@ -24,8 +24,6 @@ import {
 const MIN_QUERY_LEN = 2;
 const DEBOUNCE_MS = 300;
 const STATUS_POLL_MS = 2000;
-// Worker events (doctor/resolve) are async; refetch shortly after firing one.
-const ASYNC_SETTLE_MS = 500;
 
 type Mode = "search" | "memory";
 
@@ -34,8 +32,11 @@ function basename(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
+/** Local calendar date YYYY-MM-DD (not UTC — the staleness check is day-grained). */
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 function statusLabel(report: BrainStatusReport | null): string {
@@ -67,6 +68,7 @@ export function BrainPane() {
   const [report, setReport] = useState<BrainStatusReport | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addPath, setAddPath] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [proposals, setProposals] = useState<MemoryProposal[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -161,22 +163,34 @@ export function BrainPane() {
       await brainAddProject(path);
       setAddPath("");
       setShowAdd(false);
+      setAddError(null);
       setProjects(await brainListProjects());
     } catch (e) {
-      console.error("brain_add_project failed:", e);
+      setAddError(String(e));
     }
   };
 
+  // Worker events are async; poll a few times so the result reliably shows even
+  // if the worker is slower than a single fixed delay.
+  const pollMemory = useCallback(() => {
+    let i = 0;
+    const tick = () => {
+      void loadMemory();
+      if (++i < 4) setTimeout(tick, 500);
+    };
+    setTimeout(tick, 400);
+  }, [loadMemory]);
+
   const runDoctor = () => {
     void brainDoctor(project, today());
-    setTimeout(() => void loadMemory(), ASYNC_SETTLE_MS);
+    pollMemory();
   };
 
   const resolve = (p: MemoryProposal, reject: boolean) => {
     void brainResolveProposal(p.project, p.signature, reject);
-    // optimistic removal; reconcile shortly after the worker applies it
+    // optimistic removal; the poll reconciles once the worker applies it
     setProposals((prev) => prev.filter((x) => x.signature !== p.signature));
-    setTimeout(() => void loadMemory(), ASYNC_SETTLE_MS);
+    pollMemory();
   };
 
   return (
@@ -262,6 +276,9 @@ export function BrainPane() {
             Add
           </button>
         </div>
+      ) : null}
+      {addError ? (
+        <div className="shrink-0 px-2 pt-1 text-[10px] text-red-500">{addError}</div>
       ) : null}
 
       {mode === "search" ? (
@@ -476,7 +493,7 @@ function MemoryView({ notes, proposals, onRunDoctor, onResolve }: MemoryViewProp
           ) : (
             <div className="flex flex-col gap-1">
               {notes.map((n) => (
-                <div key={`${n.path}`} className="rounded border px-2 py-1 text-xs">
+                <div key={`${n.id}:${n.path}`} className="rounded border px-2 py-1 text-xs">
                   <div className="flex items-center gap-1.5">
                     {n.note_type ? (
                       <span className="rounded bg-muted px-1 py-0.5 text-[10px] uppercase text-muted-foreground">
