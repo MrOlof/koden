@@ -139,3 +139,24 @@ incremental watcher).
 
 Re-green: `clippy --all-targets --locked -D warnings` clean · `cargo test --locked`
 **220 passed, 1 pre-existing** (symlink) · 28 brain tests.
+
+### P0 §6.5 offline sandbox (real-run proof) ✅
+Extracted the indexing pipeline into an `AppHandle`-free seam
+`brain::worker::index_dir(index, project_id, root) -> IndexStats` (worker calls it;
+tests drive it) + `SqliteIndex::project_fingerprint`. Added `tests/brain_sandbox.rs`
+— 4 integration tests over materialized fixture repos in a scratch TempDir,
+exercising the **real** walk→sniff→blake3→redact→index→reconcile pipeline:
+- real source indexed; generated/`node_modules`/`dist`/binary(NUL)/oversized(>1MB)
+  all excluded (verified via per-file sentinel tokens);
+- **secrets gate proven from a real walk**: a denylisted `.env` is never read and an
+  inline `sk-…` key is redacted — none retrievable via search — while normal code
+  stays searchable;
+- **incremental == full rebuild**: after modify+add+delete on disk, a reconciled
+  index has the same file count, byte-identical `project_fingerprint`, and same
+  results as a fresh full rebuild (prune verified);
+- fingerprint determinism across rebuilds (P3 cache-stability proxy).
+Green: clippy clean · `cargo test --test brain_sandbox` 4/4.
+
+⏭ P0 remaining: Brain pane (frontend) · benchmark harness (labeled ground-truth +
+negative control) · larger fixture catalog + the `pnpm tauri dev` real-app run +
+real-kill crash sim + real-key smoke (cross-phase DoD evidence).

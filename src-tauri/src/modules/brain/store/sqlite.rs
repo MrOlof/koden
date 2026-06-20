@@ -105,6 +105,22 @@ impl SqliteIndex {
         )
     }
 
+    /// The workspace aggregate fingerprint for a project (blake3 over sorted
+    /// `(path, hash)`), the basis of P3's cache-stable gist key. CONCEPT [DP-13].
+    pub fn project_fingerprint(&self, project_id: &str) -> rusqlite::Result<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, hash FROM files WHERE project_id=?1")?;
+        let it = stmt.query_map([project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for x in it {
+            entries.push(x?);
+        }
+        Ok(crate::modules::brain::freshness::aggregate_fingerprint(&mut entries))
+    }
+
     /// All indexed paths for a project (used by reconcile to detect deletions).
     pub fn existing_paths(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self

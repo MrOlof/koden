@@ -169,8 +169,19 @@ fn warm_population(app: &AppHandle, index: &SqliteIndex) {
     }
 }
 
-fn index_project(index: &SqliteIndex, proj: &Project) {
-    let root = std::path::Path::new(&proj.root);
+/// Counts from one indexing pass.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct IndexStats {
+    pub indexed: usize,
+    pub pruned: usize,
+}
+
+/// The per-project indexing pipeline: walk → binary-sniff → blake3 → secrets
+/// redact → index → reconcile-delete. Deliberately free of `AppHandle`/registry
+/// so the deterministic offline sandbox + integration tests drive the **real**
+/// pipeline (BUILD-PROMPT §6.5). `root` is the absolute project root; `project_id`
+/// the stable id the rows are keyed under.
+pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) -> IndexStats {
     let files = walk::walk_files(root);
     let mut indexed = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -191,7 +202,7 @@ fn index_project(index: &SqliteIndex, proj: &Project) {
         if nredact > 0 {
             log::debug!("brain: redacted {nredact} secret-shaped span(s) in {rel}");
         }
-        if let Err(e) = index.index_file(&proj.id, &rel, &redacted, &file_hash, bytes.len() as i64) {
+        if let Err(e) = index.index_file(project_id, &rel, &redacted, &file_hash, bytes.len() as i64) {
             log::debug!("brain: index_file failed for {rel}: {e}");
             continue;
         }
@@ -202,14 +213,24 @@ fn index_project(index: &SqliteIndex, proj: &Project) {
     // (CONCEPT Flow B delta; EXECUTION_PLAN §3 SearchIndex::remove). Without this,
     // a deleted/moved file would match searches forever.
     let mut pruned = 0usize;
-    if let Ok(existing) = index.existing_paths(&proj.id) {
+    if let Ok(existing) = index.existing_paths(project_id) {
         for rel in existing {
-            if !seen.contains(&rel) && index.remove_file(&proj.id, &rel).unwrap_or(false) {
+            if !seen.contains(&rel) && index.remove_file(project_id, &rel).unwrap_or(false) {
                 pruned += 1;
             }
         }
     }
-    log::info!("brain: project '{}' indexed {indexed}, pruned {pruned}", proj.name);
+    IndexStats { indexed, pruned }
+}
+
+fn index_project(index: &SqliteIndex, proj: &Project) {
+    let stats = index_dir(index, &proj.id, std::path::Path::new(&proj.root));
+    log::info!(
+        "brain: project '{}' indexed {}, pruned {}",
+        proj.name,
+        stats.indexed,
+        stats.pruned
+    );
 }
 
 fn rel_path(root: &std::path::Path, path: &std::path::Path) -> String {
