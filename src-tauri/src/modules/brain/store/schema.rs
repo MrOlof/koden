@@ -24,17 +24,22 @@ CREATE TABLE IF NOT EXISTS files (
     fts_rowid  INTEGER NOT NULL,
     PRIMARY KEY (project_id, path)
 );
-CREATE INDEX IF NOT EXISTS files_fts_rowid ON files(fts_rowid);
+-- UNIQUE: one FTS document per file row; the search JOIN assumes a 1:1 mapping.
+CREATE UNIQUE INDEX IF NOT EXISTS files_fts_rowid ON files(fts_rowid);
 CREATE INDEX IF NOT EXISTS files_project   ON files(project_id);
 
 -- Lexical FTS5 index over PRE-TOKENIZED streams (CONCEPT [DP-3]); columns carry
--- already split/stemmed token streams. Per-column bm25() weights provide the
--- first-class path/symbol/content field weighting. `symbols` is empty until P2
--- (tree-sitter) populates it.
+-- already split/stemmed token streams. The `ascii` tokenizer is a near-passthrough
+-- (split on non-alnum, no folding) so it re-splits our space-joined ASCII token
+-- stream into the exact same terms on both the index and query sides — required
+-- by EXECUTION_PLAN §0.6 (unicode61's folding/diacritic handling would desync the
+-- two sides once a stored token contains non-ASCII). Per-column bm25() weights
+-- give the first-class path/symbol/content field weighting. `symbols` is empty
+-- until P2 (tree-sitter) populates it.
 CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
     path,
     symbols,
     content,
-    tokenize = 'unicode61'
+    tokenize = 'ascii'
 );
 "#;

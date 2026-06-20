@@ -4,9 +4,10 @@
 //!
 //! `score(d) = Σ_legs w_leg · 1/(k + rank_d_in_leg)`
 //!
-//! Deterministic tie-break: score descending, then id ascending — mirrors
-//! `rrf.ts:25-27`/`lexical.ts:217` so results are stable across runs (required
-//! by the cache-stable-gist guarantee downstream).
+//! Deterministic tie-break: score descending, then id ascending by Rust code-point
+//! order. (Conductr's `rrf.ts:27` uses JS `localeCompare`; for the ASCII
+//! `project\0path` ids used here the two orders are identical. The only hard
+//! requirement is determinism — stable across runs for the cache-stable gist.)
 //!
 //! BM25 itself is delegated to SQLite FTS5's built-in `bm25()` (which hardcodes
 //! k1=1.2, b=0.75 — identical to Conductr's `K1`/`B`, `lexical.ts:11-12`) with

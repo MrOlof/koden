@@ -1,6 +1,6 @@
 //! Lexical tokenizer — a faithful Rust port of Conductr's
 //! `src/lib/search/lexical.ts` — `tokenize`/`pushToken`/`stemLight`/`splitCamel`
-//! plus the 38-word stoplist. Applied identically to code and notes so identifier
+//! plus its stoplist. Applied identically to code and notes so identifier
 //! retrieval holds. This is [DP-1] in CONCEPT §4.1a.
 //!
 //! Behaviour mirrored exactly:
@@ -15,9 +15,9 @@
 //! tokens are not substrings of the source and so cannot ride an FTS5 external
 //! tokenizer.
 
-/// 38-word stoplist (verbatim from `lexical.ts:15-53`). Kept short so we never
-/// drop identifiers. (A 51-word superset exists in Conductr's query-expansion
-/// layer; the indexing tokenizer uses this set.)
+/// Stoplist (verbatim from `lexical.ts:15-53`; matches Conductr's indexing set).
+/// Kept short so we never drop identifiers. (A larger superset exists in
+/// Conductr's query-expansion layer; the indexing tokenizer uses this set.)
 const STOPWORDS: &[&str] = &[
     "the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for", "on",
     "with", "that", "this", "as", "be", "by", "at", "from", "are", "was",

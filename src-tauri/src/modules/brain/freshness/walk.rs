@@ -11,9 +11,9 @@ use crate::modules::brain::secrets;
 
 /// Cap on directory entries scanned per project (mirrors `fs/search.rs` bounds).
 pub const MAX_SCANNED: usize = 50_000;
-/// Per-file size cap for indexing — the Brain's own cap (a new invention per
-/// EXECUTION_PLAN §0.2; do NOT confuse with `git/types.rs` MAX_FILE_BYTES=2MB).
-pub const MAX_INDEX_FILE_BYTES: u64 = 256 * 1024;
+/// Per-file size cap for indexing (CONCEPT §8 [DP-27]: "skip > 1 MB"). The Brain's
+/// own cap — do NOT confuse with `git/types.rs` MAX_FILE_BYTES=2MB.
+pub const MAX_INDEX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Base directories never indexed even if not gitignored (CONCEPT §8,
 /// BUILD-PROMPT §13.8). `.git` is also handled by the ignore walker.
@@ -52,6 +52,16 @@ pub fn walk_files(root: &Path) -> Vec<PathBuf> {
         .hidden(false) // index dotfiles (e.g. config); the denylist guards secrets
         .follow_links(false)
         .add_custom_ignore_filename(".kodenignore")
+        // Prune heavy dirs during traversal (not just post-yield) so a
+        // non-gitignored node_modules is never descended — mirrors fs/search.rs.
+        .filter_entry(|dent| {
+            dent.depth() == 0
+                || dent
+                    .file_name()
+                    .to_str()
+                    .map(|n| !BASE_SKIP_DIRS.contains(&n))
+                    .unwrap_or(true)
+        })
         .build();
     for entry in walker {
         scanned += 1;

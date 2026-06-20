@@ -5,6 +5,7 @@
 
 use tauri::State;
 
+use crate::modules::brain::events::BrainEvent;
 use crate::modules::brain::registry::Project;
 use crate::modules::brain::store;
 use crate::modules::brain::{BrainState, BrainStatus, Hit};
@@ -72,5 +73,18 @@ pub fn brain_search(
             log::debug!("brain_search soft error: {e}");
             Ok(Vec::new())
         }
+    }
+}
+
+/// Trigger a full reconcile (add/change/delete) of all registered projects, or a
+/// single project. Enqueues onto the worker — non-blocking.
+#[tauri::command]
+pub fn brain_rescan(state: State<BrainState>, project: Option<String>) -> Result<(), String> {
+    let guard = state.tx.lock().map_err(|_| "brain tx poisoned".to_string())?;
+    match guard.as_ref() {
+        Some(tx) => tx
+            .send(BrainEvent::Rescan { project })
+            .map_err(|e| format!("brain worker unavailable: {e}")),
+        None => Err("brain not started yet".to_string()),
     }
 }

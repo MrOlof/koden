@@ -121,6 +121,9 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
 pub fn run() {
     let cli_dir = parse_launch_dir();
     workspace::init_launch_cwd(cli_dir.as_deref());
+    // Cloned for the Brain worker's P0 project seed (the authorized launch dir),
+    // since `cli_dir` is moved into LaunchDir state later in the builder chain.
+    let brain_seed_dir = cli_dir.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
@@ -144,7 +147,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             // macOS skips parent() for the settings window, so tie its lifecycle
             // to the main window here instead. Other platforms keep parent().
             #[cfg(target_os = "macos")]
@@ -167,7 +170,7 @@ pub fn run() {
             // Koden Brain — the in-process Librarian. Opens its store, warms the
             // lexical index, and serves gist/search to agents. Fail-open; never
             // blocks first paint (spawn returns immediately). ADR-006.
-            brain::worker::spawn_brain_worker(app.handle().clone());
+            brain::worker::spawn_brain_worker(app.handle().clone(), brain_seed_dir);
             Ok(())
         })
         .manage(pty::PtyState::default())
@@ -199,6 +202,7 @@ pub fn run() {
             brain::commands::brain_search,
             brain::commands::brain_index_status,
             brain::commands::brain_list_projects,
+            brain::commands::brain_rescan,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

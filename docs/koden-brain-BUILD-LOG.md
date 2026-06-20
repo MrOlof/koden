@@ -98,3 +98,44 @@ Evidence (this machine, Windows, `feat/koden-brain`):
 sandbox + fixture repos + adversarial Auditor proof of the secrets gate from a
 real run; benchmark harness (labeled ground-truth + negative control). Watcher
 freshness is P1.
+
+### Adversarial verification round (mandatory, §2/§13.6) ✅
+12-agent workflow (8 reviewers + 3 designers + synthesis) over the committed P0
+code; ~1.27M tokens. Surfaced 32 findings (3 CRITICAL, 3 HIGH). Triaged and
+**must-fix items fixed this session**, re-verified green:
+
+- **CRITICAL — secrets gate leaks** (the hard gate): the redactor's 20-char floor,
+  `has_letter && has_digit` AND-gate, and separator-splitting let short/all-letter/
+  punctuation-split secrets reach the index. Rewrote `secrets.rs` with three
+  detectors (prefix scan · secret-named `key=value` whole-value redaction ·
+  FP-aware high-entropy) + expanded denylist. Added the **planted-secrets real-run
+  proof** (`planted_secrets_never_reach_the_index`: redact→index_file→search shows
+  no secret retrievable, while a git-SHA control + surrounding identifiers stay).
+  Documented residual gap honestly (bare in-code pure-hex / `/`-split secret not in
+  a secret-named assignment).
+- **HIGH — Windows pty→project resolution always failed**: `\\?\` verbatim prefix
+  wasn't stripped from registry roots. Routed `registry` through `fs::to_canon`
+  (canonicalize both root and cwd).
+- **MEDIUM — reconcile never deleted**: removed/moved files matched forever. Added
+  `SqliteIndex::{existing_paths,remove_file}` + prune pass in `index_project`
+  (+ `remove_file_prunes_index` test).
+- **MEDIUM — walk didn't prune**: added `.filter_entry` so non-gitignored
+  `node_modules` is never descended.
+- **MEDIUM — FTS5 tokenizer**: `unicode61`→`ascii` (passthrough; matches §0.6,
+  avoids index/query desync). UNIQUE `files_fts_rowid` index.
+- **MEDIUM — readonly conns lacked `busy_timeout`**: added 5s (no silent empty on
+  transient lock).
+- **MEDIUM — seed used `std::env::current_dir()`**: could index an install dir /
+  fs root on a packaged build. Now seeds from the authorized launch dir, falling
+  back to cwd only if it has a project marker and is sane (not fs-root/home).
+- **LOW — fail-open + dead code**: tick-thread spawn no longer `.expect`s (logs +
+  continues); wired `brain_rescan` command (was dead `tx` plumbing); softened two
+  over-claiming doc comments (IDF, tie-break) and the stoplist count.
+
+Deferred (lower-risk / later phase, logged): non-ASCII identifier tokenization
+(bundle with the ascii decision), per-file stat/tx micro-opt (P1 watcher), Hit
+shape enrichment (later phase), Rescan event-loop starvation (superseded by the P1
+incremental watcher).
+
+Re-green: `clippy --all-targets --locked -D warnings` clean · `cargo test --locked`
+**220 passed, 1 pre-existing** (symlink) · 28 brain tests.

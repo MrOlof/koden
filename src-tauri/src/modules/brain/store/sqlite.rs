@@ -2,9 +2,13 @@
 //! store. The worker holds the single WRITER connection; command threads open
 //! their own READ-ONLY connections (WAL → wait-free reads). CONCEPT §8.
 //!
-//! BM25 is FTS5's built-in `bm25()` (k1=1.2/b=0.75, matching Conductr) with
-//! first-class per-column weights; the two BM25 legs (path+symbols vs content)
-//! are fused by weighted RRF (`rank.rs`).
+//! BM25 is FTS5's built-in `bm25()`: k1=1.2/b=0.75 match Conductr's K1/B
+//! (`lexical.ts:11-12`). FTS5 uses the classic BM25 IDF, whereas Conductr uses the
+//! 1+-smoothed BM25+ IDF (`lexical.ts:205`); the difference only reorders very
+//! common terms and is ranking-equivalent for code corpora — a [DP-2] choice,
+//! revisit if the relevance benchmark shows a gap. Per-column weights give the
+//! first-class field weighting; the two legs (path+symbols vs content) fuse via
+//! weighted RRF (`rank.rs`).
 
 use std::path::Path;
 
@@ -99,6 +103,44 @@ impl SqliteIndex {
             [project_id],
             |r| r.get(0),
         )
+    }
+
+    /// All indexed paths for a project (used by reconcile to detect deletions).
+    pub fn existing_paths(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM files WHERE project_id=?1")?;
+        let it = stmt.query_map([project_id], |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        Ok(v)
+    }
+
+    /// Remove a file's manifest row + its FTS document (deleted/moved on disk).
+    /// The reconcile path calls this so removed files stop matching searches and
+    /// `file_count` stays accurate. Returns whether a row was removed.
+    pub fn remove_file(&self, project_id: &str, rel_path: &str) -> rusqlite::Result<bool> {
+        let rowid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT fts_rowid FROM files WHERE project_id=?1 AND path=?2",
+                (project_id, rel_path),
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(rid) = rowid else {
+            return Ok(false);
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM code_fts WHERE rowid=?1", [rid])?;
+        tx.execute(
+            "DELETE FROM files WHERE project_id=?1 AND path=?2",
+            (project_id, rel_path),
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 }
 
@@ -207,10 +249,14 @@ pub fn search_with_conn(
 }
 
 fn open_readonly(db_path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
+    )?;
+    // Wait out a transient writer lock instead of returning a silent empty
+    // result during indexing/checkpoint (esp. on Windows).
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(conn)
 }
 
 /// Search via a fresh read-only connection (command-thread path). Fail-soft: if
@@ -302,5 +348,66 @@ mod tests {
         let (_dir, path) = temp_db();
         let idx = SqliteIndex::open(&path).expect("open");
         assert!(search_with_conn(&idx.conn, None, "   ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_file_prunes_index() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "a.rs", "alpha", "h1", 5).unwrap();
+        idx.index_file("p", "b.rs", "bravo", "h2", 5).unwrap();
+        assert_eq!(idx.existing_paths("p").unwrap().len(), 2);
+        assert!(idx.remove_file("p", "a.rs").unwrap());
+        assert_eq!(idx.file_count("p").unwrap(), 1);
+        assert!(
+            search_with_conn(&idx.conn, Some("p"), "alpha", 10).unwrap().is_empty(),
+            "removed file must stop matching"
+        );
+        assert!(!search_with_conn(&idx.conn, Some("p"), "bravo", 10).unwrap().is_empty());
+        assert!(!idx.remove_file("p", "a.rs").unwrap(), "removing twice is a no-op");
+    }
+
+    /// HARD GATE proof from a real index run: the worker pipeline is
+    /// `secrets::redact()` → `index_file()`. Plant secrets, run that exact
+    /// sequence, then prove via the real search path that no secret material is
+    /// retrievable, while surrounding code + a git-SHA control remain searchable.
+    #[test]
+    fn planted_secrets_never_reach_the_index() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        let src = concat!(
+            "const apiKey = \"sk-ABCD1234efgh5678IJKL9012mnop\";\n",
+            "let password = \"Tr0ub4dor!3Kx9Lm2Qp\";\n",
+            "// commit a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0\n",
+            "pub fn validateUserCredentials(input: &str) -> bool { true }\n",
+        );
+        let (redacted, n) = crate::modules::brain::secrets::redact(src);
+        assert!(n >= 2, "expected >=2 redactions, got {n}: {redacted}");
+        idx.index_file("p", "src/config.ts", &redacted, "h", redacted.len() as i64)
+            .unwrap();
+
+        // No secret material survives in the index (real-run proof via search).
+        for leaked in ["sk", "troubdor", "3kx9lm2qp", "abcd1234efgh5678ijkl9012mnop"] {
+            assert!(
+                search_with_conn(&idx.conn, Some("p"), leaked, 10).unwrap().is_empty(),
+                "secret token '{leaked}' is retrievable from the index"
+            );
+        }
+        // Redaction is surgical: surrounding identifiers + the git-SHA control stay.
+        assert!(
+            !search_with_conn(&idx.conn, Some("p"), "validate credentials", 10).unwrap().is_empty(),
+            "non-secret identifiers must remain searchable"
+        );
+        assert!(
+            !search_with_conn(
+                &idx.conn,
+                Some("p"),
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+                10
+            )
+            .unwrap()
+            .is_empty(),
+            "git-SHA must-not-redact control must remain searchable"
+        );
     }
 }

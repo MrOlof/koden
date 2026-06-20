@@ -21,11 +21,13 @@ const TICK_SECS: u64 = 60;
 /// Binary sniff window — a NUL byte in the first 8 KiB means "not text".
 const BINARY_SNIFF_BYTES: usize = 8192;
 
-/// Spawn the worker. Mirrors `usage::poll::spawn_poller` exactly.
-pub fn spawn_brain_worker(app: AppHandle) {
+/// Spawn the worker. Mirrors `usage::poll::spawn_poller`. `launch_dir` is the
+/// authorized launch directory (the dir the user opened); the brain seeds its
+/// P0 project from it rather than blindly indexing the process cwd.
+pub fn spawn_brain_worker(app: AppHandle, launch_dir: Option<String>) {
     std::thread::Builder::new()
         .name("koden-brain-worker".into())
-        .spawn(move || brain_loop(app))
+        .spawn(move || brain_loop(app, launch_dir))
         .expect("spawn koden-brain worker thread");
 }
 
@@ -37,7 +39,7 @@ fn set_status(app: &AppHandle, status: BrainStatus) {
     }
 }
 
-fn brain_loop(app: AppHandle) {
+fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     // 1. Resolve + open the store (fail-open → Degraded, never panic).
     let db_path = match app.path().app_local_data_dir() {
         Ok(dir) => dir.join("koden").join("brain").join("index.sqlite"),
@@ -83,22 +85,26 @@ fn brain_loop(app: AppHandle) {
         });
     }
 
-    // 4. Periodic self-tick (flush WAL / future ledger reconcile).
+    // 4. Periodic self-tick (flush WAL / future ledger reconcile). Fail-open: if
+    // the thread can't spawn, carry on without the periodic checkpoint.
     {
         let tx_tick = tx.clone();
-        std::thread::Builder::new()
+        let tick = std::thread::Builder::new()
             .name("koden-brain-tick".into())
             .spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(TICK_SECS));
                 if tx_tick.send(BrainEvent::Tick).is_err() {
                     break;
                 }
-            })
-            .expect("spawn koden-brain tick thread");
+            });
+        if let Err(e) = tick {
+            log::warn!("brain: tick thread spawn failed ({e}); no periodic checkpoint");
+        }
     }
 
-    // 5. Bootstrap registry (P0: launch cwd; P1 wizard manages canonical source).
-    seed_registry(&app);
+    // 5. Bootstrap registry (P0: authorized launch dir; P1 wizard manages the
+    // canonical multi-project source).
+    seed_registry(&app, launch_dir.as_deref());
 
     // 6. Warm population — project by project so the first is searchable early.
     warm_population(&app, &index);
@@ -115,17 +121,40 @@ fn brain_loop(app: AppHandle) {
     }
 }
 
-fn seed_registry(app: &AppHandle) {
+fn seed_registry(app: &AppHandle, launch_dir: Option<&str>) {
     let Some(state) = app.try_state::<BrainState>() else {
         return;
     };
-    // P0 seed: the process launch dir. The P1 wizard + a `brain_rescan` command
-    // populate the canonical multi-project registry.
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(p) = state.registry.add_root(&cwd) {
-            log::info!("brain: seeded project '{}' ({})", p.name, p.root);
-        }
+    // Prefer the explicit authorized launch dir. Fall back to the process cwd
+    // ONLY if it looks like a project root — never blindly index a packaged app's
+    // install dir, a filesystem root, or the home dir.
+    let root = launch_dir
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| std::env::current_dir().ok().filter(|p| has_project_marker(p)));
+    match root {
+        Some(p) if is_sane_root(&p) => match state.registry.add_root(&p) {
+            Some(proj) => log::info!("brain: seeded project '{}' ({})", proj.name, proj.root),
+            None => log::warn!("brain: failed to seed project for {}", p.display()),
+        },
+        _ => log::info!("brain: no seed project (awaiting wizard / brain_rescan)"),
     }
+}
+
+fn has_project_marker(p: &std::path::Path) -> bool {
+    [".git", "package.json", "Cargo.toml", "pyproject.toml", "go.mod", ".kodenignore"]
+        .iter()
+        .any(|m| p.join(m).exists())
+}
+
+fn is_sane_root(p: &std::path::Path) -> bool {
+    if p.parent().is_none() {
+        return false; // filesystem root
+    }
+    if dirs::home_dir().as_deref() == Some(p) {
+        return false; // bare home dir — the wizard handles intentional home workspaces
+    }
+    true
 }
 
 fn warm_population(app: &AppHandle, index: &SqliteIndex) {
@@ -144,7 +173,9 @@ fn index_project(index: &SqliteIndex, proj: &Project) {
     let root = std::path::Path::new(&proj.root);
     let files = walk::walk_files(root);
     let mut indexed = 0usize;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in files {
+        let rel = rel_path(root, &path);
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
@@ -156,15 +187,29 @@ fn index_project(index: &SqliteIndex, proj: &Project) {
         let file_hash = hash::hash_bytes(&bytes);
         let content = String::from_utf8_lossy(&bytes);
         // Secrets gate: redact secret-shaped content before it is tokenized/stored.
-        let (redacted, _n) = secrets::redact(&content);
-        let rel = rel_path(root, &path);
+        let (redacted, nredact) = secrets::redact(&content);
+        if nredact > 0 {
+            log::debug!("brain: redacted {nredact} secret-shaped span(s) in {rel}");
+        }
         if let Err(e) = index.index_file(&proj.id, &rel, &redacted, &file_hash, bytes.len() as i64) {
             log::debug!("brain: index_file failed for {rel}: {e}");
             continue;
         }
+        seen.insert(rel);
         indexed += 1;
     }
-    log::info!("brain: indexed {indexed} file(s) for project '{}'", proj.name);
+    // Reconcile deletions: prune index rows for files no longer present on disk
+    // (CONCEPT Flow B delta; EXECUTION_PLAN §3 SearchIndex::remove). Without this,
+    // a deleted/moved file would match searches forever.
+    let mut pruned = 0usize;
+    if let Ok(existing) = index.existing_paths(&proj.id) {
+        for rel in existing {
+            if !seen.contains(&rel) && index.remove_file(&proj.id, &rel).unwrap_or(false) {
+                pruned += 1;
+            }
+        }
+    }
+    log::info!("brain: project '{}' indexed {indexed}, pruned {pruned}", proj.name);
 }
 
 fn rel_path(root: &std::path::Path, path: &std::path::Path) -> String {
