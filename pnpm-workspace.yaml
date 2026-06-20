@@ -1,0 +1,8 @@
+minimumReleaseAge: 4320
+minimumReleaseAgeStrict: true
+allowBuilds:
+  edgedriver: set this to true or false
+  esbuild: true
+  geckodriver: set this to true or false
+  msgpackr-extract: false
+  msw: true

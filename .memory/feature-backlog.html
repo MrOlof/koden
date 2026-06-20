@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Terax Workspace — Feature Backlog</title>
+<style>
+  :root {
+    --bg: #0e1416;
+    --panel: #141d20;
+    --panel-2: #182327;
+    --border: #243135;
+    --ink: #dfe7e9;
+    --ink-dim: #93a4a8;
+    --ink-faint: #6b7c80;
+    --accent: #5fb8a8;
+    --s: #6fcf97;
+    --m: #f2c94c;
+    --l: #eb8a6b;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.65 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Inter, system-ui, sans-serif;
+    padding: 48px 20px 80px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 22px; margin-bottom: 30px; }
+  h1 { font-size: 25px; margin: 0 0 6px; letter-spacing: -0.01em; font-weight: 650; }
+  .sub { color: var(--ink-dim); font-size: 13.5px; }
+  .sub b { color: var(--accent); font-weight: 600; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; font-size: 12.5px; color: var(--ink-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-faint); font-weight: 600; margin: 38px 0 14px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 12px; transition: border-color .15s, background .15s;
+  }
+  .card:hover { border-color: #31444a; background: var(--panel-2); }
+  .card-top { display: flex; align-items: baseline; gap: 11px; margin-bottom: 6px; }
+  .num {
+    font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 700;
+    font-size: 13px; min-width: 22px;
+  }
+  .title { font-weight: 600; font-size: 15.5px; flex: 1; letter-spacing: -0.005em; }
+  .effort {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent;
+  }
+  .effort.S { color: var(--s); background: color-mix(in srgb, var(--s) 14%, transparent); border-color: color-mix(in srgb, var(--s) 35%, transparent); }
+  .effort.M { color: var(--m); background: color-mix(in srgb, var(--m) 14%, transparent); border-color: color-mix(in srgb, var(--m) 35%, transparent); }
+  .effort.L { color: var(--l); background: color-mix(in srgb, var(--l) 14%, transparent); border-color: color-mix(in srgb, var(--l) 35%, transparent); }
+  .desc { color: var(--ink-dim); font-size: 14px; margin: 0; }
+  .desc .caveat { color: var(--l); }
+  code {
+    font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px; background: #0c1113; border: 1px solid var(--border);
+    border-radius: 5px; padding: 1px 5px; color: #cdd9da;
+  }
+  .pick {
+    margin-top: 34px; background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .pick .lbl { color: var(--accent); font-weight: 650; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .pick p { margin: 7px 0 0; font-size: 14px; color: var(--ink); }
+  footer { margin-top: 40px; color: var(--ink-faint); font-size: 12.5px; border-top: 1px solid var(--border); padding-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Terax Workspace — Feature Backlog</h1>
+    <div class="sub">Proposals · 2026-06-16 · <b>nothing built — awaiting your approval</b></div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--s)"></span> S — a sitting</span>
+      <span><span class="dot" style="background:var(--m)"></span> M — about a day</span>
+      <span><span class="dot" style="background:var(--l)"></span> L — multi-day</span>
+      <span style="color:var(--ink-faint)">Line icons only · keyboard-first · crash-safe by default</span>
+    </div>
+  </header>
+
+  <h2>A · Natural extensions of what shipped tonight</h2>
+
+  <div class="card">
+    <div class="card-top"><span class="num">1</span><span class="title">Agents panel: "active only" toggle + group by space/tab</span><span class="effort S">S–M</span></div>
+    <p class="desc">Pre-registration now shows <em>every</em> terminal, which is what you asked for but can get busy with many shells. A one-click "active only" filter (hide idle shells) and a group-by-space header keeps it scannable. The natural companion to the pre-registration, and the first thing I'd add if the panel feels noisy.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">2</span><span class="title">Live token + cost meter per agent</span><span class="effort M">M</span></div>
+    <p class="desc">The dock already has the fields (<code>tokens</code>, <code>cost</code>) — they just read 0. Parse claude's usage (or carry it on the bus/OSC) and show live per-agent + a workspace total. You care about token budgets; this makes a Director run's spend visible as it happens.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">3</span><span class="title">Tasks ↔ terminals: "run this task" + assignment</span><span class="effort M">M</span></div>
+    <p class="desc">Right-click a task → "send to terminal" (pick a running terminal, inject the text as a prompt/command). Optionally tag a task with the agent working it, so the Tasks tab and the Agents panel reference each other. Bridges planning and doing without copy-paste.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">4</span><span class="title">Desktop notification on needs-input / finished (gated)</span><span class="effort M">M</span></div>
+    <p class="desc">The taskbar flash shipped tonight; the OS-notification plumbing already exists in the agents module. Wire it to the orchestration foundation so you get a real notification (with the prompt text) when an agent needs you — even with Terax in the background. Needs the deferred OSC-prompt-text capture to show <em>what</em> it's asking. Respects the existing "Coding agent notifications" toggle.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">5</span><span class="title">Activity log / "while you were away" timeline</span><span class="effort M">M</span></div>
+    <p class="desc">A scrollback of agent events across all terminals (started · needed input · finished · exited, with timestamps and one-click jump). Complements the flash: the flash says "come back," the log says "here's everything that happened."</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">6</span><span class="title">Inline markdown checkboxes in Notes</span><span class="effort S">S–M</span></div>
+    <p class="desc"><code>- [ ]</code> / <code>- [x]</code> rendered clickable inside a note (Streamdown is already in the tree). Throwaway capture mid-note, distinct from the durable Tasks tab. <span class="caveat">Caveat: turns the raw textarea into a rendered surface — a real UX change to Notes, so it's a deliberate choice, not a freebie.</span></p>
+  </div>
+
+  <h2>B · New directions</h2>
+
+  <div class="card">
+    <div class="card-top"><span class="num">7</span><span class="title">Named workspace snapshots</span><span class="effort L">M–L</span></div>
+    <p class="desc">Save the whole layout (tabs + panes + notes + tasks) under a name — "Microsoft work", "IoT", "NorrShift" — and restore it in one action. You juggle many projects; faster than rebuilding a space by hand. Builds directly on the crash-safe persistence work.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">8</span><span class="title">Global quick-capture hotkey → Notes/Tasks</span><span class="effort S">S–M</span></div>
+    <p class="desc">A single shortcut opens a tiny capture box (command-palette style) to jot a note or task from anywhere, no tab switch. The Notepad-replacement instinct behind your idea #3, made instant.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">9</span><span class="title">Per-space orchestration scoping</span><span class="effort M">M</span></div>
+    <p class="desc">Scope the Agents panel / topology to the active space, with a per-space rollup. Keeps the Director + team for one project from bleeding into another. (Already on the original roadmap.)</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">10</span><span class="title">Answer a prompt from the dock (v2 of notifications)</span><span class="effort L">L</span></div>
+    <p class="desc">When an agent is waiting, show its question in the dock and let you pick an option / type a reply that's injected into the PTY — without switching to the terminal. The big one; deferred because injecting keystrokes safely is real work, but it's the logical endpoint of the notification thread.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">11</span><span class="title">Topology graph, for real</span><span class="effort L">L</span></div>
+    <p class="desc">Now that agents-everywhere is solid, make the graph live: terminals as nodes, Director→subagent edges from the bus, message-flow edges, status color, click-to-jump. You flagged this as "after detection works" — detection now works.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-top"><span class="num">12</span><span class="title">Director cost / turn guardrails</span><span class="effort M">M</span></div>
+    <p class="desc">Set a token or USD ceiling for a Director run; warn or pause when it's hit. Pairs with #2.</p>
+  </div>
+
+  <div class="pick">
+    <div class="lbl">Recommended first pick</div>
+    <p>If you want momentum, <strong>A1 (active-only filter)</strong> is the smallest thing that makes tonight's agent-visibility change feel finished, and <strong>A4 (desktop notifications)</strong> is the highest-value next step on the notification thread. Both are low-risk and build straight on what shipped.</p>
+  </div>
+
+  <footer>
+    Source: <code>.memory/feature-backlog.md</code> · ADR-001 implementation status in <code>.memory/decisions/ADR-001-multi-agent-workspace-feature-direction.md</code>
+  </footer>
+</div>
+</body>
+</html>
