@@ -110,6 +110,8 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
 
     // 6. Warm population — project by project so the first is searchable early.
     warm_population(&app, &index);
+    // Seed the review inbox with structural doctor findings (no date check yet).
+    run_doctor_all(&app, &index, None);
     set_status(&app, BrainStatus::Ready);
 
     // 6b. Arm the recursive watcher over each seeded project root (P1 freshness).
@@ -126,6 +128,25 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 watcher = arm_watcher(&app, &tx); // pick up any new project roots
             }
             BrainEvent::Tick => index.checkpoint(),
+            BrainEvent::Doctor { project, now_date } => {
+                let now_ms = now_epoch_ms();
+                let pids: Vec<String> = match &project {
+                    Some(p) => vec![p.clone()],
+                    None => app
+                        .try_state::<BrainState>()
+                        .map(|s| s.registry.projects().into_iter().map(|p| p.id).collect())
+                        .unwrap_or_default(),
+                };
+                for pid in pids {
+                    let n = memory::doctor::run_doctor(&index, &pid, now_date.as_deref(), now_ms);
+                    if n > 0 {
+                        log::info!("brain: doctor queued {n} proposal(s) for '{pid}'");
+                    }
+                }
+            }
+            BrainEvent::ResolveProposal { project, signature, reject } => {
+                let _ = index.resolve_proposal(&project, &signature, reject);
+            }
             BrainEvent::Fs { project, changed } => {
                 if let Some(root) = project_root(&app, &project) {
                     let stats = index_changed(&index, &project, std::path::Path::new(&root), &changed);
@@ -334,6 +355,28 @@ pub fn index_changed(
         memory::scan_project_memory(index, project_id, root);
     }
     IndexStats { indexed, pruned }
+}
+
+fn now_epoch_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Run the doctor across every registered project (boot-time inbox seed).
+fn run_doctor_all(app: &AppHandle, index: &SqliteIndex, now_date: Option<&str>) {
+    let Some(state) = app.try_state::<BrainState>() else {
+        return;
+    };
+    let now_ms = now_epoch_ms();
+    for proj in state.registry.projects() {
+        let n = memory::doctor::run_doctor(index, &proj.id, now_date, now_ms);
+        if n > 0 {
+            log::info!("brain: doctor seeded {n} proposal(s) for '{}'", proj.name);
+        }
+    }
 }
 
 fn project_root(app: &AppHandle, project_id: &str) -> Option<String> {

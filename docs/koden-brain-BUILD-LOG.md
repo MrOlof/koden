@@ -235,8 +235,27 @@ scanned → listed → searchable).
 Green: clippy `-D warnings` clean · `cargo test` 225 passed / 1 pre-existing ·
 brain lib 33 · brain_sandbox 6.
 
+### P1 proposal queue + deterministic doctor ✅
+Schema v3: `proposals` + `reject_signatures` tables (brain-owned, local-only,
+rebuildable; never auto-applied — propose-only). `memory/proposal.rs`:
+`ProposalAction` (create/update/supersede + archive apply-op, §0.3), the **two
+distinct signature schemes** (plain-join `proposal_signature` PK vs djb2
+`reject_signature`, §0.3). `memory/doctor.rs`: pure `check()` (deterministic,
+clock-injected `now_date` per §13.21) with a code-grounded subset —
+`missing_type`, `broken_supersession`, `stale_revalidate`, `broken_anchor`
+(path-shaped only; AST anchors are P2) — plus `run_doctor` that queues findings as
+proposals, skipping persisted reject-signatures. Single-writer respected: new
+`Doctor`/`ResolveProposal` events; commands (`brain_doctor`/`brain_proposals`/
+`brain_resolve_proposal`) enqueue onto the worker; structural doctor runs once
+after warm-population to seed the inbox. **P1 gate proven**
+(`doctor_queues_proposals_and_reject_sticks`): a finding → a proposal → reject
+persists a signature → the proposal does not reappear, while un-rejected ones stay.
+Green: clippy clean · `cargo test` 232 passed / 1 pre-existing · brain lib 40 ·
+brain_sandbox 7.
+⏭ The full 18-check port + `TYPED_CHECK_MAP` (§0.3) is tracked follow-up (subset
+shipped); applying a proposal is human/agent work (Librarian never edits user files).
+
 ⏭ P1 remaining: external seed importer (`~/.claude`/`.codex`/`.gemini` → project
-memory; source format TBD — needs care); `MemoryProposal` queue + 18-check doctor
-+ review inbox; 3-step setup wizard (`tauri-plugin-dialog`); memory cards in the
-Brain pane. Watcher re-arm re-creates on Rescan (fine for seeded roots);
-per-root incremental watch add/remove is a later refinement.
+memory; source format TBD); 3-step setup wizard (`tauri-plugin-dialog`); memory
+cards + review inbox in the Brain pane; then a P1 adversarial-verification pass.
+Watcher re-arm re-creates on Rescan (fine for seeded roots).

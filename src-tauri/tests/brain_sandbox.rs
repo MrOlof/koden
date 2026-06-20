@@ -10,8 +10,11 @@
 
 use std::path::Path;
 
+use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
-use koden_lib::modules::brain::store::{list_notes_readonly, SearchIndex, SqliteIndex};
+use koden_lib::modules::brain::store::{
+    list_notes_readonly, list_proposals_readonly, SearchIndex, SqliteIndex,
+};
 use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
 const PID: &str = "fix";
@@ -213,6 +216,48 @@ fn memory_notes_parsed_stored_and_searchable() {
     assert!(
         !idx.search(Some(PID), "sqlite index", 10).unwrap().is_empty(),
         "seeded note must be searchable"
+    );
+}
+
+/// P1 gate: a doctor finding becomes a proposal the user can approve/reject, and
+/// a rejected proposal does not reappear on the next doctor pass.
+#[test]
+fn doctor_queues_proposals_and_reject_sticks() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/here.rs", b"pub fn here() {}");
+    // A note with NO type (→ missing_type) and a path anchor that isn't indexed
+    // (→ broken_anchor).
+    write(
+        root,
+        ".koden-memory/n1.md",
+        b"---\nid: n1\nanchors:\n  - src/gone.rs\n---\n# Note one\nbody\n",
+    );
+    let db = store.path().join("index.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+
+    assert!(run_doctor(&idx, PID, Some("2026-06-20"), 1000) >= 1, "doctor queues proposals");
+    let pending = list_proposals_readonly(&db, Some(PID)).unwrap();
+    assert!(pending.iter().any(|p| p.title.contains("no type")), "missing_type proposal");
+    let anchor = pending
+        .iter()
+        .find(|p| p.title.contains("anchor not found"))
+        .expect("broken_anchor proposal");
+
+    // Reject the broken-anchor proposal → it must not return.
+    assert!(idx.resolve_proposal(PID, &anchor.signature, true).unwrap());
+    run_doctor(&idx, PID, Some("2026-06-20"), 2000);
+    let pending2 = list_proposals_readonly(&db, Some(PID)).unwrap();
+    assert!(
+        !pending2.iter().any(|p| p.title.contains("anchor not found")),
+        "rejected proposal must not reappear"
+    );
+    assert!(
+        pending2.iter().any(|p| p.title.contains("no type")),
+        "un-rejected proposal stays pending"
     );
 }
 

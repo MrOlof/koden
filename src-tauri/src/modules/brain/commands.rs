@@ -6,6 +6,7 @@
 use tauri::State;
 
 use crate::modules::brain::events::BrainEvent;
+use crate::modules::brain::memory::proposal::MemoryProposal;
 use crate::modules::brain::memory::NoteSummary;
 use crate::modules::brain::registry::Project;
 use crate::modules::brain::store;
@@ -90,10 +91,48 @@ pub fn brain_notes(state: State<BrainState>, project: Option<String>) -> Vec<Not
 /// single project. Enqueues onto the worker — non-blocking.
 #[tauri::command]
 pub fn brain_rescan(state: State<BrainState>, project: Option<String>) -> Result<(), String> {
+    enqueue(&state, BrainEvent::Rescan { project })
+}
+
+/// Pending memory proposals (the review inbox). `project = None` = all.
+#[tauri::command]
+pub fn brain_proposals(state: State<BrainState>, project: Option<String>) -> Vec<MemoryProposal> {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Vec::new();
+    };
+    store::list_proposals_readonly(&db, project.as_deref()).unwrap_or_default()
+}
+
+/// Run the memory doctor (queues proposals on the worker). `now_date` (ISO
+/// YYYY-MM-DD) enables the staleness check; omit it for structural checks only.
+#[tauri::command]
+pub fn brain_doctor(
+    state: State<BrainState>,
+    project: Option<String>,
+    now_date: Option<String>,
+) -> Result<(), String> {
+    enqueue(&state, BrainEvent::Doctor { project, now_date })
+}
+
+/// Resolve a proposal: `reject = true` declines it (persists a reject-signature
+/// so it can't reappear); otherwise marks it applied. The Librarian never edits
+/// user files itself — applying the change is the human's (or a tasked agent's) job.
+#[tauri::command]
+pub fn brain_resolve_proposal(
+    state: State<BrainState>,
+    project: String,
+    signature: String,
+    reject: bool,
+) -> Result<(), String> {
+    enqueue(&state, BrainEvent::ResolveProposal { project, signature, reject })
+}
+
+/// Enqueue a worker event via the registered sender (single-writer discipline).
+fn enqueue(state: &State<BrainState>, ev: BrainEvent) -> Result<(), String> {
     let guard = state.tx.lock().map_err(|_| "brain tx poisoned".to_string())?;
     match guard.as_ref() {
         Some(tx) => tx
-            .send(BrainEvent::Rescan { project })
+            .send(ev)
             .map_err(|e| format!("brain worker unavailable: {e}")),
         None => Err("brain not started yet".to_string()),
     }

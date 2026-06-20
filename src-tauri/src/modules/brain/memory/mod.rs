@@ -9,6 +9,9 @@
 //! -null fields to `None`), matching Conductr's Zod-acceptance parity
 //! (EXECUTION_PLAN §0.3). [DP-10]
 
+pub mod doctor;
+pub mod proposal;
+
 use std::path::Path;
 
 use crate::modules::brain::store::SqliteIndex;

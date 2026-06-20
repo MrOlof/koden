@@ -41,4 +41,17 @@ pub enum BrainEvent {
     /// Webview/command-initiated reindex (e.g. a wizard "rescan", or `None` =
     /// reconcile every project).
     Rescan { project: Option<ProjectId> },
+    /// Run the memory doctor and queue proposals. `now_date` (ISO YYYY-MM-DD)
+    /// enables the staleness check; `None` runs structural checks only.
+    Doctor {
+        project: Option<ProjectId>,
+        now_date: Option<String>,
+    },
+    /// Resolve a proposal: `reject` persists its reject-signature + marks it
+    /// rejected; otherwise marks it applied.
+    ResolveProposal {
+        project: ProjectId,
+        signature: String,
+        reject: bool,
+    },
 }

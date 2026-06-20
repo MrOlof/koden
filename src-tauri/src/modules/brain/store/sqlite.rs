@@ -15,6 +15,8 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use super::SearchIndex;
+use crate::modules::brain::memory::doctor::NoteRecord;
+use crate::modules::brain::memory::proposal::{reject_signature, MemoryProposal, ProposalAction};
 use crate::modules::brain::memory::{MemoryNote, NoteSummary};
 use crate::modules::brain::rank::{self, Leg};
 use crate::modules::brain::tokenize;
@@ -126,6 +128,112 @@ impl SqliteIndex {
             [project_id],
             |r| r.get(0),
         )
+    }
+
+    /// Full note records for the doctor.
+    pub fn list_note_records(&self, project_id: &str) -> rusqlite::Result<Vec<NoteRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, note_type, revalidate_after, superseded_by, COALESCE(anchors,'[]')
+             FROM notes WHERE project_id=?1",
+        )?;
+        let it = stmt.query_map([project_id], |r| {
+            let anchors: Vec<String> =
+                serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default();
+            Ok(NoteRecord {
+                id: r.get(0)?,
+                note_type: r.get(1)?,
+                revalidate_after: r.get(2)?,
+                superseded_by: r.get(3)?,
+                anchors,
+            })
+        })?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        Ok(v)
+    }
+
+    /// The set of indexed file paths (for anchor validation).
+    pub fn indexed_path_set(
+        &self,
+        project_id: &str,
+    ) -> rusqlite::Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM files WHERE project_id=?1")?;
+        let it = stmt.query_map([project_id], |r| r.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for x in it {
+            set.insert(x?);
+        }
+        Ok(set)
+    }
+
+    pub fn is_rejected(&self, project_id: &str, reject_sig: &str) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM reject_signatures WHERE project_id=?1 AND reject_sig=?2",
+            (project_id, reject_sig),
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Queue a proposal (dedup by signature). Returns true if it was newly added.
+    pub fn insert_proposal(
+        &self,
+        project_id: &str,
+        p: &MemoryProposal,
+        created_ms: i64,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "INSERT INTO proposals(project_id,signature,action,target_id,title,detail,source,status,created_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(project_id,signature) DO NOTHING",
+            rusqlite::params![
+                project_id, p.signature, p.action.as_str(), p.target_id, p.title,
+                p.detail, p.source, p.status, created_ms
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Resolve a proposal: `reject` persists its reject-signature (so it can't
+    /// reappear) and marks it rejected; otherwise marks it applied. Returns
+    /// whether the proposal existed.
+    pub fn resolve_proposal(
+        &self,
+        project_id: &str,
+        signature: &str,
+        reject: bool,
+    ) -> rusqlite::Result<bool> {
+        let row: Option<(String, Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT action, target_id, title FROM proposals WHERE project_id=?1 AND signature=?2",
+                (project_id, signature),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        let Some((action_s, target_id, title)) = row else {
+            return Ok(false);
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE proposals SET status=?3 WHERE project_id=?1 AND signature=?2",
+            rusqlite::params![project_id, signature, if reject { "rejected" } else { "applied" }],
+        )?;
+        if reject {
+            if let Some(action) = ProposalAction::from_token(&action_s) {
+                let sig = reject_signature(action, target_id.as_deref(), &title);
+                tx.execute(
+                    "INSERT OR IGNORE INTO reject_signatures(project_id,reject_sig) VALUES(?1,?2)",
+                    (project_id, sig),
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Flush the WAL (called on the idle tick).
@@ -344,6 +452,47 @@ fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {
         path: r.get(4)?,
         anchors,
     })
+}
+
+fn proposal_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryProposal> {
+    let action =
+        ProposalAction::from_token(&r.get::<_, String>(1)?).unwrap_or(ProposalAction::Update);
+    Ok(MemoryProposal {
+        signature: r.get(0)?,
+        action,
+        target_id: r.get(2)?,
+        title: r.get(3)?,
+        detail: r.get(4)?,
+        source: r.get(5)?,
+        status: r.get(6)?,
+    })
+}
+
+/// List PENDING proposals (the review inbox) via a read-only connection.
+pub fn list_proposals_readonly(
+    db_path: &Path,
+    project: Option<&str>,
+) -> rusqlite::Result<Vec<MemoryProposal>> {
+    let conn = open_readonly(db_path)?;
+    let base = "SELECT signature,action,target_id,title,detail,source,status FROM proposals WHERE status='pending'";
+    let mut rows = Vec::new();
+    match project {
+        Some(pid) => {
+            let mut stmt = conn.prepare(&format!("{base} AND project_id=?1 ORDER BY created_ms"))?;
+            let it = stmt.query_map([pid], proposal_from_row)?;
+            for x in it {
+                rows.push(x?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare(&format!("{base} ORDER BY project_id, created_ms"))?;
+            let it = stmt.query_map([], proposal_from_row)?;
+            for x in it {
+                rows.push(x?);
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// List structured memory notes (for the review inbox / cards) via a read-only

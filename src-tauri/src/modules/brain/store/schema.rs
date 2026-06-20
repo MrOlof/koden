@@ -5,7 +5,8 @@
 
 /// Current durable schema version. Bumping it triggers `migrate`.
 /// v2: added the `notes` table (P1 native memory store).
-pub const SCHEMA_VERSION: i64 = 2;
+/// v3: added `proposals` + `reject_signatures` (P1 doctor → proposal review loop).
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -64,4 +65,29 @@ CREATE TABLE IF NOT EXISTS notes (
     PRIMARY KEY (project_id, id)
 );
 CREATE INDEX IF NOT EXISTS notes_project ON notes(project_id);
+
+-- Human-gated proposal queue (P1). Brain-owned, local-only (rebuildable by
+-- re-running the doctor) — NEVER auto-applied to user files. `signature` is the
+-- plain-join proposalSignature (dedup PK). Status: pending|applied|rejected.
+CREATE TABLE IF NOT EXISTS proposals (
+    project_id TEXT NOT NULL,
+    signature  TEXT NOT NULL,
+    action     TEXT NOT NULL,   -- create|update|supersede|archive
+    target_id  TEXT,
+    title      TEXT NOT NULL,
+    detail     TEXT NOT NULL,
+    source     TEXT NOT NULL,   -- doctor|reflect
+    status     TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    PRIMARY KEY (project_id, signature)
+);
+CREATE INDEX IF NOT EXISTS proposals_project_status ON proposals(project_id, status);
+
+-- Persisted reject signatures (djb2 over scope|action|normalized-title) so a
+-- declined proposal does not reappear on the next doctor pass (CONCEPT Flow G).
+CREATE TABLE IF NOT EXISTS reject_signatures (
+    project_id TEXT NOT NULL,
+    reject_sig TEXT NOT NULL,
+    PRIMARY KEY (project_id, reject_sig)
+);
 "#;
