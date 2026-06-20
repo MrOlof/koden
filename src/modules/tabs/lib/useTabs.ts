@@ -145,8 +145,8 @@ export type TasksTab = TabBase & {
   listId: string;
 };
 
-/** Singleton workspace views backed by the orchestration store. */
-export type OrchestrationView = "agent-topology" | "message-flow" | "director";
+/** Singleton workspace views (one per space). "brain" is the Koden Brain pane. */
+export type OrchestrationView = "agent-topology" | "message-flow" | "director" | "brain";
 
 export type OrchestrationTab = TabBase & {
   id: number;
@@ -172,6 +172,7 @@ const ORCHESTRATION_TITLES: Record<OrchestrationView, string> = {
   "agent-topology": "Agent Topology",
   "message-flow": "Message Flow",
   director: "Director",
+  brain: "Brain",
 };
 
 export function isRenamableKind(kind: Tab["kind"]): boolean {

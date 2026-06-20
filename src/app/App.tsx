@@ -873,6 +873,11 @@ export default function App() {
     [openOrchestrationTab],
   );
 
+  const openBrain = useCallback(
+    () => openOrchestrationTab("brain"),
+    [openOrchestrationTab],
+  );
+
   // Director "run in terminal": open an agent terminal tab and link the
   // orchestration record to it so the dock/topology can activate it.
   const handleSpawnTerminalAgent = useCallback(
@@ -1828,6 +1833,7 @@ export default function App() {
             openNewBoard: () => newBoardTab(),
             openNewTasks: () => newTasksTab(),
             openDirector,
+            openBrain,
             openAgentTopology: () => openOrchestrationTab("agent-topology"),
             openMessageFlow: () => openOrchestrationTab("message-flow"),
             openGitGraph: openGitGraphFromContext,
@@ -1879,6 +1885,7 @@ export default function App() {
       newBoardTab,
       newTasksTab,
       openDirector,
+      openBrain,
       openOrchestrationTab,
       toggleLayoutMode,
     ],

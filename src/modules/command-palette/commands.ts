@@ -58,6 +58,7 @@ export type CommandPaletteActionContext = {
   openNewBoard: () => void;
   openNewTasks: () => void;
   openDirector: () => void;
+  openBrain: () => void;
   openAgentTopology: () => void;
   openMessageFlow: () => void;
   openGitGraph: () => void;
@@ -243,6 +244,14 @@ export function createCommandItems(
       keywords: ["director", "agents", "orchestrate", "spawn", "command"],
       icon: CommandLineIcon,
       run: ctx.openDirector,
+    },
+    {
+      id: "brain.open",
+      title: "Open Brain",
+      group: "Agents",
+      keywords: ["brain", "index", "search", "knowledge", "librarian", "code"],
+      icon: Search01Icon,
+      run: ctx.openBrain,
     },
     {
       id: "orchestration.topology",

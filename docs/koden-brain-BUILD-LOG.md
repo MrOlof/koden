@@ -160,3 +160,37 @@ Green: clippy clean · `cargo test --test brain_sandbox` 4/4.
 ⏭ P0 remaining: Brain pane (frontend) · benchmark harness (labeled ground-truth +
 negative control) · larger fixture catalog + the `pnpm tauri dev` real-app run +
 real-kill crash sim + real-key smoke (cross-phase DoD evidence).
+
+### P0 relevance benchmark ✅ (commit 4e72984)
+`tests/brain_bench.rs` — hermetic, offline, over a realistic mixed TS/Rust corpus
+via the real `index_dir` pipeline. Three labeled bands (CONCEPT §12.2 / anti-gaming
+§13.12): positives (recall@5, hard floor 0.80), negative control (must be empty,
+hard gate), semantic-intent (P0-lexical expected to miss; reported not asserted).
+Measured from a real run (`docs/koden-brain-BENCH.md`): positives **9/9=1.00**,
+negative-control leaks **0/3**, semantic-intent **0/2** (the honest lexical gap
+that P5 closes). Deliberately not a flat vanity 1.0 — the discriminating signal is
+the negative control + the semantic band.
+
+### P0 Brain pane (frontend) ✅
+Recon mapped the conventions (invoke via `@tauri-apps/api/core`, `ExplorerSearch`
+as the search-pane template, singleton-view registration, no i18n, `tsc`+biome
+gates). Built `src/modules/brain/{lib/bindings.ts, BrainPane.tsx, index.ts}` —
+typed command wrappers + a minimal pane (index-status line with a Rescan button,
+optional project filter, debounced search with the alive-flag cancel idiom,
+results list). Wired as a singleton view by extending `OrchestrationView` with
+`"brain"` (smallest change): `useTabs` (type + title), `WorkspaceSurface` (render),
+`TabBar` (search icon — not a brain icon, per the no-AI-iconography rule),
+command palette ("Open Brain"), `App.tsx` (`openBrain` callback + deps), and
+`serialize.ts` (persists across restart). Verified: `tsc --noEmit` clean, biome
+lint clean (5 files), `serialize.test.ts` 7/7.
+⏭ Runtime click-through in a live `pnpm tauri dev` is the remaining evidence
+(needs a GUI session) — folds into the cross-phase real-app-run DoD item.
+
+### P0 status: functionally complete + statically/offline-verified
+Warm lexical brain (search/status/list/rescan) + secrets hard-gate + AST-less
+graph deferred to P2 + the offline sandbox proof + the relevance benchmark + the
+Brain pane. Remaining P0-adjacent evidence is the live `pnpm tauri dev` run (with
+the fake-claude→agent-detect replay) + real-kill crash sim + real-key smoke —
+all cross-phase, GUI/live-session items. **Next: P1** (recursive `notify` watcher
++ incremental freshness, native memory store + seed import, `MemoryProposal`
+queue + doctor, 3-step setup wizard).

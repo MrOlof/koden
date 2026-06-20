@@ -111,6 +111,7 @@ export function isSerializableTab(tab: Tab): boolean {
     case "agent-topology":
     case "message-flow":
     case "director":
+    case "brain":
       return true;
     default:
       return false;
@@ -145,6 +146,7 @@ function serializeTab(
     case "agent-topology":
     case "message-flow":
     case "director":
+    case "brain":
       return { kind: tab.kind, title: tab.title };
     default:
       return null;
@@ -303,6 +305,7 @@ function hydrateTab(
     case "agent-topology":
     case "message-flow":
     case "director":
+    case "brain":
       return {
         id: allocId(),
         kind: s.kind,

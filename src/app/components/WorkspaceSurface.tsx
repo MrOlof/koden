@@ -1,5 +1,6 @@
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
+import { BrainPane } from "@/modules/brain";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
 import { MarkdownStack } from "@/modules/markdown";
@@ -90,6 +91,7 @@ export function WorkspaceSurface({
   const isTopologyTab = kind === "agent-topology";
   const isFlowTab = kind === "message-flow";
   const isDirectorTab = kind === "director";
+  const isBrainTab = kind === "brain";
 
   return (
     <div className="relative h-full min-h-0">
@@ -253,6 +255,15 @@ export function WorkspaceSurface({
             onActivateAgent={onActivateAgent}
           />
         ) : null}
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isBrainTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isBrainTab}
+      >
+        {isBrainTab ? <BrainPane /> : null}
       </div>
     </div>
   );

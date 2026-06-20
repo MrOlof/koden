@@ -31,6 +31,7 @@ import {
   Note01Icon,
   PencilEdit02Icon,
   PlusSignIcon,
+  Search01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { SpaceMeta } from "@/modules/spaces";
@@ -564,6 +565,16 @@ export function TabIcon({ tab }: { tab: Tab }) {
     return (
       <HugeiconsIcon
         icon={CommandLineIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "brain") {
+    return (
+      <HugeiconsIcon
+        icon={Search01Icon}
         size={14}
         strokeWidth={2}
         className="shrink-0"
