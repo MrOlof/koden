@@ -7,6 +7,7 @@
 //! weighted RRF + ignore-walk population + the secrets gate + the
 //! `brain_search`/`brain_index_status`/`brain_list_projects` commands.
 
+pub mod ast;
 pub mod commands;
 pub mod events;
 pub mod freshness;

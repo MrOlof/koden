@@ -312,3 +312,28 @@ brain lib 45 · brain_sandbox 9 · tsc + biome clean.
 dialog; full 18-check doctor port; Rescan coalescing + honor-single-project-field
 (perf; current behavior is a correct superset); applied-proposal audit retention
 vs recurrence; reject_signature GC. **P1 is functionally complete + verified.**
+
+---
+
+## 2026-06-21 — Session 3 (P2 start: tree-sitter AST)
+
+### P2.1 — grammars de-risked + symbols populated ✅
+Added `tree-sitter 0.26.9` + `tree-sitter-rust 0.24.2` + `tree-sitter-typescript
+0.23.2` (resolver-picked; modern `LANGUAGE: LanguageFn` API; `StreamingIterator`
+re-exported by `tree_sitter`). `brain/ast/mod.rs`: extension→`Lang` mapping
+(Rust; TS/TSX, with JS/JSX riding the TS/TSX superset), `parse`, and `extract_defs`
+(definition-name capture queries per language — fail-open `[]` on any grammar/query
+error). **Top ADR risk (grammar/ABI drift) retired** by smoke tests that prove the
+grammars load + parse AND the queries match the real node kinds for both languages.
+Wired into `index_file`: definition names now feed the FTS `symbols` column (left
+empty in P0), weighted above content in the identity leg — derived from the
+(redacted) content, computed only on changed files (after the hash-skip), zero
+caller churn. Tests: 4 AST (ext map, grammar smoke, Rust defs, TS defs) +
+`symbols_column_populated_from_ast`.
+Green: clippy `-D warnings` clean · `cargo test` 242 passed / 1 pre-existing ·
+brain lib 50 · brain_sandbox 9.
+
+⏭ P2 remaining: AST graph tables (nodes/edges) + imports/refs/calls extraction +
+module resolution (tsconfig paths / pkg exports / Cargo members) + forward/reverse
+adjacency with incremental relink + `brain_code_graph`/`brain_code_impact`/
+`brain_neighbors` + the property test "incremental relink == full rebuild".

@@ -15,6 +15,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use super::SearchIndex;
+use crate::modules::brain::ast;
 use crate::modules::brain::memory::doctor::NoteRecord;
 use crate::modules::brain::memory::proposal::{reject_signature, MemoryProposal, ProposalAction};
 use crate::modules::brain::memory::{MemoryNote, NoteSummary};
@@ -75,14 +76,18 @@ impl SqliteIndex {
 
         let path_tokens = tokenize::tokenize(rel_path).join(" ");
         let content_tokens = tokenize::tokenize(content).join(" ");
+        // P2: tree-sitter definition names feed the `symbols` column (weighted
+        // above content) so identifier search ranks real defs. Only runs here on
+        // a new/changed file — the unchanged-hash early return skips it.
+        let symbol_tokens = symbol_tokens_for(rel_path, content);
 
         let tx = self.conn.unchecked_transaction()?;
         if let Some((_, old_rowid)) = existing {
             tx.execute("DELETE FROM code_fts WHERE rowid=?1", [old_rowid])?;
         }
         tx.execute(
-            "INSERT INTO code_fts(path,symbols,content) VALUES(?1,'',?2)",
-            (&path_tokens, &content_tokens),
+            "INSERT INTO code_fts(path,symbols,content) VALUES(?1,?2,?3)",
+            (&path_tokens, &symbol_tokens, &content_tokens),
         )?;
         let rowid = tx.last_insert_rowid();
         tx.execute(
@@ -333,6 +338,19 @@ impl SqliteIndex {
 impl SearchIndex for SqliteIndex {
     fn search(&self, project: Option<&str>, query: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
         search_with_conn(&self.conn, project, query, limit)
+    }
+}
+
+/// Pre-tokenized stream of tree-sitter definition names for the `symbols` column
+/// (empty for non-AST languages). Derived from the file's extension + content.
+fn symbol_tokens_for(rel_path: &str, content: &str) -> String {
+    let ext = std::path::Path::new(rel_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    match ast::lang_for_ext(ext) {
+        Some(lang) => tokenize::tokenize(&ast::extract_defs(lang, content).join(" ")).join(" "),
+        None => String::new(),
     }
 }
 
@@ -613,6 +631,36 @@ mod tests {
         // old term gone, new term present
         assert!(search_with_conn(&idx.conn, Some("p"), "alpha", 10).unwrap().is_empty());
         assert!(!search_with_conn(&idx.conn, Some("p"), "bravo", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn symbols_column_populated_from_ast() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "src/auth.rs", "pub fn loginHandler() {}", "h", 24).unwrap();
+        let sym: String = idx
+            .conn
+            .query_row(
+                "SELECT symbols FROM code_fts JOIN files f ON f.fts_rowid=code_fts.rowid \
+                 WHERE f.project_id='p'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // tree-sitter extracted `loginHandler`; the tokenizer split it.
+        assert!(sym.contains("login") && sym.contains("handler"), "symbols col: {sym}");
+        // a non-AST file leaves symbols empty
+        idx.index_file("p", "notes.txt", "loginHandler mention", "h2", 20).unwrap();
+        let sym2: String = idx
+            .conn
+            .query_row(
+                "SELECT symbols FROM code_fts JOIN files f ON f.fts_rowid=code_fts.rowid \
+                 WHERE f.path='notes.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sym2, "", "non-AST file has empty symbols");
     }
 
     #[test]
