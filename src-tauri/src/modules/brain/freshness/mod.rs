@@ -5,6 +5,7 @@
 
 pub mod hash;
 pub mod walk;
+pub mod watch;
 
 /// Aggregate workspace fingerprint: blake3 over the **sorted** `(path, file-hash)`
 /// list — order-independent, changes iff any file changes (a Merkle-style digest).

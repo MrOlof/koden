@@ -194,3 +194,32 @@ the fake-claude→agent-detect replay) + real-kill crash sim + real-key smoke �
 all cross-phase, GUI/live-session items. **Next: P1** (recursive `notify` watcher
 + incremental freshness, native memory store + seed import, `MemoryProposal`
 queue + doctor, 3-step setup wizard).
+
+---
+
+## 2026-06-20 — Session 2 (P1 start)
+
+### P1 freshness: recursive watcher + incremental reindex ✅
+`brain/freshness/watch.rs` — brain-owned RECURSIVE `notify` watcher over project
+roots (the existing `fs/watch.rs` is NonRecursive). Debounced/coalesced with the
+same 150ms/1000ms constants; `group_by_project` resolves each changed path to its
+project by longest-prefix over canonical roots (unit-tested), feeding
+`BrainEvent::Fs` to the worker. No new dep (`notify` already in-tree).
+Worker: extracted `index_one_file` (shared by full + incremental); added
+`index_changed` (reindex changed text files — hash-skip makes no-ops cheap — and
+prune vanished ones); armed the watcher after warm-population and re-arm on
+Rescan; `rel_path` now routes both sides through `fs::to_canon` so the full walk
+and the watcher (native/`\\?\` absolute paths) produce the same rel.
+**P1 gate proven** (`incremental_reindex_touches_only_changed_paths`): an
+out-of-band modify+delete+add reindexes only the changed paths (modified
+re-indexed, deleted pruned, added inserted), untouched files remain. Live-FS
+watcher timing verification folds into the cross-phase real-app-run evidence
+(a real-FS-event test would be timing-flaky — avoided per §13.21; the resolution
++ reindex LOGIC is tested deterministically).
+Green: clippy `-D warnings` clean · `cargo test` 221 passed / 1 pre-existing ·
+brain lib 29 · brain_sandbox 5.
+
+⏭ P1 remaining: native memory store (serde_yaml frontmatter → FTS5) + seed
+importer; `MemoryProposal` queue + doctor + review inbox; 3-step setup wizard
+(`tauri-plugin-dialog`). Watcher re-arm currently re-creates on Rescan (fine for
+seeded roots); per-root incremental watch add/remove is a later refinement.

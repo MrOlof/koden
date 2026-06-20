@@ -22,6 +22,16 @@ const BASE_SKIP_DIRS: &[&str] = &[
     "coverage", ".venv", "venv", "vendor", "generated", ".cache", ".svelte-kit",
 ];
 
+/// True if any component of `path` is a base-skip dir. Used by the incremental
+/// watcher path, which gets absolute changed paths with no project-relative
+/// context (the full walk uses `in_skip_dir` with the root).
+pub fn under_skip_dir(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(os)
+            if os.to_str().is_some_and(|s| BASE_SKIP_DIRS.contains(&s)))
+    })
+}
+
 fn in_skip_dir(path: &Path, root: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(root) else {
         return false;

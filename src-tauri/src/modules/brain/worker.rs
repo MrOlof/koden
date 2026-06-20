@@ -9,11 +9,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Listener, Manager};
 
 use crate::modules::brain::events::{AgentSignalPayload, BrainEvent};
-use crate::modules::brain::freshness::{hash, walk};
+use crate::modules::brain::freshness::{hash, walk, watch};
 use crate::modules::brain::registry::Project;
 use crate::modules::brain::secrets;
 use crate::modules::brain::store::SqliteIndex;
 use crate::modules::brain::{BrainState, BrainStatus, LiveSession};
+use crate::modules::fs::to_canon;
 use crate::modules::pty::PtyState;
 
 const AGENT_EVENT: &str = "koden:agent-signal";
@@ -110,15 +111,52 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     warm_population(&app, &index);
     set_status(&app, BrainStatus::Ready);
 
+    // 6b. Arm the recursive watcher over each seeded project root (P1 freshness).
+    // Held for the worker's lifetime — dropping it stops watching. Re-armed on a
+    // full Rescan so newly-registered projects get watched too.
+    let mut watcher = arm_watcher(&app, &tx);
+
     // 7. Steady-state event loop. Single writer; ingest paths only send events.
     for ev in rx {
         match ev {
             BrainEvent::Agent { pty_id, kind, agent } => handle_agent(&app, pty_id, &kind, agent),
-            BrainEvent::Rescan { .. } => warm_population(&app, &index), // P0: full reconcile
+            BrainEvent::Rescan { .. } => {
+                warm_population(&app, &index); // full reconcile (add/change/delete)
+                watcher = arm_watcher(&app, &tx); // pick up any new project roots
+            }
             BrainEvent::Tick => index.checkpoint(),
-            BrainEvent::Fs { .. } => { /* P1: incremental reindex from the watcher */ }
+            BrainEvent::Fs { project, changed } => {
+                if let Some(root) = project_root(&app, &project) {
+                    let stats = index_changed(&index, &project, std::path::Path::new(&root), &changed);
+                    if stats.indexed > 0 || stats.pruned > 0 {
+                        log::debug!(
+                            "brain: incremental '{project}' indexed {}, pruned {}",
+                            stats.indexed,
+                            stats.pruned
+                        );
+                    }
+                }
+            }
         }
     }
+    drop(watcher);
+}
+
+fn arm_watcher(
+    app: &AppHandle,
+    tx: &mpsc::Sender<BrainEvent>,
+) -> Option<notify::RecommendedWatcher> {
+    let projects: Vec<(String, String)> = app
+        .try_state::<BrainState>()
+        .map(|s| {
+            s.registry
+                .projects()
+                .into_iter()
+                .map(|p| (p.id, p.root))
+                .collect()
+        })
+        .unwrap_or_default();
+    watch::spawn(projects, tx.clone())
 }
 
 fn seed_registry(app: &AppHandle, launch_dir: Option<&str>) {
@@ -176,38 +214,53 @@ pub struct IndexStats {
     pub pruned: usize,
 }
 
-/// The per-project indexing pipeline: walk → binary-sniff → blake3 → secrets
-/// redact → index → reconcile-delete. Deliberately free of `AppHandle`/registry
-/// so the deterministic offline sandbox + integration tests drive the **real**
-/// pipeline (BUILD-PROMPT §6.5). `root` is the absolute project root; `project_id`
-/// the stable id the rows are keyed under.
+/// Read → binary-sniff → blake3 → secrets-redact → index one file. Returns true
+/// iff it was indexed (false on read error / binary / store error). Shared by the
+/// full walk (`index_dir`) and the incremental watcher path (`index_changed`).
+fn index_one_file(
+    index: &SqliteIndex,
+    project_id: &str,
+    rel: &str,
+    path: &std::path::Path,
+) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    // Binary sniff — skip files with a NUL in the first window.
+    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
+        return false;
+    }
+    // Freshness hash is over the RAW bytes (any change reindexes).
+    let file_hash = hash::hash_bytes(&bytes);
+    let content = String::from_utf8_lossy(&bytes);
+    // Secrets gate: redact secret-shaped content before it is tokenized/stored.
+    let (redacted, nredact) = secrets::redact(&content);
+    if nredact > 0 {
+        log::debug!("brain: redacted {nredact} secret-shaped span(s) in {rel}");
+    }
+    match index.index_file(project_id, rel, &redacted, &file_hash, bytes.len() as i64) {
+        Ok(_) => true,
+        Err(e) => {
+            log::debug!("brain: index_file failed for {rel}: {e}");
+            false
+        }
+    }
+}
+
+/// The per-project indexing pipeline: walk → (per file) index → reconcile-delete.
+/// Deliberately free of `AppHandle`/registry so the deterministic offline sandbox
+/// and integration tests drive the **real** pipeline (BUILD-PROMPT §6.5). `root`
+/// is the absolute project root; `project_id` the id the rows are keyed under.
 pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) -> IndexStats {
     let files = walk::walk_files(root);
     let mut indexed = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in files {
         let rel = rel_path(root, &path);
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        // Binary sniff — skip files with a NUL in the first window.
-        if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
-            continue;
+        if index_one_file(index, project_id, &rel, &path) {
+            seen.insert(rel);
+            indexed += 1;
         }
-        // Freshness hash is over the RAW bytes (any change reindexes).
-        let file_hash = hash::hash_bytes(&bytes);
-        let content = String::from_utf8_lossy(&bytes);
-        // Secrets gate: redact secret-shaped content before it is tokenized/stored.
-        let (redacted, nredact) = secrets::redact(&content);
-        if nredact > 0 {
-            log::debug!("brain: redacted {nredact} secret-shaped span(s) in {rel}");
-        }
-        if let Err(e) = index.index_file(project_id, &rel, &redacted, &file_hash, bytes.len() as i64) {
-            log::debug!("brain: index_file failed for {rel}: {e}");
-            continue;
-        }
-        seen.insert(rel);
-        indexed += 1;
     }
     // Reconcile deletions: prune index rows for files no longer present on disk
     // (CONCEPT Flow B delta; EXECUTION_PLAN §3 SearchIndex::remove). Without this,
@@ -233,11 +286,66 @@ fn index_project(index: &SqliteIndex, proj: &Project) {
     );
 }
 
+/// Incremental reindex of specific changed paths (from the recursive watcher) for
+/// one project: existing text files are re-indexed (the hash-skip makes no-ops
+/// cheap), vanished files are pruned. Touches ONLY the given paths — the P1
+/// freshness gate ("an out-of-band edit reindexes only the changed file").
+pub fn index_changed(
+    index: &SqliteIndex,
+    project_id: &str,
+    root: &std::path::Path,
+    changed: &[std::path::PathBuf],
+) -> IndexStats {
+    let mut indexed = 0usize;
+    let mut pruned = 0usize;
+    for path in changed {
+        if walk::under_skip_dir(path) || secrets::is_denylisted_path(&to_canon(path)) {
+            continue;
+        }
+        let rel = rel_path(root, path);
+        if rel.is_empty() {
+            continue;
+        }
+        match std::fs::metadata(path) {
+            Ok(m) if m.is_file() => {
+                if m.len() > walk::MAX_INDEX_FILE_BYTES {
+                    continue;
+                }
+                if index_one_file(index, project_id, &rel, path) {
+                    indexed += 1;
+                }
+            }
+            Ok(_) => {} // directory event — ignore
+            Err(_) => {
+                // gone (deleted / moved away) — prune the stale row + FTS doc.
+                if index.remove_file(project_id, &rel).unwrap_or(false) {
+                    pruned += 1;
+                }
+            }
+        }
+    }
+    IndexStats { indexed, pruned }
+}
+
+fn project_root(app: &AppHandle, project_id: &str) -> Option<String> {
+    app.try_state::<BrainState>()?
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.root)
+}
+
+/// Project-relative, forward-slash path. Routes both sides through `to_canon` so
+/// the full walk and the incremental watcher (which sees native absolute paths
+/// — possibly `\\?\`-prefixed on Windows) produce the SAME rel for a given file.
 fn rel_path(root: &std::path::Path, path: &std::path::Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    let root_c = to_canon(root);
+    let path_c = to_canon(path);
+    path_c
+        .strip_prefix(&root_c)
+        .map(|r| r.trim_start_matches('/').to_string())
+        .unwrap_or(path_c)
 }
 
 /// Update the live per-pane session map from agent lifecycle signals. Resolves

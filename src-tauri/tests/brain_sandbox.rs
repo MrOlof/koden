@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use koden_lib::modules::brain::store::{SearchIndex, SqliteIndex};
-use koden_lib::modules::brain::worker::index_dir;
+use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
 const PID: &str = "fix";
 
@@ -146,6 +146,38 @@ fn incremental_equals_full_rebuild() {
     // The modified + added files are present.
     assert!(!inc.search(Some(PID), "alphatokenv2", 10).unwrap().is_empty());
     assert!(!inc.search(Some(PID), "delta", 10).unwrap().is_empty());
+}
+
+/// P1 freshness gate: an out-of-band edit reindexes only the changed paths
+/// (modified re-indexed, deleted pruned, added inserted) — untouched files stay.
+#[test]
+fn incremental_reindex_touches_only_changed_paths() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "a.ts", b"export const alphaToken = 1;");
+    write(root, "b.ts", b"export const bravoToken = 2;");
+    write(root, "c.ts", b"export const charlieToken = 3;");
+
+    let idx = open_index(store.path());
+    index_dir(&idx, PID, root);
+    assert_eq!(idx.file_count(PID).unwrap(), 3);
+
+    // Out-of-band: modify a, delete b, add d. c is NOT in the change set.
+    std::fs::write(root.join("a.ts"), b"export const alphaTokenV2 = 11;").unwrap();
+    std::fs::remove_file(root.join("b.ts")).unwrap();
+    write(root, "d.ts", b"export const deltaToken = 4;");
+    let changed = vec![root.join("a.ts"), root.join("b.ts"), root.join("d.ts")];
+    let stats = index_changed(&idx, PID, root, &changed);
+
+    assert_eq!(stats.pruned, 1, "deleted file pruned");
+    assert!(stats.indexed >= 2, "modified + added reindexed");
+    assert_eq!(idx.file_count(PID).unwrap(), 3, "a + c + d");
+    assert!(!idx.search(Some(PID), "alphatokenv2", 10).unwrap().is_empty());
+    assert!(idx.search(Some(PID), "bravo", 10).unwrap().is_empty(), "deleted pruned");
+    assert!(!idx.search(Some(PID), "delta", 10).unwrap().is_empty());
+    // c was never in the change set and remains searchable.
+    assert!(!idx.search(Some(PID), "charlie", 10).unwrap().is_empty());
 }
 
 /// Fingerprint is deterministic across rebuilds (a P3 cache-stability proxy).
