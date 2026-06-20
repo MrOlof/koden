@@ -6,6 +6,7 @@
 use tauri::State;
 
 use crate::modules::brain::events::BrainEvent;
+use crate::modules::brain::memory::NoteSummary;
 use crate::modules::brain::registry::Project;
 use crate::modules::brain::store;
 use crate::modules::brain::{BrainState, BrainStatus, Hit};
@@ -74,6 +75,15 @@ pub fn brain_search(
             Ok(Vec::new())
         }
     }
+}
+
+/// Structured memory notes (review inbox / cards). `project = None` = all.
+#[tauri::command]
+pub fn brain_notes(state: State<BrainState>, project: Option<String>) -> Vec<NoteSummary> {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Vec::new();
+    };
+    store::list_notes_readonly(&db, project.as_deref()).unwrap_or_default()
 }
 
 /// Trigger a full reconcile (add/change/delete) of all registered projects, or a

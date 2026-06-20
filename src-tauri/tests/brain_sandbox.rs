@@ -10,7 +10,8 @@
 
 use std::path::Path;
 
-use koden_lib::modules::brain::store::{SearchIndex, SqliteIndex};
+use koden_lib::modules::brain::memory::scan_project_memory;
+use koden_lib::modules::brain::store::{list_notes_readonly, SearchIndex, SqliteIndex};
 use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
 const PID: &str = "fix";
@@ -178,6 +179,41 @@ fn incremental_reindex_touches_only_changed_paths() {
     assert!(!idx.search(Some(PID), "delta", 10).unwrap().is_empty());
     // c was never in the change set and remains searchable.
     assert!(!idx.search(Some(PID), "charlie", 10).unwrap().is_empty());
+}
+
+/// P1 memory: a `.koden-memory/*.md` note is parsed into the structured store,
+/// listable for cards, AND lexically searchable through the same query path.
+#[test]
+fn memory_notes_parsed_stored_and_searchable() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/app.ts", b"export function startApp() {}");
+    write(
+        root,
+        ".koden-memory/adr-sqlite.md",
+        b"---\nid: adr-sqlite\ntype: decision\nstatus: accepted\n---\n\
+          # Use SQLite for the index\n\nWe store the brain index in one SQLite file.\n",
+    );
+
+    let db = store.path().join("index.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    assert_eq!(scan_project_memory(&idx, PID, root), 1, "one note scanned");
+    assert_eq!(idx.note_count(PID).unwrap(), 1);
+
+    // structured listing (cards / review inbox)
+    let notes = list_notes_readonly(&db, Some(PID)).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].id, "adr-sqlite");
+    assert_eq!(notes[0].note_type.as_deref(), Some("decision"));
+    assert_eq!(notes[0].title, "Use SQLite for the index");
+
+    // searchable zero-token via the same path the code uses (walk indexed the .md)
+    assert!(
+        !idx.search(Some(PID), "sqlite index", 10).unwrap().is_empty(),
+        "seeded note must be searchable"
+    );
 }
 
 /// Fingerprint is deterministic across rebuilds (a P3 cache-stability proxy).

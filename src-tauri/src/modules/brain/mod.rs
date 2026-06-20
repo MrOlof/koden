@@ -10,6 +10,7 @@
 pub mod commands;
 pub mod events;
 pub mod freshness;
+pub mod memory;
 pub mod rank;
 pub mod registry;
 pub mod secrets;

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Listener, Manager};
 
 use crate::modules::brain::events::{AgentSignalPayload, BrainEvent};
 use crate::modules::brain::freshness::{hash, walk, watch};
+use crate::modules::brain::memory;
 use crate::modules::brain::registry::Project;
 use crate::modules::brain::secrets;
 use crate::modules::brain::store::SqliteIndex;
@@ -277,12 +278,15 @@ pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) 
 }
 
 fn index_project(index: &SqliteIndex, proj: &Project) {
-    let stats = index_dir(index, &proj.id, std::path::Path::new(&proj.root));
+    let root = std::path::Path::new(&proj.root);
+    let stats = index_dir(index, &proj.id, root);
+    let notes = memory::scan_project_memory(index, &proj.id, root);
     log::info!(
-        "brain: project '{}' indexed {}, pruned {}",
+        "brain: project '{}' indexed {}, pruned {}, notes {}",
         proj.name,
         stats.indexed,
-        stats.pruned
+        stats.pruned,
+        notes
     );
 }
 
@@ -323,6 +327,11 @@ pub fn index_changed(
                 }
             }
         }
+    }
+    // If a memory note changed, re-sync the structured notes table for the project.
+    let mem_marker = format!("/{}/", memory::MEMORY_DIR);
+    if changed.iter().any(|p| to_canon(p).contains(&mem_marker)) {
+        memory::scan_project_memory(index, project_id, root);
     }
     IndexStats { indexed, pruned }
 }

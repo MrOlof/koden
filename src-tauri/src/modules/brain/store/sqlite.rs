@@ -15,6 +15,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use super::SearchIndex;
+use crate::modules::brain::memory::{MemoryNote, NoteSummary};
 use crate::modules::brain::rank::{self, Leg};
 use crate::modules::brain::tokenize;
 use crate::modules::brain::Hit;
@@ -90,6 +91,41 @@ impl SqliteIndex {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Insert or update a structured memory note (P1). The note's text is made
+    /// searchable separately by the code walk; this is the typed/queryable row.
+    pub fn upsert_note(
+        &self,
+        project_id: &str,
+        note: &MemoryNote,
+        rel_path: &str,
+        hash: &str,
+    ) -> rusqlite::Result<()> {
+        let anchors_json = serde_json::to_string(&note.anchors).unwrap_or_else(|_| "[]".to_string());
+        self.conn.execute(
+            "INSERT INTO notes(project_id,id,path,note_type,status,title,scope,provenance,created,revalidate_after,superseded_by,anchors,hash)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(project_id,id) DO UPDATE SET
+                path=excluded.path, note_type=excluded.note_type, status=excluded.status,
+                title=excluded.title, scope=excluded.scope, provenance=excluded.provenance,
+                created=excluded.created, revalidate_after=excluded.revalidate_after,
+                superseded_by=excluded.superseded_by, anchors=excluded.anchors, hash=excluded.hash",
+            rusqlite::params![
+                project_id, note.id, rel_path, note.note_type, note.status, note.title,
+                note.scope, note.provenance, note.created, note.revalidate_after,
+                note.superseded_by, anchors_json, hash
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn note_count(&self, project_id: &str) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE project_id=?1",
+            [project_id],
+            |r| r.get(0),
+        )
     }
 
     /// Flush the WAL (called on the idle tick).
@@ -295,6 +331,50 @@ pub fn file_count_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result
         [project_id],
         |r| r.get(0),
     )
+}
+
+fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {
+    let anchors_json: String = r.get(5)?;
+    let anchors: Vec<String> = serde_json::from_str(&anchors_json).unwrap_or_default();
+    Ok(NoteSummary {
+        id: r.get(0)?,
+        title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        note_type: r.get(2)?,
+        status: r.get(3)?,
+        path: r.get(4)?,
+        anchors,
+    })
+}
+
+/// List structured memory notes (for the review inbox / cards) via a read-only
+/// connection. `project = None` lists every project's notes.
+pub fn list_notes_readonly(
+    db_path: &Path,
+    project: Option<&str>,
+) -> rusqlite::Result<Vec<NoteSummary>> {
+    let conn = open_readonly(db_path)?;
+    let mut rows = Vec::new();
+    match project {
+        Some(pid) => {
+            let mut stmt = conn.prepare(
+                "SELECT id,title,note_type,status,path,COALESCE(anchors,'[]') FROM notes WHERE project_id=?1 ORDER BY id",
+            )?;
+            let it = stmt.query_map([pid], note_summary_from_row)?;
+            for x in it {
+                rows.push(x?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT id,title,note_type,status,path,COALESCE(anchors,'[]') FROM notes ORDER BY project_id,id",
+            )?;
+            let it = stmt.query_map([], note_summary_from_row)?;
+            for x in it {
+                rows.push(x?);
+            }
+        }
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]

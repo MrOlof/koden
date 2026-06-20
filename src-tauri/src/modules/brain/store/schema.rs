@@ -4,7 +4,8 @@
 //! keyed off `schema_version`.
 
 /// Current durable schema version. Bumping it triggers `migrate`.
-pub const SCHEMA_VERSION: i64 = 1;
+/// v2: added the `notes` table (P1 native memory store).
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -42,4 +43,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
     content,
     tokenize = 'ascii'
 );
+
+-- Structured memory notes (P1). The note FILES are made searchable by the code
+-- walk; this table is the typed/queryable layer for cards, anchors, the doctor,
+-- and proposals. `anchors` is a JSON array. Keyed by frontmatter id per project.
+CREATE TABLE IF NOT EXISTS notes (
+    project_id       TEXT NOT NULL,
+    id               TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    note_type        TEXT,
+    status           TEXT,
+    title            TEXT,
+    scope            TEXT,
+    provenance       TEXT,
+    created          TEXT,
+    revalidate_after TEXT,
+    superseded_by    TEXT,
+    anchors          TEXT,
+    hash             TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+);
+CREATE INDEX IF NOT EXISTS notes_project ON notes(project_id);
 "#;

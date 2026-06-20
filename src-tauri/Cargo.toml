@@ -53,6 +53,7 @@ notify = "8.2.0"
 # bundled SQLite ships FTS5 and predates that. Revisit on a rustc bump.
 rusqlite = { version = "0.31", features = ["bundled"] }
 blake3 = "1.8.5"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 proptest = "1"

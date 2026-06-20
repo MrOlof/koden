@@ -219,7 +219,24 @@ watcher timing verification folds into the cross-phase real-app-run evidence
 Green: clippy `-D warnings` clean · `cargo test` 221 passed / 1 pre-existing ·
 brain lib 29 · brain_sandbox 5.
 
-⏭ P1 remaining: native memory store (serde_yaml frontmatter → FTS5) + seed
-importer; `MemoryProposal` queue + doctor + review inbox; 3-step setup wizard
-(`tauri-plugin-dialog`). Watcher re-arm currently re-creates on Rescan (fine for
-seeded roots); per-root incremental watch add/remove is a later refinement.
+### P1 native memory store ✅
+Added `serde_yaml 0.9` (ADR-006 dep). `brain/memory/mod.rs`: `MemoryNote` model +
+frontmatter parser (`---` YAML + body, BOM-tolerant, **null-stripping** to None for
+Zod-parity per §0.3 [DP-10]), title from frontmatter→`# heading`→filename,
+`scan_project_memory` over `<root>/.koden-memory/*.md`. Schema v2: a structured
+`notes` table (id/type/status/title/scope/provenance/anchors-JSON/hash) +
+`upsert_note`/`note_count`/`list_notes_readonly`. Notes are scanned during
+warm-population and re-synced when a `.koden-memory/` file changes (incremental).
+The note FILES stay lexically searchable via the code walk (one query path);
+the table is the typed layer for cards/doctor/proposals. New `brain_notes` command
+(+ registered). Tests: frontmatter parse incl. null-strip + malformed-degrades +
+heading-title (4 unit) + `memory_notes_parsed_stored_and_searchable` (integration:
+scanned → listed → searchable).
+Green: clippy `-D warnings` clean · `cargo test` 225 passed / 1 pre-existing ·
+brain lib 33 · brain_sandbox 6.
+
+⏭ P1 remaining: external seed importer (`~/.claude`/`.codex`/`.gemini` → project
+memory; source format TBD — needs care); `MemoryProposal` queue + 18-check doctor
++ review inbox; 3-step setup wizard (`tauri-plugin-dialog`); memory cards in the
+Brain pane. Watcher re-arm re-creates on Rescan (fine for seeded roots);
+per-root incremental watch add/remove is a later refinement.
