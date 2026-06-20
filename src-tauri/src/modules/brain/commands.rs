@@ -30,6 +30,23 @@ pub fn brain_list_projects(state: State<BrainState>) -> Vec<Project> {
     state.registry.projects()
 }
 
+/// Register a new project root (the wizard / "add folder" flow) and trigger a
+/// reconcile so it gets indexed + watched. Returns the registered project.
+#[tauri::command]
+pub fn brain_add_project(state: State<BrainState>, path: String) -> Result<Project, String> {
+    let pb = std::path::PathBuf::from(&path);
+    if !pb.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let proj = state
+        .registry
+        .add_root(&pb)
+        .ok_or_else(|| "could not register project".to_string())?;
+    // Reconcile-all re-indexes the new project and re-arms the watcher to cover it.
+    enqueue(&state, BrainEvent::Rescan { project: None })?;
+    Ok(proj)
+}
+
 /// Overall status + per-project indexed file counts.
 #[tauri::command]
 pub fn brain_index_status(state: State<BrainState>) -> BrainStatusReport {

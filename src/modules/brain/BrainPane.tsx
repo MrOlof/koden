@@ -5,6 +5,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
+  brainAddProject,
   brainDoctor,
   brainIndexStatus,
   brainListProjects,
@@ -64,6 +65,8 @@ export function BrainPane() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<string | null>(null); // null = all
   const [report, setReport] = useState<BrainStatusReport | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [addPath, setAddPath] = useState("");
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [proposals, setProposals] = useState<MemoryProposal[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -151,6 +154,19 @@ export function BrainPane() {
     void navigator.clipboard?.writeText(path);
   };
 
+  const addProject = async () => {
+    const path = addPath.trim();
+    if (!path) return;
+    try {
+      await brainAddProject(path);
+      setAddPath("");
+      setShowAdd(false);
+      setProjects(await brainListProjects());
+    } catch (e) {
+      console.error("brain_add_project failed:", e);
+    }
+  };
+
   const runDoctor = () => {
     void brainDoctor(project, today());
     setTimeout(() => void loadMemory(), ASYNC_SETTLE_MS);
@@ -194,13 +210,13 @@ export function BrainPane() {
         </button>
       </div>
 
-      {/* project filter (shared) */}
-      {projects.length > 1 ? (
-        <div className="flex shrink-0 items-center gap-2 px-2 pt-1.5">
+      {/* project filter + add (shared) */}
+      <div className="flex shrink-0 items-center gap-2 px-2 pt-1.5">
+        {projects.length > 1 ? (
           <select
             value={project ?? ""}
             onChange={(e) => setProject(e.target.value || null)}
-            className="h-7 w-full rounded border bg-transparent px-1.5 text-[11px] text-foreground/80"
+            className="h-7 flex-1 rounded border bg-transparent px-1.5 text-[11px] text-foreground/80"
             title="Filter by project"
           >
             <option value="">All projects</option>
@@ -210,6 +226,41 @@ export function BrainPane() {
               </option>
             ))}
           </select>
+        ) : (
+          <span className="flex-1 truncate text-[11px] text-muted-foreground">
+            {projects.length === 1 ? projects[0].name : "No project indexed"}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => setShowAdd((v) => !v)}
+          className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Add a project folder"
+        >
+          + Add
+        </button>
+      </div>
+      {showAdd ? (
+        <div className="flex shrink-0 items-center gap-1.5 px-2 pt-1.5">
+          <Input
+            value={addPath}
+            onChange={(e) => setAddPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void addProject();
+              }
+            }}
+            placeholder="Absolute path to a project folder"
+            className="h-7 flex-1 text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => void addProject()}
+            className="rounded border px-2 py-0.5 text-[11px] hover:bg-accent"
+          >
+            Add
+          </button>
         </div>
       ) : null}
 

@@ -36,6 +36,11 @@ export function brainListProjects(): Promise<Project[]> {
   return invoke<Project[]>("brain_list_projects", {});
 }
 
+/** Register a new project root (returns the project) and trigger indexing. */
+export function brainAddProject(path: string): Promise<Project> {
+  return invoke<Project>("brain_add_project", { path });
+}
+
 /** Trigger a full reconcile (all projects, or one). Non-blocking on the worker. */
 export function brainRescan(project: string | null = null): Promise<void> {
   return invoke<void>("brain_rescan", { project });
