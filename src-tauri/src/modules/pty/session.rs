@@ -56,6 +56,9 @@ pub struct Session {
     _job: Option<super::job::PtyJob>,
     /// PID of the shell process. 0 means unknown; callers must skip checks when 0.
     pub shell_pid: u32,
+    /// The directory the pane was spawned in (the agent's launch cwd). The Brain
+    /// uses this to resolve a pty leaf → project. `None` when not given at open.
+    pub cwd: Option<String>,
     pub killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master: Mutex<Box<dyn MasterPty + Send>>,
@@ -129,6 +132,7 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
+    let session_cwd = cwd.clone();
     let mut cmd = shell_init::build_command(cwd, workspace, blocks)?;
     // Per-pane identity. Claude Code's status hooks tag the agent bus with this
     // so Koden can route working/attention/finished back to THIS terminal's
@@ -166,6 +170,7 @@ pub fn spawn(
         #[cfg(windows)]
         _job: job,
         shell_pid,
+        cwd: session_cwd,
         killer: Mutex::new(killer),
         writer: writer.clone(),
         master: Mutex::new(pair.master),
@@ -368,6 +373,7 @@ mod tests {
 
         let session = Arc::new(Session {
             shell_pid: child.process_id().unwrap_or(0),
+            cwd: None,
             killer: Mutex::new(killer),
             writer,
             master: Mutex::new(pair.master),
@@ -416,6 +422,7 @@ mod tests {
 
         let session = Arc::new(Session {
             shell_pid: 0,
+            cwd: None,
             killer: Mutex::new(killer),
             writer,
             master: Mutex::new(pair.master),

@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{agent, fs, git, history, net, pty, secrets, shell, usage, workspace};
+use modules::{agent, brain, fs, git, history, net, pty, secrets, shell, usage, workspace};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -81,6 +81,13 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let builder = builder.decorations(false).transparent(true);
 
+    // `window` is consumed only under the macOS and Linux cfg blocks below; on
+    // other targets (Windows) it is intentionally unused. Required for the
+    // `clippy -D warnings` gate on Windows.
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux")),
+        allow(unused_variables)
+    )]
     let window = builder.build().map_err(|e| e.to_string())?;
 
     // Some Linux compositors (GNOME/Mutter with CSD-by-default) ignore the
@@ -157,9 +164,14 @@ pub fn run() {
             // Proactive Claude usage poller. Idles until the guard is enabled via
             // usage_guard_set; reads UsageState each cycle. Fail-open.
             usage::poll::spawn_poller(app.handle().clone());
+            // Koden Brain — the in-process Librarian. Opens its store, warms the
+            // lexical index, and serves gist/search to agents. Fail-open; never
+            // blocks first paint (spawn returns immediately). ADR-006.
+            brain::worker::spawn_brain_worker(app.handle().clone());
             Ok(())
         })
         .manage(pty::PtyState::default())
+        .manage(brain::BrainState::default())
         .manage(usage::UsageState::default())
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
@@ -184,6 +196,9 @@ pub fn run() {
             pty::pty_has_foreground_process,
             pty::pty_has_foreground_job,
             pty::pty_shell_name,
+            brain::commands::brain_search,
+            brain::commands::brain_index_status,
+            brain::commands::brain_list_projects,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

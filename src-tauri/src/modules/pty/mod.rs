@@ -34,6 +34,15 @@ impl Default for PtyState {
     }
 }
 
+impl PtyState {
+    /// The spawn cwd of a live session, if known. The Brain uses this to resolve
+    /// a pty leaf → project (longest-prefix match against registered roots).
+    /// Returns `None` for unknown/closed sessions or sessions opened without a cwd.
+    pub fn session_cwd(&self, id: u32) -> Option<String> {
+        self.sessions.read().ok()?.get(&id).and_then(|s| s.cwd.clone())
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn pty_open(
