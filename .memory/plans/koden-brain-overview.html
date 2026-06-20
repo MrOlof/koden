@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Koden Brain — the Librarian · overview</title>
+<style>
+  :root{
+    --bg:#0c1116; --panel:#111821; --panel2:#0f151c; --line:#1f2a36;
+    --ink:#dfe7ef; --mut:#8aa0b2; --dim:#5f7385;
+    --cy:#33d9ec; --cy2:#15c1da; --grn:#56d364; --amb:#f0b429; --vio:#a78bfa; --red:#f97583;
+    --free:#56d364; --t1:#33d9ec; --t2:#f0b429;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,Segoe UI,Roboto,system-ui,sans-serif;}
+  .wrap{max-width:1040px;margin:0 auto;padding:34px 26px 80px}
+  h1{font-size:26px;margin:0 0 4px;letter-spacing:-.3px}
+  h1 .b{color:var(--cy)}
+  .sub{color:var(--mut);margin:0 0 22px;font-size:14.5px}
+  .tabs{display:flex;gap:8px;margin:0 0 24px;border-bottom:1px solid var(--line)}
+  .tab{appearance:none;background:none;border:0;color:var(--mut);font:inherit;font-weight:600;
+    padding:10px 16px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .tab[aria-selected="true"]{color:var(--cy);border-bottom-color:var(--cy)}
+  .view{display:none} .view.on{display:block;animation:f .2s ease}
+  @keyframes f{from{opacity:0;transform:translateY(4px)}to{opacity:1}}
+  h2{font-size:19px;margin:26px 0 10px;letter-spacing:-.2px}
+  h2 .n{color:var(--dim);font-weight:600;margin-right:8px}
+  p{margin:0 0 12px;color:#cfdae5}
+  .lead{font-size:16px;color:var(--ink)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+  .grid{display:grid;gap:12px}
+  .g2{grid-template-columns:1fr 1fr} .g3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:720px){.g2,.g3{grid-template-columns:1fr}}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .step .h{font-weight:700;color:var(--ink);margin-bottom:4px;display:flex;align-items:center;gap:8px}
+  .step .h .ic{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-size:13px;
+    background:#0c1116;border:1px solid var(--line)}
+  .step small{color:var(--mut)}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:16px 0}
+  .fbox{flex:1;min-width:120px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    padding:12px 12px;text-align:center}
+  .fbox b{display:block;color:var(--ink);font-size:13.5px} .fbox span{color:var(--mut);font-size:12px}
+  .arr{display:grid;place-items:center;color:var(--cy);font-size:20px;padding:0 6px;flex:0 0 auto}
+  .tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;padding:2px 8px;border-radius:999px;
+    border:1px solid var(--line);color:var(--mut);vertical-align:middle}
+  .tag.free{color:var(--free);border-color:#1e3a24}
+  .tag.t1{color:var(--t1);border-color:#0e3a42}
+  .tag.t2{color:var(--t2);border-color:#3a2e0c}
+  .tag.key{color:var(--vio);border-color:#2c2552}
+  code,.mono{font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:12.5px;
+    background:#0a0e13;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#bfe9f1}
+  ul{margin:6px 0 12px;padding-left:18px} li{margin:4px 0;color:#cfdae5}
+  .lib{border-left:3px solid var(--cy)}
+  .pill-row{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+  .pill{font-size:12px;color:var(--mut);background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px}
+  .pill b{color:var(--cy)}
+  .tier{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;
+    background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:13px 16px;margin:10px 0}
+  .tier .lvl{font-weight:800;font-size:13px;letter-spacing:.04em;writing-mode:horizontal-tb}
+  .tier .d b{color:var(--ink)} .tier .d small{color:var(--mut);display:block;margin-top:2px}
+  .tier.free{border-left:3px solid var(--free)} .tier.t1{border-left:3px solid var(--t1)} .tier.t2{border-left:3px solid var(--t2)}
+  .cost{font-size:11.5px;font-weight:700;text-align:right}
+  .cost.free{color:var(--free)} .cost.paid{color:var(--amb)}
+  .layer{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:8px 0}
+  .layer .lh{font-weight:700;color:var(--cy);font-size:13px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .note{font-size:13px;color:var(--mut);border-top:1px dashed var(--line);margin-top:18px;padding-top:14px}
+  .k{color:var(--vio);font-weight:700}
+  .hl{color:var(--cy);font-weight:600}
+  .decisions{font-size:13px}
+  .decisions td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  .decisions td:first-child{color:var(--cy);font-weight:600;white-space:nowrap}
+  table{border-collapse:collapse;width:100%}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="b">Koden Brain</span> — the Librarian</h1>
+  <p class="sub">How the brain lives inside Koden. One quiet helper that keeps your library fresh so your AI terminals are always effective. · draft for alignment</p>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" data-v="simple">Simple version</button>
+    <button class="tab" role="tab" aria-selected="false" data-v="adv">Advanced version</button>
+  </div>
+
+  <!-- ============ SIMPLE ============ -->
+  <section class="view on" id="simple">
+    <div class="card lib">
+      <p class="lead">You pick <b>one folder</b> where all your projects live — your <b class="hl">Library</b>.
+      Inside Koden lives a <b class="hl">Librarian</b>: a quiet helper that runs whenever the app is open and
+      keeps that library tidy, so any AI you open in a terminal already understands your work.</p>
+      <p style="margin:0;color:var(--mut)">You never have to manage it. It doesn't nag, and it never runs when Koden is closed.</p>
+    </div>
+
+    <h2>What you actually experience</h2>
+    <div class="grid g2">
+      <div class="step"><div class="h"><span class="ic">📂</span> Pick your workspace, once</div>
+        <small>On first launch you choose the folder that holds your projects. That's the single source of truth — work, personal, hobby, anything.</small></div>
+      <div class="step"><div class="h"><span class="ic">⚡</span> It catches up when you open Koden</div>
+        <small>The Librarian notices what changed since last time (even if you edited elsewhere) and quietly updates itself in a few seconds.</small></div>
+      <div class="step"><div class="h"><span class="ic">🧠</span> Your AI starts already knowing the project</div>
+        <small>Open a Claude or Codex terminal and it's handed a short briefing about your code automatically — so it doesn't waste time (and tokens) re-reading everything.</small></div>
+      <div class="step"><div class="h"><span class="ic">↩️</span> Pick up where you left off</div>
+        <small>It remembers the last few things you were doing in each project. Crash, power cut, or just close the app — reopen and it knows where you were.</small></div>
+      <div class="step"><div class="h"><span class="ic">🔄</span> It re-learns your code as it changes</div>
+        <small>Make real changes and it quietly re-indexes so search and the AI stay accurate. Tiny edits it ignores — not worth the effort.</small></div>
+      <div class="step"><div class="h"><span class="ic">🔎</span> Ask in plain language (optional)</div>
+        <small>"Where's the checkout code?" works — but mostly the Librarian just works behind the scenes for the AI, not for you.</small></div>
+    </div>
+
+    <h2>The loop, in one line</h2>
+    <div class="flow">
+      <div class="fbox"><b>Open Koden</b><span>Librarian wakes + catches up</span></div>
+      <div class="arr">→</div>
+      <div class="fbox"><b>Open an AI terminal</b><span>it gets briefed automatically</span></div>
+      <div class="arr">→</div>
+      <div class="fbox"><b>You work</b><span>notes + index kept fresh</span></div>
+      <div class="arr">→</div>
+      <div class="fbox"><b>Close / crash</b><span>state is saved</span></div>
+      <div class="arr">→</div>
+      <div class="fbox"><b>Reopen</b><span>resume where you were</span></div>
+    </div>
+
+    <div class="card">
+      <p style="margin:0"><b class="k">Free to start, smarter with a key.</b> Out of the box the Librarian does
+      keyword search, keeps your code fresh, and handles resume — no account, no cost. Add an
+      <b>OpenAI key</b> and it unlocks <b>meaning-based search</b> ("find the login thing" even if you don't know
+      the function name) and <b>tidies your project memory</b> — using a cheap model, only when it's worth it,
+      with the running cost always visible to you.</p>
+    </div>
+  </section>
+
+  <!-- ============ ADVANCED ============ -->
+  <section class="view" id="adv">
+    <div class="card lib">
+      <p class="lead" style="margin:0">One Rust module — <code>src-tauri/src/modules/brain/</code> — and one
+      <b class="hl">in-process worker thread</b> (app-lifetime; started from <code>.setup()</code>, fail-open).
+      It is a "daemon" only in the loose sense: it lives inside Koden, runs while the window is open, and is gone
+      when you close it. <b>No OS service, no tray.</b> Conductr's proven brain, reimplemented native in Rust.</p>
+    </div>
+
+    <h2><span class="n">1</span>The event spine — how the Librarian senses</h2>
+    <p>The worker folds two existing streams into one and resolves everything to a project:</p>
+    <div class="flow">
+      <div class="fbox"><b>Terminal lifecycle</b><span><code>koden:agent-signal</code><br>per pane (started/working/finished)</span></div>
+      <div class="arr">↘</div>
+      <div class="fbox" style="background:#0c1116;border-color:#0e3a42"><b>Librarian worker</b><span>folds events · pane→cwd→project<br>via the workspace registry</span></div>
+      <div class="arr">↙</div>
+      <div class="fbox"><b>File changes</b><span>recursive <code>notify</code> watcher<br>+ blake3 fingerprints</span></div>
+    </div>
+    <p style="color:var(--mut);font-size:13.5px;margin-top:4px">The terminal's own output stream is the sensor — no new hooks. blake3 is the universal freshness signal (git <i>and</i> non-git projects, like Conductr's changed-since); git HEAD is a fast-path when present.</p>
+
+    <h2><span class="n">2</span>The cost tiers — why the Librarian is smart, not linear</h2>
+    <p>Work is split by cost. The cheap stuff always runs; the key + the judgment are spent only where they matter. <span class="hl">It decides on its own and never prompts you.</span></p>
+
+    <div class="tier free">
+      <div class="lvl" style="color:var(--free)">TIER&nbsp;0</div>
+      <div class="d"><b>Always-on freshness</b> <span class="tag free">keyless</span>
+        <small>blake3 detects changed files → incremental <b>BM25 (FTS5)</b> + <b>tree-sitter AST graph</b> re-parse of just those files. Plus crash-resume journaling + memory storage.</small></div>
+      <div class="cost free">$0 · instant<br>runs every change</div>
+    </div>
+    <div class="tier t1">
+      <div class="lvl" style="color:var(--t1)">TIER&nbsp;1</div>
+      <div class="d"><b>Semantic freshness</b> <span class="tag key">needs key</span>
+        <small>Re-embed only the changed chunks (OpenAI embeddings) → <b>semantic + hybrid search</b> (BM25 + vector, fused via RRF). Mechanical; gated only to skip no-op churn.</small></div>
+      <div class="cost paid">cheap · batched<br>changed chunks only</div>
+    </div>
+    <div class="tier t2">
+      <div class="lvl" style="color:var(--t2)">TIER&nbsp;2</div>
+      <div class="d"><b>The judgment call</b> <span class="tag key">needs key</span>
+        <small><b>Significance gate:</b> heuristic-first (file count, churn, did exported symbols change via AST, code vs comments) → cheap LLM <b>only on the borderline</b>. Decides "is this worth re-analyzing / a memory note?" Minuscule → skip. Real work → analyze + propose memory.</small></div>
+      <div class="cost paid">rare · cheap model<br>autonomous, no prompt</div>
+    </div>
+    <p style="color:var(--mut);font-size:13.5px">Re-indexing is so cheap that gating it behind an LLM would cost more than doing it — so the model's judgment is spent on <b>significance</b>, not on "should I run a free op." That's the whole reason the Librarian has a key.</p>
+
+    <h2><span class="n">3</span>Storage — one SQLite file</h2>
+    <div class="layer"><div class="lh">Derived cache · local-only · rebuildable</div>
+      <span class="pill">FTS5 lexical index</span> <span class="pill">AST graph (nodes/edges)</span>
+      <span class="pill">memory notes</span> <span class="pill">vector embeddings <span class="tag key" style="margin-left:4px">key</span></span>
+      <span class="pill">fingerprint manifest</span> <span class="pill">resume journal</span>
+      <div style="color:var(--mut);font-size:12.5px;margin-top:8px"><code>app_local_data_dir()/koden/brain/</code> — survives <code>git clean</code>, doesn't need to travel.</div>
+    </div>
+    <div class="layer"><div class="lh">Canonical source · git-committed · MegaSync-portable</div>
+      <span class="pill">project registry (root-relative paths)</span> <span class="pill">memory notes (.md)</span>
+      <div style="color:var(--mut);font-size:12.5px;margin-top:8px">The memory you'd want to share / sync between machines. The index is a local cache rebuilt from this.</div>
+    </div>
+
+    <h2><span class="n">4</span>The two payoffs — what the brain feeds back out</h2>
+    <div class="grid g2">
+      <div class="step"><div class="h"><span class="ic">📨</span> Gist injection (for the agents)</div>
+        <small>At agent launch the Librarian builds a token-bounded, <b>fingerprint-stable</b> gist (cache-safe: unchanged code → byte-identical file) from the <b>same query path</b> as search, and injects it through the existing <code>--append-system-prompt</code> channel. Vendor-agnostic — works for Claude, Codex, Gemini, GLM.</small></div>
+      <div class="step"><div class="h"><span class="ic">↩️</span> Resume (for you)</div>
+        <small>A rolling <b>"last N things"</b> per project (à la Mem0/Supermemory) + per-pane lifecycle, journaled to SQLite. On boot → recovery cards: <i>"you were adding Stripe checkout to the candle shop."</i> Open question: capture your prompts vs a 1-line summary.</small></div>
+    </div>
+
+    <h2><span class="n">5</span>Borrowed from Conductr → reimplemented native</h2>
+    <div class="pill-row">
+      <span class="pill"><b>tokenizer</b> identifier-aware (camelCase/stem)</span>
+      <span class="pill"><b>BM25</b> K1=1.2 / B=0.75</span>
+      <span class="pill"><b>RRF</b> fusion (+ real per-leg weights)</span>
+      <span class="pill"><b>AST graph</b> tree-sitter — <i>upgrade</i> over Conductr's regex</span>
+      <span class="pill"><b>semantic</b> embeddings + hybrid</span>
+      <span class="pill"><b>temporal memory</b> + changed-since</span>
+      <span class="pill"><b>propose-not-apply</b> memory (human-gated)</span>
+    </div>
+
+    <h2><span class="n">6</span>The key — own, decoupled, budgeted</h2>
+    <p>The Librarian's <span class="k">OpenAI key</span> (embeddings + a cheap chat model) is <b>separate</b> from whatever
+    the terminals run, and powers only Tier 1 + 2. Fully autonomous (no approval prompts) — so the guardrail is a
+    <b>visible running spend + a hard cap</b>: <i>"12¢ today · 2 significance calls · stops at your ceiling."</i>
+    Autonomy behind a glass wall, not a black box. Default-off until a key is added.</p>
+
+    <h2><span class="n">7</span>Locked decisions (this conversation)</h2>
+    <table class="decisions">
+      <tr><td>Persona</td><td>One <b>Librarian</b> for the whole brain subsystem.</td></tr>
+      <tr><td>Host</td><td><b>In-process, app-lifetime</b> (Host A). No OS daemon, no tray. Catch-up sweep on launch.</td></tr>
+      <tr><td>Audience</td><td><b>Vibe-coders / non-coders</b> → ambient-first; serves the agents more than the human.</td></tr>
+      <tr><td>Engine</td><td>SQLite/FTS5 · tree-sitter (TS/JS + Rust v1) · borrow Conductr's BM25/RRF/tokenizer/temporal.</td></tr>
+      <tr><td>Tiers</td><td>Tier 0 free &amp; always-on (keyless) · Tier 1/2 unlocked by the key. Progressive enhancement.</td></tr>
+      <tr><td>Judgment</td><td>Significance gate = <b>heuristic-first, LLM escalation</b>. Never prompts; decides &amp; acts.</td></tr>
+      <tr><td>Resume</td><td>Librarian owns it via SQLite — rolling recent-activity per project.</td></tr>
+      <tr><td>Budget</td><td>Own key, decoupled, <b>visible spend + hard cap</b>.</td></tr>
+    </table>
+
+    <div class="note">Open threads to settle before P0: resume snapshot = captured prompts vs cheap 1-line summaries · exact significance heuristics + escalation thresholds · canonical folder names (<code>.koden-brain/</code> + <code>.koden-memory/</code>) · do registered projects have to live under the root.</div>
+  </section>
+</div>
+<script>
+  const tabs=[...document.querySelectorAll('.tab')], views={simple:document.getElementById('simple'),adv:document.getElementById('adv')};
+  tabs.forEach(t=>t.addEventListener('click',()=>{
+    tabs.forEach(x=>x.setAttribute('aria-selected', x===t));
+    for(const k in views) views[k].classList.toggle('on', k===t.dataset.v);
+  }));
+</script>
+</body>
+</html>
