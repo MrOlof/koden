@@ -135,6 +135,16 @@ impl SqliteIndex {
         (budget::ceiling(&self.conn), budget::spent_total(&self.conn))
     }
 
+    /// Persist the Librarian LLM selection (provider/model/base URL + $/Mtok rates).
+    /// Writer-side; defaults live in the `brain_librarian` singleton.
+    pub fn set_librarian_config(
+        &self,
+        cfg: &crate::modules::brain::reflect::librarian::LibrarianConfig,
+        now: i64,
+    ) -> Result<(), String> {
+        crate::modules::brain::reflect::librarian::set(&self.conn, cfg, now)
+    }
+
     /// Boot sweep: charge any reservation orphaned by a mid-call crash at its
     /// estimate, so a crashed reflect over-counts rather than leaking free spend (P4).
     pub fn sweep_orphaned_reservations(&self, now: i64) -> Result<usize, String> {

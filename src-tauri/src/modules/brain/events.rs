@@ -66,6 +66,17 @@ pub enum BrainEvent {
     },
     /// Set the reflect spend ceiling (USD; 0.0 disables). Writer-side (P4).
     SetBudget { ceiling_usd: f64 },
+    /// Set the Librarian's LLM selection (which provider/model the budgeted
+    /// reflect+curate path uses). Rates are $/million-tokens (0 for free local
+    /// models). The key is read at call time from the per-provider keyring account.
+    /// Writer-side.
+    SetLibrarian {
+        provider: String,
+        model: String,
+        base_url: String,
+        in_rate_mtok: f64,
+        out_rate_mtok: f64,
+    },
     /// Run stale-ADR / memory curation (V2 Flow G). Manual-trigger; `project = None`
     /// curates every registered project. `now_date` (ISO YYYY-MM-DD) drives the
     /// staleness signal. ACT-band proposals are $0; the escalate band shares the

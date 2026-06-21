@@ -11,7 +11,9 @@
 
 pub mod budget;
 pub mod digest;
+pub mod librarian;
 pub mod llm;
+pub mod llm_openai;
 pub mod proposal;
 pub mod schema;
 
@@ -63,12 +65,25 @@ impl ReflectOutcome {
     }
 }
 
-/// Runtime reflect config (model + caps). `default()` is the cheap Haiku path.
+/// Runtime reflect config (model + caps + provider + per-token rates). `default()`
+/// is the cheap Anthropic Haiku path (rates match `librarian`'s defaults); the live
+/// path builds this from the persisted [librarian::LibrarianConfig] via
+/// [ReflectConfig::from_librarian].
 #[derive(Clone, Debug)]
 pub struct ReflectConfig {
     pub model: String,
     pub max_output_tokens: u32,
     pub max_proposals: usize,
+    /// Provider id (matches the frontend `ProviderId`): `anthropic` uses the native
+    /// Anthropic client; anything else uses the OpenAI-compatible client.
+    pub provider: String,
+    /// Explicit OpenAI-compatible base URL (incl. `/v1`); empty = the canonical
+    /// per-provider URL. Ignored for the Anthropic provider.
+    pub base_url: String,
+    /// $/token input + output rates (already converted from the $/Mtok selection).
+    /// A free local model carries 0 here, so its spend never moves the meter.
+    pub in_rate: f64,
+    pub out_rate: f64,
 }
 
 impl Default for ReflectConfig {
@@ -77,35 +92,57 @@ impl Default for ReflectConfig {
             model: DEFAULT_MODEL.to_string(),
             max_output_tokens: MAX_OUTPUT_TOKENS,
             max_proposals: schema::MAX_PROPOSALS,
+            provider: "anthropic".to_string(),
+            base_url: String::new(),
+            in_rate: 1.0 / 1_000_000.0,
+            out_rate: 5.0 / 1_000_000.0,
         }
     }
 }
 
-/// One model's ($/token in, $/token out). Unknown models price at Opus (the
-/// expensive tier) so an unrecognized id never UNDER-estimates the budget.
-fn pricing(model: &str) -> (f64, f64) {
-    if model.starts_with("claude-haiku-4-5") {
-        (1.0 / 1_000_000.0, 5.0 / 1_000_000.0)
+impl ReflectConfig {
+    /// Build from the persisted Librarian selection (converts $/Mtok → $/token).
+    pub(crate) fn from_librarian(l: &librarian::LibrarianConfig) -> Self {
+        Self {
+            model: l.model.clone(),
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            max_proposals: schema::MAX_PROPOSALS,
+            provider: l.provider.clone(),
+            base_url: l.base_url.clone(),
+            in_rate: l.in_rate_mtok / 1_000_000.0,
+            out_rate: l.out_rate_mtok / 1_000_000.0,
+        }
+    }
+}
+
+/// Build the [ReflectClient] for the configured provider: the native Anthropic
+/// client, or the OpenAI-compatible client (with the resolved base URL). Shared by
+/// the reflect AND curation call sites so they stay in lockstep.
+pub(crate) fn build_client(cfg: &ReflectConfig, key: Option<String>) -> Box<dyn ReflectClient> {
+    if cfg.provider == "anthropic" {
+        Box::new(llm::AnthropicClient::new(key.unwrap_or_default()))
     } else {
-        // Opus 4.8 AND any unrecognized id price at the expensive tier, so an
-        // unknown model can never UNDER-estimate the budget.
-        (5.0 / 1_000_000.0, 25.0 / 1_000_000.0)
+        let base = if cfg.base_url.trim().is_empty() {
+            librarian::canonical_base_url(&cfg.provider).to_string()
+        } else {
+            cfg.base_url.clone()
+        };
+        Box::new(llm_openai::OpenAiCompatClient::new(key, base))
     }
 }
 
 /// Conservative pre-flight cost estimate: input tokens ≈ (system+user) chars/3
-/// (over-count), output tokens = the full `max_output_tokens` cap. `pub(crate)` so
-/// the P4 reflect path AND the V2 curation path share ONE pricing source of truth.
+/// (over-count), output tokens = the full `max_output_tokens` cap. Rates come from
+/// the selected model's config so the P4 reflect path AND the V2 curation path share
+/// ONE pricing source of truth (a free local model estimates 0).
 pub(crate) fn estimate_cost(cfg: &ReflectConfig, system: &str, user: &str) -> f64 {
-    let (in_rate, out_rate) = pricing(&cfg.model);
     let in_tok = (system.len() + user.len()).div_ceil(EST_CHARS_PER_TOKEN) as f64;
-    in_tok * in_rate + cfg.max_output_tokens as f64 * out_rate
+    in_tok * cfg.in_rate + cfg.max_output_tokens as f64 * cfg.out_rate
 }
 
 /// Actual cost from the API's reported usage (reconcile path). Shared with curation.
-pub(crate) fn actual_cost(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
-    let (in_rate, out_rate) = pricing(model);
-    input_tokens as f64 * in_rate + output_tokens as f64 * out_rate
+pub(crate) fn actual_cost(cfg: &ReflectConfig, input_tokens: u64, output_tokens: u64) -> f64 {
+    input_tokens as f64 * cfg.in_rate + output_tokens as f64 * cfg.out_rate
 }
 
 /// Pure pre-flight gate (testable without an `AppHandle`/keyring): `Disabled` when
@@ -186,7 +223,7 @@ pub fn reflect_with_client(
     // Charge the ACTUAL reported cost — but a 2xx with missing/garbled usage
     // deserializes to 0/0 tokens, and Anthropic still bills the input. Floor an
     // implausible 0/0 to the conservative estimate so a success never under-charges.
-    let actual = actual_cost(&cfg.model, resp.input_tokens, resp.output_tokens);
+    let actual = actual_cost(cfg, resp.input_tokens, resp.output_tokens);
     let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { est } else { actual };
     reconcile_or_log(index, rid, charge, now_ms);
 
@@ -223,8 +260,9 @@ pub(crate) fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_
     }
 }
 
-/// Manual-trigger reflect (the real path). Resolves the ceiling + key, builds the
-/// real Anthropic client, and runs [reflect_with_client]. Never on a timer.
+/// Manual-trigger reflect (the real path). Resolves the persisted Librarian model +
+/// ceiling + provider key, builds the right client (Anthropic or OpenAI-compatible),
+/// and runs [reflect_with_client]. Never on a timer.
 pub fn reflect_once(
     app: &AppHandle,
     index: &SqliteIndex,
@@ -232,19 +270,22 @@ pub fn reflect_once(
     now_date: Option<&str>,
     now_ms: i64,
 ) -> ReflectOutcome {
-    let cfg = ReflectConfig::default();
+    let cfg = ReflectConfig::from_librarian(&librarian::config(index.conn()));
     let ceiling_usd = budget::ceiling(index.conn());
-    let key = crate::modules::secrets::read_secret(app, KEYRING_SERVICE, KEYRING_ACCOUNT);
-    if let Some(reason) = pre_flight(ceiling_usd, key.is_some()) {
+    let account = librarian::keyring_account_for(&cfg.provider);
+    let key = if account.is_empty() {
+        None
+    } else {
+        crate::modules::secrets::read_secret(app, KEYRING_SERVICE, account)
+    };
+    // Keyless local providers (ollama/lmstudio/mlx/openai-compatible) satisfy the
+    // key gate with no key; everything else needs the provider's keyring entry.
+    let key_present = key.is_some() || librarian::is_keyless(&cfg.provider);
+    if let Some(reason) = pre_flight(ceiling_usd, key_present) {
         return ReflectOutcome::noop(reason);
     }
-    // pre_flight returned None ⇒ key is Some; let-else over expect() so a future
-    // reorder can never panic the worker here.
-    let Some(api_key) = key else {
-        return ReflectOutcome::noop(ReflectReason::NoKey);
-    };
-    let client = llm::AnthropicClient::new(api_key);
-    reflect_with_client(index, &client, &cfg, project_id, now_date, now_ms)
+    let client = build_client(&cfg, key);
+    reflect_with_client(index, client.as_ref(), &cfg, project_id, now_date, now_ms)
 }
 
 #[cfg(test)]
@@ -259,14 +300,25 @@ mod tests {
     }
 
     #[test]
-    fn estimate_is_conservative_and_unknown_model_prices_high() {
-        let cfg = ReflectConfig::default();
-        let haiku = estimate_cost(&cfg, "sys", "user");
-        let opus_cfg = ReflectConfig { model: "claude-opus-4-8".into(), ..cfg.clone() };
-        let opus = estimate_cost(&opus_cfg, "sys", "user");
-        assert!(opus > haiku, "opus pricier");
-        let unknown_cfg = ReflectConfig { model: "mystery".into(), ..cfg };
-        // unknown prices at opus, never cheaper.
-        assert!((estimate_cost(&unknown_cfg, "sys", "user") - opus).abs() < 1e-12);
+    fn estimate_scales_with_rates_and_is_zero_when_free() {
+        let cheap = ReflectConfig::default();
+        let pricey = ReflectConfig { in_rate: 5.0 / 1e6, out_rate: 25.0 / 1e6, ..ReflectConfig::default() };
+        assert!(
+            estimate_cost(&pricey, "sys", "user") > estimate_cost(&cheap, "sys", "user"),
+            "higher rates ⇒ higher estimate"
+        );
+        // A free local model (0 rates) must estimate AND charge 0.
+        let free = ReflectConfig { in_rate: 0.0, out_rate: 0.0, ..ReflectConfig::default() };
+        assert_eq!(estimate_cost(&free, "sys", "user"), 0.0);
+        assert_eq!(actual_cost(&free, 1000, 1000), 0.0);
+    }
+
+    #[test]
+    fn build_client_picks_provider() {
+        // Smoke: anthropic vs openai-compat construct without panicking; the concrete
+        // type is opaque, so we just assert both branches run.
+        let _a = build_client(&ReflectConfig::default(), Some("k".into()));
+        let oc = ReflectConfig { provider: "openai".into(), ..ReflectConfig::default() };
+        let _o = build_client(&oc, Some("k".into()));
     }
 }

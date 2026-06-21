@@ -219,6 +219,7 @@ pub fn run() {
             brain::commands::brain_rescan,
             brain::commands::brain_reflect,
             brain::commands::brain_set_budget,
+            brain::commands::brain_set_librarian,
             brain::commands::brain_budget_status,
             brain::commands::brain_recovered_panes,
             brain::commands::brain_curate,

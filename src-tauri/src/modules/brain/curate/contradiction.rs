@@ -140,7 +140,7 @@ pub fn curate_contradictions_with_client(
                 continue;
             }
         };
-        let actual = reflect::actual_cost(&cfg.model, resp.input_tokens, resp.output_tokens);
+        let actual = reflect::actual_cost(cfg, resp.input_tokens, resp.output_tokens);
         let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { est } else { actual };
         reflect::reconcile_or_log(index, rid, charge, now_ms);
         spent += charge;
@@ -204,21 +204,24 @@ fn enqueue_contradiction(
 /// Real wrapper: shares the front-door gate (no client built when the ceiling is off
 /// or no key — contradiction detection is purely paid, so it returns a noop reason).
 pub fn curate_contradictions_once(app: &tauri::AppHandle, index: &SqliteIndex, project: &str, now_ms: i64) -> CurationOutcome {
-    let cfg = ReflectConfig::default();
+    let cfg = ReflectConfig::from_librarian(&reflect::librarian::config(index.conn()));
     let ceiling = budget::ceiling(index.conn());
-    let key = crate::modules::secrets::read_secret(app, reflect::KEYRING_SERVICE, reflect::KEYRING_ACCOUNT);
-    if let Some(reason) = reflect::pre_flight(ceiling, key.is_some()) {
+    let account = reflect::librarian::keyring_account_for(&cfg.provider);
+    let key = if account.is_empty() {
+        None
+    } else {
+        crate::modules::secrets::read_secret(app, reflect::KEYRING_SERVICE, account)
+    };
+    let key_present = key.is_some() || reflect::librarian::is_keyless(&cfg.provider);
+    if let Some(reason) = reflect::pre_flight(ceiling, key_present) {
         let r = match reason {
             ReflectReason::Disabled => CurationReason::Disabled,
             _ => CurationReason::NoKey,
         };
         return CurationOutcome { proposals: Vec::new(), acted: 0, escalated: 0, spent_usd: 0.0, reason: r };
     }
-    let Some(k) = key else {
-        return CurationOutcome { proposals: Vec::new(), acted: 0, escalated: 0, spent_usd: 0.0, reason: CurationReason::NoKey };
-    };
-    let client = reflect::llm::AnthropicClient::new(k);
-    curate_contradictions_with_client(index, &client, &cfg, project, now_ms)
+    let client = reflect::build_client(&cfg, key);
+    curate_contradictions_with_client(index, client.as_ref(), &cfg, project, now_ms)
 }
 
 #[cfg(test)]

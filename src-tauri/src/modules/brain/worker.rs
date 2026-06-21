@@ -212,6 +212,18 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     log::warn!("brain: set budget ceiling failed ({e})");
                 }
             }
+            BrainEvent::SetLibrarian { provider, model, base_url, in_rate_mtok, out_rate_mtok } => {
+                let cfg = crate::modules::brain::reflect::librarian::LibrarianConfig {
+                    provider,
+                    model,
+                    base_url,
+                    in_rate_mtok,
+                    out_rate_mtok,
+                };
+                if let Err(e) = index.set_librarian_config(&cfg, now_epoch_ms()) {
+                    log::warn!("brain: set librarian config failed ({e})");
+                }
+            }
             BrainEvent::Curate { project, now_date } => {
                 let pids: Vec<String> = match &project {
                     Some(p) => vec![p.clone()],

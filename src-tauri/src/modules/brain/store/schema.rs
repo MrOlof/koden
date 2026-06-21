@@ -151,6 +151,25 @@ CREATE TABLE IF NOT EXISTS brain_budget_ledger (
 CREATE INDEX IF NOT EXISTS idx_ledger_reserved
     ON brain_budget_ledger (status) WHERE status = 'reserved';
 
+-- Librarian LLM selection: which provider/model the budgeted reflect+curate path
+-- uses. CANONICAL/preserved singleton (a human choice, NOT derived from disk) — so
+-- it lives in the base DDL (created + seeded on every open via INSERT OR IGNORE) and
+-- is absent from the upgrade DROP batch. Defaults to the historical Anthropic Haiku
+-- path so existing installs are byte-for-byte unchanged. `*_rate_mtok` are
+-- $/million-tokens (the frontend MODEL_PRICING unit; reflect converts to $/token);
+-- local/free providers store 0. The API key is read at call time from the per-
+-- provider `koden-ai` keyring account (e.g. openai-api-key) — never stored here.
+CREATE TABLE IF NOT EXISTS brain_librarian (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    provider      TEXT NOT NULL DEFAULT 'anthropic',
+    model         TEXT NOT NULL DEFAULT 'claude-haiku-4-5',
+    base_url      TEXT NOT NULL DEFAULT '',
+    in_rate_mtok  REAL NOT NULL DEFAULT 1.0,
+    out_rate_mtok REAL NOT NULL DEFAULT 5.0,
+    updated_at    INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO brain_librarian (id) VALUES (1);
+
 -- Semantic embedderId header (P5). CANONICAL/preserved singleton. Empty in v1 (no
 -- embedder compiled); set when the `semantic` feature is enabled so a later build
 -- can detect a model/dimension change and rebuild the vector index rather than

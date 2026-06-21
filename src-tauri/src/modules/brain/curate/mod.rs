@@ -179,7 +179,7 @@ pub fn curate_with_client(
                 continue;
             }
         };
-        let actual = reflect::actual_cost(&cfg.model, resp.input_tokens, resp.output_tokens);
+        let actual = reflect::actual_cost(cfg, resp.input_tokens, resp.output_tokens);
         let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { est } else { actual };
         reflect::reconcile_or_log(index, rid, charge, now_ms);
         spent += charge;
@@ -242,10 +242,16 @@ pub fn curate_act_only(index: &SqliteIndex, project: &str, now_date: Option<&str
 /// detection + the $0 ACT band (no client built), stamping the precise reason; only
 /// with key + ceiling does it run the full detect→act→escalate flow.
 pub fn curate_once(app: &AppHandle, index: &SqliteIndex, project: &str, now_date: Option<&str>, now_ms: i64) -> CurationOutcome {
-    let cfg = ReflectConfig::default();
+    let cfg = ReflectConfig::from_librarian(&reflect::librarian::config(index.conn()));
     let ceiling = budget::ceiling(index.conn());
-    let key = crate::modules::secrets::read_secret(app, reflect::KEYRING_SERVICE, reflect::KEYRING_ACCOUNT);
-    if let Some(reason) = reflect::pre_flight(ceiling, key.is_some()) {
+    let account = reflect::librarian::keyring_account_for(&cfg.provider);
+    let key = if account.is_empty() {
+        None
+    } else {
+        crate::modules::secrets::read_secret(app, reflect::KEYRING_SERVICE, account)
+    };
+    let key_present = key.is_some() || reflect::librarian::is_keyless(&cfg.provider);
+    if let Some(reason) = reflect::pre_flight(ceiling, key_present) {
         // escalation gated — run the $0 ACT band, then stamp the front-door reason
         // (unless there was nothing to do at all).
         let mut out = curate_act_only(index, project, now_date, now_ms);
@@ -257,8 +263,7 @@ pub fn curate_once(app: &AppHandle, index: &SqliteIndex, project: &str, now_date
         }
         return out;
     }
-    // pre_flight returned None ⇒ key present + ceiling > 0.
-    let Some(k) = key else { return curate_act_only(index, project, now_date, now_ms) };
-    let client = reflect::llm::AnthropicClient::new(k);
-    curate_with_client(index, &client, &cfg, project, now_date, now_ms)
+    // pre_flight returned None ⇒ ceiling > 0 and the provider's key gate is satisfied.
+    let client = reflect::build_client(&cfg, key);
+    curate_with_client(index, client.as_ref(), &cfg, project, now_date, now_ms)
 }

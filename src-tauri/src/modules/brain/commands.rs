@@ -306,6 +306,32 @@ pub fn brain_set_budget(state: State<BrainState>, ceiling_usd: f64) -> Result<()
     enqueue(&state, BrainEvent::SetBudget { ceiling_usd })
 }
 
+/// Set the Librarian's LLM provider/model (the budgeted reflect+curate path). The
+/// key is read at call time from the per-provider `koden-ai` keyring account; local
+/// providers (ollama/lmstudio/mlx) need none. `in_rate_usd_mtok`/`out_rate_usd_mtok`
+/// are $/million-tokens (0 for free local models) so the spend meter stays accurate.
+/// Defaults to Anthropic Haiku until set. Writer-side.
+#[tauri::command]
+pub fn brain_set_librarian(
+    state: State<BrainState>,
+    provider: String,
+    model: String,
+    base_url: String,
+    in_rate_usd_mtok: f64,
+    out_rate_usd_mtok: f64,
+) -> Result<(), String> {
+    enqueue(
+        &state,
+        BrainEvent::SetLibrarian {
+            provider,
+            model,
+            base_url,
+            in_rate_mtok: in_rate_usd_mtok,
+            out_rate_mtok: out_rate_usd_mtok,
+        },
+    )
+}
+
 /// Run stale-ADR / memory curation (V2 Flow G) on the worker. Decisive stale notes
 /// get a $0 archive proposal; borderline ones escalate to a budget-gated LLM
 /// classification. Archive-biased, human-gated — never edits/deletes a user file.
