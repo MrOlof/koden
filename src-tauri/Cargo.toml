@@ -26,7 +26,7 @@ default = []
 #                    (ort downloads the ONNX runtime) and at RUNTIME (model download),
 #                    so it is its own feature + its real run is an online/GUI step.
 semantic = ["dep:hnsw_rs"]
-semantic-embed = ["semantic", "dep:fastembed"]
+semantic-embed = ["semantic", "dep:fastembed", "dep:ort"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -80,6 +80,14 @@ hnsw_rs = { version = "0.3", optional = true }
 fastembed = { version = "5", optional = true, default-features = false, features = [
 	"ort-load-dynamic",
 	"hf-hub-rustls-tls",
+] }
+# Direct (exact-pinned to fastembed's `=2.0.0-rc.12` so it unifies to the single ort
+# already in the tree) ONLY to reach `ort::init_from` — a Result-returning dylib probe.
+# Without it, load-dynamic's first FFI call PANICS via `.expect("Failed to load ONNX
+# Runtime dylib")` on a missing onnxruntime.dll, which `panic = "abort"` turns into a
+# process abort = terminal crash. The embedder must fail open instead.
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = [
+	"load-dynamic",
 ] }
 serde_yaml = "0.9"
 tree-sitter = "0.26.9"

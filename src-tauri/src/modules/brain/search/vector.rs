@@ -26,6 +26,9 @@ pub trait VectorStore: Send + Sync {
     fn embedder_id(&self) -> &str;
     /// Insert-or-replace `(id → vector)` pairs.
     fn upsert(&self, ids: &[DocId], vectors: &[Vec<f32>]) -> Result<(), String>;
-    /// Top-`k` nearest by similarity, best-first, as `(id, score)`.
+    /// Top-`k` nearest, best-first, as `(id, score)`. `score` is higher-is-better
+    /// cosine similarity in `[-1, 1]` (NOT `[0, 1]` — orthogonal is 0, opposed is
+    /// negative); both impls agree. The RRF fuser uses leg RANK, not magnitude, so the
+    /// sign is irrelevant there — but anything reading the score must handle `[-1, 1]`.
     fn query(&self, vector: &[f32], k: usize) -> Result<Vec<(DocId, f32)>, String>;
 }

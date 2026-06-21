@@ -22,6 +22,16 @@ use super::vector::Embedder;
 const DIMS: usize = 384;
 const EMBEDDER_ID: &str = "bge-small-en-v1.5";
 
+/// ort's load-dynamic default dylib name per-OS (same resolution as ort's setup_api),
+/// used only when `ORT_DYLIB_PATH` is unset.
+const ORT_DYLIB_DEFAULT: &str = if cfg!(windows) {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
+
 pub struct FastembedEmbedder {
     model: Mutex<TextEmbedding>,
 }
@@ -30,6 +40,20 @@ impl FastembedEmbedder {
     /// Load (downloading on first use) the default bge-small model. Network at first
     /// call; cached thereafter under the fastembed cache dir.
     pub fn new() -> Result<Self, String> {
+        // FAIL-OPEN GUARD (the brain must never crash the terminal): under ort
+        // load-dynamic, the first FFI call inside `try_new` PANICS via
+        // `.expect("Failed to load ONNX Runtime dylib")` (ort lib.rs) if
+        // onnxruntime.dll can't be loaded — and `panic = "abort"` (release) turns
+        // that panic into a process abort. `?`/catch_unwind can't save us. So probe
+        // the dylib first with `ort::init_from`, which returns a Result AND caches the
+        // handle, so the later `try_new` reuses it and never reaches the panic path.
+        let dylib = std::env::var("ORT_DYLIB_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ORT_DYLIB_DEFAULT.to_string());
+        let _ = ort::init_from(&dylib)
+            .map_err(|e| format!("ONNX Runtime dylib not loadable ({dylib}): {e}"))?;
+
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
         )
@@ -47,7 +71,16 @@ impl Embedder for FastembedEmbedder {
     }
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let mut model = self.model.lock().map_err(|e| e.to_string())?;
-        model.embed(texts, None).map_err(|e| e.to_string())
+        let out = model.embed(texts, None).map_err(|e| e.to_string())?;
+        // Boundary check: a future fastembed/model swap that changed output dims would
+        // silently corrupt recall against a vector store keyed on this embedderId. Fail
+        // fast instead of persisting wrong-width vectors.
+        if let Some(first) = out.first() {
+            if first.len() != DIMS {
+                return Err(format!("embedder produced {}-dim vectors, expected {DIMS}", first.len()));
+            }
+        }
+        Ok(out)
     }
 }
 

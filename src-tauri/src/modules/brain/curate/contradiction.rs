@@ -50,22 +50,35 @@ pub fn parse_verdict(json_text: &str) -> Result<ContradictionVerdict, String> {
 pub fn contradiction_pairs(notes: &[NoteSummary]) -> Vec<(usize, usize, Vec<String>)> {
     let mut pairs = Vec::new();
     for i in 0..notes.len() {
-        for j in (i + 1)..notes.len() {
-            let ai: std::collections::BTreeSet<&str> = notes[i].anchors.iter().map(String::as_str).collect();
-            let shared: Vec<String> = notes[j]
-                .anchors
-                .iter()
-                .filter(|a| ai.contains(a.as_str()))
-                .cloned()
-                .collect();
+        // Hoisted: build note i's anchor set ONCE, not once per inner j.
+        let ai: std::collections::BTreeSet<&str> = notes[i].anchors.iter().map(String::as_str).collect();
+        if ai.is_empty() {
+            continue;
+        }
+        for (j, nj) in notes.iter().enumerate().skip(i + 1) {
+            let shared: Vec<String> =
+                nj.anchors.iter().filter(|a| ai.contains(a.as_str())).cloned().collect();
             if !shared.is_empty() {
                 pairs.push((i, j, shared));
             }
         }
     }
-    // Deterministic order (already i<j ascending); cap to bound spend.
-    pairs.truncate(MAX_PAIRS);
+    // Judge the MOST co-anchored pairs first: more shared anchors ⇒ likelier a real
+    // contradiction, and a pair sharing only one common/hub anchor (e.g. package.json)
+    // sinks below pairs sharing several specific ones. Tie-break by (i, j) so the cap
+    // is deterministic for identical input.
+    pairs.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+    if pairs.len() > MAX_PAIRS {
+        log::warn!(
+            "contradiction: {} co-anchored pairs; judging top {MAX_PAIRS} by shared-anchor count (rest skipped this pass)",
+            pairs.len()
+        );
+        pairs.truncate(MAX_PAIRS);
+    }
     pairs
+    // ponytail: relevance ranking deprioritizes hub-anchor pairs but doesn't drop them;
+    // add an anchor-frequency filter (skip anchors shared by >K notes) if hub anchors
+    // measurably waste budget.
 }
 
 /// Bounded, redacted digest of one co-anchored pair (metadata only).
@@ -136,10 +149,19 @@ pub fn curate_contradictions_with_client(
         if !v.contradicts {
             continue;
         }
-        // Flag the stale note (or, if the model didn't pick, note B by convention).
-        let stale = v.stale_id.filter(|s| s == &notes[i].id || s == &notes[j].id).unwrap_or_else(|| notes[j].id.clone());
-        let other = if stale == notes[i].id { &notes[j].id } else { &notes[i].id };
-        if let Some(p) = enqueue_contradiction(index, project, &stale, other, v.reason.trim(), now_ms) {
+        // FAIL CLOSED: only enqueue when the model names WHICH note is stale AND it's
+        // one of this pair. NoteSummary drops `created`, so we can't pick the older
+        // note ourselves — guessing (the old "note B by convention") risks flagging
+        // the CORRECT note. No valid pick ⇒ no proposal.
+        let Some(stale) = v
+            .stale_id
+            .as_deref()
+            .filter(|s| *s == notes[i].id.as_str() || *s == notes[j].id.as_str())
+        else {
+            continue;
+        };
+        let other = if stale == notes[i].id.as_str() { &notes[j].id } else { &notes[i].id };
+        if let Some(p) = enqueue_contradiction(index, project, stale, other, v.reason.trim(), now_ms) {
             proposals.push(p);
         }
     }

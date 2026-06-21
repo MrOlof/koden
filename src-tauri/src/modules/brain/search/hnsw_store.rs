@@ -6,7 +6,16 @@
 //! vector index is rebuilt from the persisted embeddings, not mutated in place. So
 //! `upsert` APPENDS; `query` de-dups by DocId (keeps the nearest) so a re-inserted
 //! id never returns twice. Cosine DISTANCE is converted to a higher-is-better score
-//! (`1 - distance`) to match the [VectorStore] contract + the lexical legs' fusion.
+//! `1 - distance`; hnsw_rs DistCosine returns `1 - cosΘ ∈ [0, 2]`, so the score is
+//! cosine similarity in `[-1, 1]` (same range as the BruteForceStore reference) — NOT
+//! `[0, 1]`. The RRF fuser consumes leg RANK, not score magnitude, so the sign is
+//! irrelevant there; anything reading the magnitude must handle `[-1, 1]`.
+//!
+//! NOT determinism-stable across runs: hnsw_rs seeds its layer RNG from OS entropy
+//! (`from_os_rng()`, no seeding API), so the graph topology — and thus the ANN result
+//! ordering — can differ run to run for identical input. This store therefore CANNOT
+//! back a cache-stable gist key as-is; use the deterministic BruteForceStore (or pin a
+//! seedable hnsw build) if/when the vector leg is folded into the gist hash.
 
 use std::sync::Mutex;
 
@@ -14,7 +23,8 @@ use hnsw_rs::prelude::{DistCosine, Hnsw};
 
 use super::vector::{DocId, VectorStore};
 
-/// HNSW build params (modest, deterministic for a fixed insertion order).
+/// HNSW build params (modest). NB: hnsw_rs layer assignment is RNG-seeded from OS
+/// entropy, so these params do NOT make the graph reproducible across runs.
 const MAX_NB_CONN: usize = 16;
 const MAX_LAYER: usize = 16;
 const EF_CONSTRUCTION: usize = 200;
@@ -67,6 +77,10 @@ impl VectorStore for HnswStore {
             return Ok(Vec::new());
         }
         // Over-fetch so de-dup by DocId can still return k distinct docs.
+        // ponytail: k*2 assumes ≤1 duplicate per slot — true for the intended flow
+        // (rebuild-from-persisted → each id inserted once). If a single id is
+        // re-upserted enough to crowd the 2k window it can under-return; grow the
+        // fetch (re-search up to ids.len()) only if live repeated upserts become real.
         let knbn = (k * 2).min(inner.ids.len());
         let neighbours = inner.hnsw.search(vector, knbn, EF_SEARCH);
         let mut seen = std::collections::HashSet::new();
