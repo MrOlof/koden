@@ -652,6 +652,20 @@ Produced autonomously (headless), the parts that don't need the GUI:
   blake3 → secrets-redact → FTS; reflect_with_client over a fake LLM; record_event →
   recover_all) across 26 `brain_sandbox` integration tests — real pipeline, not unit
   mocks.
+- **Headless brain CLI** (`src-tauri/examples/brain_cli.rs`) — the "headless koden
+  CLI" the mandate references (none existed; `koden.exe` is GUI-only via
+  `koden_lib::run()`). Drives the WHOLE V1 brain through a real binary, no Tauri app:
+  `cargo run --example brain_cli -- all` runs a 14-check battery against a built-in
+  fixture and exits 0 only if all pass. Live result — **14/14 passed**: index (4
+  files) · memory scan · search · AST symbol + tiered impact (login→session) · gist
+  byte-identical + secret-safe · secret-not-indexed · doctor (broken-anchor proposal)
+  · reflect disabled-by-default (no spend) + enabled ($0 fake LLM, charged $0.0020) ·
+  resume recover-working + skip-exited · semantic header empty. Also smoke-ran against
+  REAL code (`brain_cli index/search/impact src/modules/brain`): 36 Rust files
+  indexed; `session key derive`→`sessionkey.rs`, `budget reserve reconcile`→
+  `reflect/budget.rs` top-ranked; impact resolves defs + lexical dependents (Rust AST
+  `use`-edges are the documented P2 deferral, so ast_dependents is empty and the
+  lexical over-approximation carries it).
 
 ⏭ Still needs the running GUI app / the user (cannot be driven from a test harness
 here): the **fake-claude → agent-detect → brain-worker replay** (the worker is
