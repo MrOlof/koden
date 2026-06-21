@@ -520,6 +520,23 @@ html *::-webkit-scrollbar {
   animation: koden-shimmer var(--shimmer-duration, 2s) linear infinite;
 }
 
+/* Koden Brain tab icon: a gentle "alive while indexing" breathe (paired with the
+   status dot). Disabled under prefers-reduced-motion below. */
+@keyframes koden-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.9);
+  }
+}
+.koden-breathe {
+  animation: koden-breathe 1.6s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-fast: 0.01ms;
@@ -532,5 +549,8 @@ html *::-webkit-scrollbar {
   .koden-shimmer {
     animation: none;
     background-position: 0% center;
+  }
+  .koden-breathe {
+    animation: none;
   }
 }

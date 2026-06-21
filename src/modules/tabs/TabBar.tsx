@@ -13,6 +13,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
+import { BrainTabIcon } from "@/modules/brain";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
   Cancel01Icon,
@@ -31,7 +32,6 @@ import {
   Note01Icon,
   PencilEdit02Icon,
   PlusSignIcon,
-  Search01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { SpaceMeta } from "@/modules/spaces";
@@ -572,14 +572,7 @@ export function TabIcon({ tab }: { tab: Tab }) {
     );
   }
   if (tab.kind === "brain") {
-    return (
-      <HugeiconsIcon
-        icon={Search01Icon}
-        size={14}
-        strokeWidth={2}
-        className="shrink-0"
-      />
-    );
+    return <BrainTabIcon />;
   }
   if (tab.kind === "agent-topology" || tab.kind === "message-flow") {
     return (
