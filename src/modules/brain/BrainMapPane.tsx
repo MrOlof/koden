@@ -113,6 +113,24 @@ function buildTree(
     return t.leaf;
   };
   computeLeaf(root);
+  // Collapse single-child folder chains: src → modules → brain becomes one
+  // "src/modules/brain" node, killing the long thin branches a real (deep) tree
+  // produces but a hand-balanced mock never has.
+  const compress = (t: Tree) => {
+    const merged = new Map<string, Tree>();
+    for (let c of t.children.values()) {
+      while (c.kind === "folder" && c.children.size === 1) {
+        const only = c.children.values().next().value as Tree;
+        if (only.kind !== "folder") break;
+        only.label = `${c.label}/${only.label}`;
+        c = only;
+      }
+      compress(c);
+      merged.set(c.id, c);
+    }
+    t.children = merged;
+  };
+  compress(root);
   return root;
 }
 
@@ -134,10 +152,10 @@ function computeLayout(graph: BrainGraph): Layout {
     nodes.push({ id: t.id, kind: t.kind, label: t.label, projectId: pid, path: t.path, depth, leaf: t.leaf, color });
     const kids = [...t.children.values()];
     if (!kids.length) return;
-    const total = kids.reduce((s, k) => s + k.leaf, 0) || 1;
+    const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
     let cursor = angStart;
     for (const k of kids) {
-      const span = (angEnd - angStart) * (k.leaf / total);
+      const span = (angEnd - angStart) * (Math.sqrt(k.leaf) / total);
       treeEdges.push([t.id, k.id]);
       place(k, depth + 1, cursor, cursor + span, color, pid);
       cursor += span;
@@ -158,10 +176,10 @@ function computeLayout(graph: BrainGraph): Layout {
     // The project's subtree fans across an angular sector centered on its direction.
     const sector = P === 1 ? Math.PI * 1.8 : ((2 * Math.PI) / P) * 0.86;
     const kids = [...root.children.values()];
-    const total = kids.reduce((s, k) => s + k.leaf, 0) || 1;
+    const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
     let cursor = a - sector / 2;
     for (const k of kids) {
-      const span = sector * (k.leaf / total);
+      const span = sector * (Math.sqrt(k.leaf) / total);
       treeEdges.push([proj.id, k.id]);
       place(k, 1, cursor, cursor + span, color, proj.project_id);
       cursor += span;
@@ -429,6 +447,27 @@ export function BrainMapPane() {
         </defs>
         <rect data-bg="1" x={-W} y={-H} width={W * 2} height={H * 2} fill="transparent" />
         <g ref={camG}>
+          {/* spines: brain core → project hubs */}
+          <g className="text-muted-foreground">
+            {layout.nodes.map((n) => {
+              if (n.kind !== "project") return null;
+              const h = pos.get(n.id);
+              if (!h) return null;
+              const on = !focusPid || focusPid === n.projectId;
+              return (
+                <line
+                  key={`spine${n.id}`}
+                  x1={0}
+                  y1={0}
+                  x2={h.x}
+                  y2={h.y}
+                  stroke={focusPid === n.projectId ? n.color : "currentColor"}
+                  strokeWidth={focusPid === n.projectId ? 1.6 : 1.1}
+                  strokeOpacity={on ? 0.45 : 0.06}
+                />
+              );
+            })}
+          </g>
           {/* tree branches (project → folder → file/memory) */}
           <g className="text-muted-foreground">
             {layout.treeEdges.map(([aId, bId]) => {
