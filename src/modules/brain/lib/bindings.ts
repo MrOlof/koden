@@ -17,7 +17,10 @@ export type BrainStatus =
 
 export type ProjectStatus = { project: Project; files: number };
 
-export type BrainStatusReport = { status: BrainStatus; projects: ProjectStatus[] };
+export type BrainStatusReport = {
+  status: BrainStatus;
+  projects: ProjectStatus[];
+};
 
 /** Lexical (BM25 + weighted RRF) search. `project = null` searches every project. */
 export function brainSearch(
@@ -46,7 +49,11 @@ export function brainRemoveProject(project: string): Promise<void> {
   return invoke<void>("brain_remove_project", { project });
 }
 
-export type WorkspaceStatus = { root: string | null; configured: boolean; projects: number };
+export type WorkspaceStatus = {
+  root: string | null;
+  configured: boolean;
+  projects: number;
+};
 
 /** First-run / setup status of the workspace (source of truth). `configured` is false
  *  when no root is set and no projects exist → show the setup wizard. */
@@ -88,12 +95,16 @@ export type MemoryProposal = {
 };
 
 /** Structured memory notes (cards). `project = null` = all. */
-export function brainNotes(project: string | null = null): Promise<NoteSummary[]> {
+export function brainNotes(
+  project: string | null = null,
+): Promise<NoteSummary[]> {
   return invoke<NoteSummary[]>("brain_notes", { project });
 }
 
 /** Pending memory proposals (the review inbox). `project = null` = all. */
-export function brainProposals(project: string | null = null): Promise<MemoryProposal[]> {
+export function brainProposals(
+  project: string | null = null,
+): Promise<MemoryProposal[]> {
   return invoke<MemoryProposal[]>("brain_proposals", { project });
 }
 
@@ -127,6 +138,27 @@ export function brainReflect(
 /** Set the reflect monthly spend ceiling (USD). `0` disables reflect entirely. */
 export function brainSetBudget(ceilingUsd: number): Promise<void> {
   return invoke<void>("brain_set_budget", { ceilingUsd });
+}
+
+/** Set the Librarian's LLM provider/model (the budgeted reflect+curate path). The
+ *  key is read at call time from the per-provider `koden-ai` keyring account (the
+ *  same one the main-AI Settings write); local providers (ollama/lmstudio/mlx) need
+ *  none. Rates are $/million-tokens — pass 0 for free local models so the spend
+ *  meter stays accurate. `baseUrl` empty = the canonical per-provider URL. */
+export function brainSetLibrarian(
+  provider: string,
+  model: string,
+  baseUrl: string,
+  inRateUsdMtok: number,
+  outRateUsdMtok: number,
+): Promise<void> {
+  return invoke<void>("brain_set_librarian", {
+    provider,
+    model,
+    baseUrl,
+    inRateUsdMtok,
+    outRateUsdMtok,
+  });
 }
 
 /** Run stale-ADR / memory curation (V2 Flow G). `project = null` curates all.
@@ -174,7 +206,11 @@ export type GraphNode = {
   mtime: number;
 };
 
-export type GraphEdge = { a: string; b: string; kind: "contains" | "import" | "anchor" };
+export type GraphEdge = {
+  a: string;
+  b: string;
+  kind: "contains" | "import" | "anchor";
+};
 
 export type BrainGraph = { nodes: GraphNode[]; edges: GraphEdge[] };
 
@@ -200,13 +236,19 @@ export function brainBuildGist(
 /** Longest-prefix match a cwd against registered project roots → project id.
  *  Case-insensitive: Windows/macOS paths fold case, and a missed match only
  *  means a silently un-injected gist, so over-matching here is the safe error. */
-export async function resolveProjectForCwd(cwd: string): Promise<string | null> {
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+export async function resolveProjectForCwd(
+  cwd: string,
+): Promise<string | null> {
+  const norm = (p: string) =>
+    p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
   const c = norm(cwd);
   let best: { id: string; rootLen: number } | null = null;
   for (const p of await brainListProjects()) {
     const root = norm(p.root);
-    if ((c === root || c.startsWith(`${root}/`)) && (!best || root.length > best.rootLen)) {
+    if (
+      (c === root || c.startsWith(`${root}/`)) &&
+      (!best || root.length > best.rootLen)
+    ) {
       best = { id: p.id, rootLen: root.length };
     }
   }

@@ -9,8 +9,12 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   getProvider,
+  LMSTUDIO_DEFAULT_BASE_URL,
+  MLX_DEFAULT_BASE_URL,
+  MODEL_PRICING,
   MODELS,
   type ModelId,
+  OLLAMA_DEFAULT_BASE_URL,
   PROVIDERS,
   type ProviderId,
   providerSupportsKey,
@@ -18,6 +22,7 @@ import {
 import { getAllKeys, hasAnyKey, setKey } from "@/modules/ai/lib/keyring";
 import {
   brainSetBudget,
+  brainSetLibrarian,
   brainSetWorkspace,
   brainWorkspaceStatus,
 } from "@/modules/brain/lib/bindings";
@@ -31,14 +36,13 @@ import {
   ComputerIcon,
   FolderOpenIcon,
   HierarchySquare01Icon,
-  Key01Icon,
   RoboticIcon,
   RocketIcon,
   type Search01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const DONE_KEY = "koden.onboarding.v1.done";
 
@@ -62,15 +66,63 @@ function defaultModelForProvider(id: ProviderId): ModelId | null {
   );
 }
 
+// ── Librarian model selection ──────────────────────────────────────────────
+// The Librarian does light background work, so it defaults to the cheapest model
+// of the connected provider. Rates ($/million tokens) come from the same pricing
+// table the main AI uses, so the budget meter stays accurate; local models are free.
+
+const LOCAL_LIB_PROVIDERS: readonly ProviderId[] = [
+  "ollama",
+  "lmstudio",
+  "mlx",
+];
+
+function isLocalLibProvider(p: ProviderId): boolean {
+  return (LOCAL_LIB_PROVIDERS as readonly string[]).includes(p);
+}
+
+function libLocalBaseUrl(p: ProviderId): string {
+  if (p === "lmstudio") return LMSTUDIO_DEFAULT_BASE_URL;
+  if (p === "mlx") return MLX_DEFAULT_BASE_URL;
+  return OLLAMA_DEFAULT_BASE_URL;
+}
+
+function libRates(
+  provider: ProviderId,
+  model: string,
+): { inRate: number; outRate: number } {
+  if (isLocalLibProvider(provider)) return { inRate: 0, outRate: 0 };
+  const p = MODEL_PRICING[model];
+  // Unknown price → conservative tier so the budget can never under-count.
+  return p
+    ? { inRate: p.input, outRate: p.output }
+    : { inRate: 5, outRate: 25 };
+}
+
+/** Cheapest curated model for a provider (by input+output $/Mtok), or its first
+ *  curated model if none are priced. "" when the provider has no curated model. */
+function cheapestLibModel(provider: ProviderId): string {
+  const priced = MODELS.filter(
+    (m) => m.provider === provider && isCuratedModelId(m.id),
+  )
+    .flatMap((m) => {
+      const p = MODEL_PRICING[m.id];
+      return p ? [{ id: m.id, sum: p.input + p.output }] : [];
+    })
+    .sort((a, b) => a.sum - b.sum);
+  if (priced[0]) return priced[0].id;
+  return (
+    MODELS.find((m) => m.provider === provider && isCuratedModelId(m.id))?.id ??
+    ""
+  );
+}
+
 type StepMeta = { title: string; subtitle: string };
 
 const STEPS: StepMeta[] = [
   { title: "Welcome to Koden", subtitle: "An AI workspace for your code." },
   { title: "How Koden works", subtitle: "Three pieces, set up once." },
-  {
-    title: "Connect an AI model",
-    subtitle: "Bring your own, cloud or local.",
-  },
+  { title: "Connect an AI model", subtitle: "Bring your own, cloud or local." },
   {
     title: "Choose your projects folder",
     subtitle: "The source of truth for the brain.",
@@ -90,9 +142,10 @@ const STEPS: StepMeta[] = [
  *
  * Every step writes through the real backend: API keys go to the OS keyring via
  * secrets_set (never logged), the active model to the settings store, the workspace
- * to brain_set_workspace, and the Librarian budget to brain_set_budget. Nothing here
- * fakes a setting. Gated on a localStorage completion key + an unconfigured workspace
- * so existing users are never re-prompted.
+ * to brain_set_workspace, and the Librarian provider/model + budget to
+ * brain_set_librarian / brain_set_budget. Nothing here fakes a setting. Gated on a
+ * localStorage completion key + an unconfigured workspace so existing users are
+ * never re-prompted.
  */
 export function OnboardingWizard() {
   const [show, setShow] = useState(false);
@@ -100,6 +153,7 @@ export function OnboardingWizard() {
 
   // AI step
   const [aiConfigured, setAiConfigured] = useState(false);
+  const [keyedProviders, setKeyedProviders] = useState<ProviderId[]>([]);
   const [provider, setProvider] = useState<ProviderId>(
     (CLOUD_PROVIDERS.includes("anthropic")
       ? "anthropic"
@@ -114,8 +168,9 @@ export function OnboardingWizard() {
   const [wsAdded, setWsAdded] = useState<number | null>(null);
 
   // Librarian step
-  const [anthropicPresent, setAnthropicPresent] = useState(false);
-  const [libKey, setLibKey] = useState("");
+  const [libProvider, setLibProvider] = useState<ProviderId | "">("");
+  const [libModel, setLibModel] = useState("");
+  const [libBaseUrl, setLibBaseUrl] = useState("");
   const [libBudget, setLibBudget] = useState("");
   const [libBusy, setLibBusy] = useState(false);
   const [libEnabled, setLibEnabled] = useState(false);
@@ -133,7 +188,11 @@ export function OnboardingWizard() {
           const keys = await getAllKeys();
           if (alive) {
             setAiConfigured(hasAnyKey(keys));
-            setAnthropicPresent(!!keys.anthropic);
+            setKeyedProviders(
+              PROVIDERS.filter(
+                (p) => providerSupportsKey(p.id) && keys[p.id],
+              ).map((p) => p.id),
+            );
           }
         } catch {}
       })
@@ -142,6 +201,37 @@ export function OnboardingWizard() {
       alive = false;
     };
   }, []);
+
+  // The set of providers the Librarian can use: connected cloud keys (minus the
+  // free-form openai-compatible, which needs its own base URL) + the local servers.
+  const libProviders: ProviderId[] = [
+    ...keyedProviders.filter((p) => p !== "openai-compatible"),
+    ...LOCAL_LIB_PROVIDERS,
+  ];
+
+  // Switch the Librarian to a provider: cloud → its cheapest model; local → a
+  // model-name field + the server's default URL, and a nominal cap so one click
+  // enables it (local is free, but ceiling > 0 is the on-switch).
+  const pickLibProvider = useCallback((p: ProviderId) => {
+    setLibProvider(p);
+    if (isLocalLibProvider(p)) {
+      setLibBaseUrl(libLocalBaseUrl(p));
+      setLibModel("");
+      setLibBudget((b) => (b.trim() ? b : "1"));
+    } else {
+      setLibModel(cheapestLibModel(p));
+      setLibBaseUrl("");
+    }
+  }, []);
+
+  // Default the Librarian provider when the user lands on its step.
+  useEffect(() => {
+    if (step !== 4 || libProvider) return;
+    const initial = keyedProviders.includes(provider)
+      ? provider
+      : (keyedProviders.find((p) => p !== "openai-compatible") ?? "ollama");
+    pickLibProvider(initial);
+  }, [step, libProvider, keyedProviders, provider, pickLibProvider]);
 
   if (!show) return null;
 
@@ -168,7 +258,9 @@ export function OnboardingWizard() {
       if (model) await setDefaultModel(model);
       await emitKeysChanged();
       setAiConfigured(true);
-      if (provider === "anthropic") setAnthropicPresent(true);
+      setKeyedProviders((prev) =>
+        prev.includes(provider) ? prev : [...prev, provider],
+      );
       setApiKey("");
       next();
     } catch (e) {
@@ -213,25 +305,24 @@ export function OnboardingWizard() {
 
   const enableLibrarianAndNext = async () => {
     const budget = Number.parseFloat(libBudget);
-    const key = libKey.trim();
-    // Nothing to do → just advance, Librarian stays off (the safe default).
-    if (!key && !(budget > 0)) {
+    // No budget (or no provider) → leave the Librarian off (the safe default).
+    if (!(budget > 0) || !libProvider) {
       next();
+      return;
+    }
+    const model = libModel.trim();
+    if (!model) {
+      setError("Choose a model for the Librarian.");
       return;
     }
     setLibBusy(true);
     setError(null);
     try {
-      if (key) {
-        await setKey("anthropic", key);
-        await emitKeysChanged();
-        setAnthropicPresent(true);
-        setLibKey("");
-      }
-      if (budget > 0) {
-        await brainSetBudget(budget);
-        setLibEnabled(true);
-      }
+      const { inRate, outRate } = libRates(libProvider, model);
+      const baseUrl = isLocalLibProvider(libProvider) ? libBaseUrl.trim() : "";
+      await brainSetLibrarian(libProvider, model, baseUrl, inRate, outRate);
+      await brainSetBudget(budget);
+      setLibEnabled(true);
       next();
     } catch (e) {
       setError(String(e));
@@ -241,6 +332,7 @@ export function OnboardingWizard() {
   };
 
   const meta = STEPS[step];
+  const libBudgetOn = Number.parseFloat(libBudget) > 0;
 
   return (
     <Dialog open={show} onOpenChange={() => {}}>
@@ -295,9 +387,13 @@ export function OnboardingWizard() {
           )}
           {step === 4 && (
             <LibrarianBody
-              anthropicPresent={anthropicPresent}
-              libKey={libKey}
-              onLibKey={setLibKey}
+              providers={libProviders}
+              provider={libProvider}
+              onProvider={pickLibProvider}
+              model={libModel}
+              onModel={setLibModel}
+              baseUrl={libBaseUrl}
+              onBaseUrl={setLibBaseUrl}
               budget={libBudget}
               onBudget={setLibBudget}
             />
@@ -400,7 +496,7 @@ export function OnboardingWizard() {
               >
                 {libBusy
                   ? "Saving…"
-                  : libBudget.trim() || libKey.trim()
+                  : libBudgetOn
                     ? "Enable & continue"
                     : "Leave it off"}
                 <HugeiconsIcon
@@ -661,52 +757,119 @@ function WorkspaceBody({
 }
 
 function LibrarianBody({
-  anthropicPresent,
-  libKey,
-  onLibKey,
+  providers,
+  provider,
+  onProvider,
+  model,
+  onModel,
+  baseUrl,
+  onBaseUrl,
   budget,
   onBudget,
 }: {
-  anthropicPresent: boolean;
-  libKey: string;
-  onLibKey: (v: string) => void;
+  providers: ProviderId[];
+  provider: ProviderId | "";
+  onProvider: (p: ProviderId) => void;
+  model: string;
+  onModel: (v: string) => void;
+  baseUrl: string;
+  onBaseUrl: (v: string) => void;
   budget: string;
   onBudget: (v: string) => void;
 }) {
+  const local = !!provider && isLocalLibProvider(provider);
+  const rates = provider
+    ? libRates(provider, model)
+    : { inRate: 0, outRate: 0 };
+  const cloudModels =
+    provider && !local
+      ? MODELS.filter((m) => m.provider === provider && isCuratedModelId(m.id))
+      : [];
+
   return (
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-muted-foreground">
-        The Librarian uses an <span className="text-foreground">Anthropic</span>{" "}
-        model to propose tidy-ups to your project memory, and you always approve
-        before anything is saved. It's Anthropic-only for now and costs a little
-        per run, so it's gated by a small spending cap (set $0 anytime to turn
-        it off).
+        The Librarian does light background work, so it runs best on a small,
+        cheap model. It proposes tidy-ups to your project memory; you always
+        approve before anything is saved.
       </p>
 
-      {anthropicPresent ? (
-        <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
-          <HugeiconsIcon
-            icon={CheckmarkCircle02Icon}
-            size={15}
-            strokeWidth={2}
-          />
-          Anthropic key detected. Just set a budget below to enable it.
+      <div>
+        <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+          Run it on
         </div>
-      ) : (
-        <div>
-          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <HugeiconsIcon icon={Key01Icon} size={14} strokeWidth={1.75} />{" "}
-            Anthropic API key
+        <select
+          value={provider}
+          onChange={(e) => onProvider(e.target.value as ProviderId)}
+          className="h-9 w-full rounded-lg border bg-background px-2 text-sm outline-none [&>option]:bg-popover [&>option]:text-popover-foreground"
+        >
+          {providers.map((id) => (
+            <option key={id} value={id}>
+              {getProvider(id).label}
+              {isLocalLibProvider(id) ? " (local, free)" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {local ? (
+        <div className="space-y-2">
+          <div>
+            <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+              Model name
+            </div>
+            <Input
+              value={model}
+              onChange={(e) => onModel(e.target.value)}
+              placeholder="e.g. llama3.1"
+              className="h-9 text-sm"
+            />
           </div>
-          <Input
-            type="password"
-            value={libKey}
-            onChange={(e) => onLibKey(e.target.value)}
-            placeholder="sk-ant-…"
-            className="h-9 text-sm"
-          />
+          <div>
+            <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+              Server URL
+            </div>
+            <Input
+              value={baseUrl}
+              onChange={(e) => onBaseUrl(e.target.value)}
+              placeholder="http://localhost:11434/v1"
+              className="h-9 text-sm"
+            />
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Free and private. Needs the local server running with this model
+            loaded.
+          </p>
         </div>
-      )}
+      ) : provider ? (
+        <div>
+          <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-muted-foreground">
+            <span>Model</span>
+            <span className="font-normal text-muted-foreground/80">
+              {`$${rates.inRate} / $${rates.outRate} per 1M tokens`}
+            </span>
+          </div>
+          <select
+            value={model}
+            onChange={(e) => onModel(e.target.value)}
+            className="h-9 w-full rounded-lg border bg-background px-2 text-sm outline-none [&>option]:bg-popover [&>option]:text-popover-foreground"
+          >
+            {cloudModels.map((m) => {
+              const p = MODEL_PRICING[m.id];
+              return (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                  {p ? ` ($${p.input}/$${p.output})` : ""}
+                </option>
+              );
+            })}
+          </select>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            A small, cheap model is recommended; it only writes proposals you
+            approve.
+          </p>
+        </div>
+      ) : null}
 
       <div>
         <div className="mb-1.5 text-xs font-medium text-muted-foreground">
@@ -720,8 +883,9 @@ function LibrarianBody({
           className="h-9 text-sm"
         />
         <p className="mt-1.5 text-[11px] text-muted-foreground">
-          A few dollars is plenty. This is a spending cap, not a recurring
-          charge. Spend only counts up; clear it to $0 to disable.
+          {local
+            ? "Local models are free; any non-zero value just switches the Librarian on."
+            : "A few dollars is plenty. A spending cap, not a recurring charge; spend only counts up, clear it to $0 to disable."}
         </p>
       </div>
     </div>
