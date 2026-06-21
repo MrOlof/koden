@@ -68,9 +68,9 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
         }
     }
 
-    // Boot sweep (P4): charge any reflect reservation orphaned by a mid-call crash
-    // at its estimate, so a crashed reflect over-counts rather than leaking free
-    // spend. Fail-open — a sweep error never blocks startup.
+    // Boot sweep (P4): charge any orphaned budget reservation (reflect OR curation —
+    // one shared ledger, no source filter) at its estimate, so a crashed paid call
+    // over-counts rather than leaking free spend. Fail-open — never blocks startup.
     match index.sweep_orphaned_reservations(now_epoch_ms()) {
         Ok(n) if n > 0 => log::info!("brain: swept {n} orphaned reflect reservation(s)"),
         Ok(_) => {}

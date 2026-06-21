@@ -49,7 +49,7 @@ pub struct MemoryProposal {
     pub target_id: Option<String>,
     pub title: String,
     pub detail: String,
-    pub source: String, // "doctor" | "reflect"
+    pub source: String, // "doctor" | "reflect" | "curate"
     pub status: String, // "pending" | "applied" | "rejected"
 }
 

@@ -168,17 +168,18 @@ impl SqliteIndex {
     ) -> rusqlite::Result<()> {
         let anchors_json = serde_json::to_string(&note.anchors).unwrap_or_else(|_| "[]".to_string());
         self.conn.execute(
-            "INSERT INTO notes(project_id,id,path,note_type,status,title,scope,provenance,created,revalidate_after,superseded_by,anchors,hash)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+            "INSERT INTO notes(project_id,id,path,note_type,status,title,scope,provenance,created,revalidate_after,supersedes,superseded_by,anchors,hash)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
              ON CONFLICT(project_id,id) DO UPDATE SET
                 path=excluded.path, note_type=excluded.note_type, status=excluded.status,
                 title=excluded.title, scope=excluded.scope, provenance=excluded.provenance,
                 created=excluded.created, revalidate_after=excluded.revalidate_after,
-                superseded_by=excluded.superseded_by, anchors=excluded.anchors, hash=excluded.hash",
+                supersedes=excluded.supersedes, superseded_by=excluded.superseded_by,
+                anchors=excluded.anchors, hash=excluded.hash",
             rusqlite::params![
                 project_id, note.id, rel_path, note.note_type, note.status, note.title,
                 note.scope, note.provenance, note.created, note.revalidate_after,
-                note.superseded_by, anchors_json, hash
+                note.supersedes, note.superseded_by, anchors_json, hash
             ],
         )?;
         Ok(())
@@ -221,17 +222,18 @@ impl SqliteIndex {
     /// Full note records for the doctor.
     pub fn list_note_records(&self, project_id: &str) -> rusqlite::Result<Vec<NoteRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, note_type, revalidate_after, superseded_by, COALESCE(anchors,'[]')
+            "SELECT id, note_type, revalidate_after, supersedes, superseded_by, COALESCE(anchors,'[]')
              FROM notes WHERE project_id=?1",
         )?;
         let it = stmt.query_map([project_id], |r| {
             let anchors: Vec<String> =
-                serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default();
+                serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default();
             Ok(NoteRecord {
                 id: r.get(0)?,
                 note_type: r.get(1)?,
                 revalidate_after: r.get(2)?,
-                superseded_by: r.get(3)?,
+                supersedes: r.get(3)?,
+                superseded_by: r.get(4)?,
                 anchors,
             })
         })?;

@@ -40,19 +40,22 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     // cleanly and re-runs, never leaving a half-dropped schema or an out-of-step
     // version row. (PRAGMAs above must stay OUTSIDE the txn.)
     let tx = conn.unchecked_transaction()?;
-    // On any upgrade, drop the DERIVED (file-backed) tables so the DDL recreates
-    // them at the current schema and the next warm pass rebuilds them — backfills
-    // new columns + the AST-fed `symbols` column. Canonical data (notes,
-    // proposals, reject_signatures, brain_budget, brain_budget_ledger,
-    // brain_semantic_meta) is preserved (preserve-over-destroy) PURELY by being
-    // absent from this DROP batch — this is a drop-list, not a keep-list, so NEVER
-    // add a canonical table here.
+    // On any upgrade, drop the DERIVED tables so the DDL recreates them at the
+    // current schema and the next warm pass rebuilds them — backfills new columns
+    // (incl. the AST-fed `symbols` and `notes.supersedes`). DERIVED = rebuildable
+    // from disk: the code index (code_fts/code_nodes/code_imports/code_edges + the
+    // `files` manifest) AND `notes` (re-scanned from the `.md` files by
+    // `scan_project_memory` on the next warm pass). Truly CANONICAL data — proposals,
+    // reject_signatures (human decisions), brain_budget(+ledger) (spend state),
+    // brain_semantic_meta — is preserved PURELY by being absent from this DROP batch.
+    // This is a drop-list, not a keep-list, so NEVER add a canonical table here.
     if matches!(current, Some(v) if v < SCHEMA_VERSION) {
         tx.execute_batch(
             "DROP TABLE IF EXISTS code_fts;
              DROP TABLE IF EXISTS code_nodes;
              DROP TABLE IF EXISTS code_imports;
              DROP TABLE IF EXISTS code_edges;
+             DROP TABLE IF EXISTS notes;
              DELETE FROM files;",
         )?;
     }

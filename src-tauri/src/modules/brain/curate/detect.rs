@@ -2,7 +2,12 @@
 //! Stage 1 is a free, transparent heuristic over per-note signals; it decides
 //! SKIP / ESCALATE (let the Tier-2 LLM judge) / ACT (propose without paying the LLM).
 //! Detection REUSES the P1 doctor's `check()` (broken_anchor, stale_revalidate) and
-//! adds `superseded_present` (a newer note resolves this one's `superseded_by`).
+//! adds `superseded_present` (EITHER supersession edge resolves, §6 Flow G step 1).
+//!
+//! Deferred Flow G signals (CONCEPT:308-310, not yet implemented): "high churn in
+//! the referenced area" (needs git/churn data) and "(LLM-only) direct contradiction
+//! by a newer note" (a paid escalate path). The three free signals here are a
+//! disclosed subset, not the full set.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -21,11 +26,13 @@ const W_SUPERSEDED: f64 = 1.5; // a newer note supersedes this one — the stron
 /// worth a paid judgment). ≥ HIGH: act directly (signals already decisive; propose
 /// the preserve-biased archive without spending a token).
 ///
-/// Tuned so a LONE `broken_anchor` (0.6) SKIPs — the P1 doctor already proposes
-/// re-anchoring it, so curation must not double-propose; broken_anchor only
-/// contributes once stacked with another signal. A single strong signal
-/// (passed_revalidate 1.0 or superseded_present 1.5) ESCALATEs (the LLM earns its
-/// keep on the keep-as-history vs obsolete call); two stacked signals ACT ($0).
+/// Tuned so `broken_anchor` (0.6, saturated to one unit per note) can NEVER cross
+/// LOW on its own — the P1 doctor already proposes re-anchoring, so curation must not
+/// double-propose; it only contributes once stacked with another signal. A single
+/// strong signal (passed_revalidate 1.0 or superseded_present 1.5) ESCALATEs (the LLM
+/// earns its keep on the keep-as-history vs obsolete call). A pair reaches ACT ($0)
+/// only when it includes superseded_present (e.g. superseded 1.5 + revalidate 1.0 =
+/// 2.5 ≥ HIGH); weaker pairs (broken_anchor + revalidate = 1.6) still ESCALATE.
 const LOW: f64 = 0.7;
 const HIGH: f64 = 2.0;
 
@@ -76,23 +83,50 @@ pub fn detect_candidates(
         }
     };
 
+    // broken_anchor is added at most ONCE per note (saturated), so a note with N
+    // broken anchors can never cross LOW on that signal alone — the doctor already
+    // proposes one re-anchor per broken anchor, and curation must not double-propose.
+    let mut anchor_counted: HashSet<String> = HashSet::new();
     for f in check(records, indexed_paths, now_date) {
         let Some(id) = f.note_id.as_deref() else { continue };
         match f.check {
             "stale_revalidate" => add(id, SIG_PASSED_REVALIDATE, W_REVALIDATE, &mut score, &mut signals),
-            "broken_anchor" => add(id, SIG_BROKEN_ANCHOR, W_BROKEN_ANCHOR, &mut score, &mut signals),
+            "broken_anchor" => {
+                if anchor_counted.insert(id.to_string()) {
+                    add(id, SIG_BROKEN_ANCHOR, W_BROKEN_ANCHOR, &mut score, &mut signals);
+                }
+            }
             _ => {} // missing_type / broken_supersession aren't curation (archive) signals
         }
     }
 
-    // superseded_present: a note whose `superseded_by` resolves to an existing note.
+    // superseded_present: a note is superseded if EITHER edge resolves (CONCEPT
+    // Flow G defines the signal via the NEWER note's forward `supersedes`; the OLD
+    // note's back-link `superseded_by` is the common-but-not-guaranteed companion).
+    // Union of both, self-references excluded (malformed data, not a real signal).
     let ids: HashSet<&str> = records.iter().map(|r| r.id.as_str()).collect();
     let mut superseded_by: BTreeMap<String, String> = BTreeMap::new();
+    let mark_superseded = |stale: &str, newer: &str, score: &mut BTreeMap<String, f64>, signals: &mut BTreeMap<String, Vec<&'static str>>, superseded_by: &mut BTreeMap<String, String>| {
+        if stale == newer {
+            return; // self-supersession — not a curation signal
+        }
+        if superseded_by.contains_key(stale) {
+            return; // already marked via the other edge — don't double-weight
+        }
+        add(stale, SIG_SUPERSEDED_PRESENT, W_SUPERSEDED, score, signals);
+        superseded_by.insert(stale.to_string(), newer.to_string());
+    };
     for r in records {
+        // back-link: r.superseded_by → r is the stale one (target must exist).
         if let Some(sb) = &r.superseded_by {
             if ids.contains(sb.as_str()) {
-                add(&r.id, SIG_SUPERSEDED_PRESENT, W_SUPERSEDED, &mut score, &mut signals);
-                superseded_by.insert(r.id.clone(), sb.clone());
+                mark_superseded(&r.id, sb, &mut score, &mut signals, &mut superseded_by);
+            }
+        }
+        // forward edge: r.supersedes → that target is the stale one (must exist).
+        if let Some(sup) = &r.supersedes {
+            if ids.contains(sup.as_str()) {
+                mark_superseded(sup, &r.id, &mut score, &mut signals, &mut superseded_by);
             }
         }
     }
@@ -121,7 +155,46 @@ mod tests {
     use crate::modules::brain::memory::doctor::NoteRecord;
 
     fn note(id: &str) -> NoteRecord {
-        NoteRecord { id: id.into(), note_type: Some("decision".into()), revalidate_after: None, superseded_by: None, anchors: vec![] }
+        NoteRecord { id: id.into(), note_type: Some("decision".into()), revalidate_after: None, supersedes: None, superseded_by: None, anchors: vec![] }
+    }
+
+    #[test]
+    fn forward_supersedes_edge_flags_the_target() {
+        // Spec-correct corpus: NEW note b carries `supersedes: a`; a has NO back-link.
+        // a must still become the candidate (the forward edge resolves to it).
+        let a = note("a");
+        let b = NoteRecord { supersedes: Some("a".into()), ..note("b") };
+        let cands = detect_candidates(&[a, b], &HashSet::new(), None);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].note_id, "a", "the SUPERSEDED note is the candidate, not the newer one");
+        assert!(cands[0].signals.contains(&SIG_SUPERSEDED_PRESENT));
+        assert_eq!(cands[0].superseded_by.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn both_edges_present_do_not_double_weight() {
+        // a.superseded_by=b AND b.supersedes=a — the same relation from both sides
+        // must mark `a` exactly once (score 1.5, ESCALATE — not 3.0/ACT).
+        let a = NoteRecord { superseded_by: Some("b".into()), ..note("a") };
+        let b = NoteRecord { supersedes: Some("a".into()), ..note("b") };
+        let cands = detect_candidates(&[a, b], &HashSet::new(), None);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].note_id, "a");
+        assert_eq!(cands[0].band, Band::Escalate, "single relation, not double-counted: {}", cands[0].score);
+    }
+
+    #[test]
+    fn self_supersession_is_ignored() {
+        let a = NoteRecord { superseded_by: Some("a".into()), supersedes: Some("a".into()), ..note("a") };
+        assert!(detect_candidates(&[a], &HashSet::new(), None).is_empty(), "a note can't supersede itself");
+    }
+
+    #[test]
+    fn multiple_broken_anchors_still_skip() {
+        // 3 broken anchors must NOT cross LOW on their own (saturated to one unit) —
+        // the doctor owns re-anchoring; curation must not escalate this case.
+        let a = NoteRecord { anchors: vec!["src/a.rs".into(), "src/b.rs".into(), "src/c.rs".into()], ..note("a") };
+        assert!(detect_candidates(&[a], &HashSet::new(), None).is_empty(), "many broken anchors alone still skip");
     }
 
     #[test]

@@ -861,6 +861,75 @@ fn curate_act_only_no_key_makes_free_proposals() {
     assert_eq!(curate.len(), 1);
 }
 
+/// Two escalate-only candidates (each `superseded_by new`), no ACT candidates.
+fn curate_two_escalate(work: &Path, store: &Path) -> (std::path::PathBuf, SqliteIndex) {
+    write(work, ".koden-memory/new.md", b"---\nid: new\ntype: decision\ntitle: New\n---\nbody\n");
+    write(work, ".koden-memory/e1.md", b"---\nid: e1\ntype: decision\ntitle: E1\nsuperseded_by: new\n---\nbody\n");
+    write(work, ".koden-memory/e2.md", b"---\nid: e2\ntype: decision\ntitle: E2\nsuperseded_by: new\n---\nbody\n");
+    let db = store.join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, work);
+    scan_project_memory(&idx, PID, work);
+    (db, idx)
+}
+
+/// Curate shares the ONE budget ledger: OverBudget mid-escalation stops escalating
+/// but keeps the ACT-band proposals — mirrors reflect_overbudget_blocks_before_call.
+#[test]
+fn curate_overbudget_stops_escalation() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_two_escalate(work.path(), store.path());
+    // ceiling admits exactly one escalation: a big actual charge (5000/5000 = $0.03)
+    // pushes spent so the 2nd reserve (spent 0.03 + est ~0.0102 > 0.035) is blocked.
+    idx.set_budget_ceiling(0.035, 1).unwrap();
+    let fake = FakeClient::ok(
+        r#"{"classification":"obsolete","action":"supersede","confidence":"high","reason":"x"}"#,
+        5000,
+        5000,
+    );
+    let out = curate_with_client(&idx, &fake, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert!(matches!(out.reason, CurationReason::OverBudget), "{:?}", out.reason);
+    assert_eq!(out.escalated, 1, "stops after the first escalation");
+    assert_eq!(fake.calls(), 1);
+    let (_, spent) = idx.budget_state();
+    assert!((spent - 0.03).abs() < 1e-9, "exactly one charge folded: {spent}");
+    let curate: Vec<_> = list_proposals_readonly(&db, Some(PID)).unwrap().into_iter().filter(|p| p.source == "curate").collect();
+    assert_eq!(curate.len(), 1, "only the escalated-before-overbudget candidate proposed");
+}
+
+/// A failed escalation call charges the ESTIMATE on the shared ledger (not $0).
+#[test]
+fn curate_call_failure_charges_estimate() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_fixture(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::failing("network down");
+    let out = curate_with_client(&idx, &fake, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert_eq!(out.escalated, 1);
+    assert!(out.spent_usd > 0.0, "failed call charges the estimate");
+    assert!((idx.budget_state().1 - out.spent_usd).abs() < 1e-9);
+    // 'old' (failed escalation) yields no proposal; 'stacked' ACT archive stands.
+    let curate: Vec<_> = list_proposals_readonly(&db, Some(PID)).unwrap().into_iter().filter(|p| p.source == "curate").collect();
+    assert_eq!(curate.len(), 1, "only the $0 ACT archive (failed escalate makes none)");
+    assert!(curate.iter().all(|p| p.target_id.as_deref() != Some("old")));
+}
+
+/// A 2xx escalation with 0/0 reported usage floors to the estimate, never $0.
+#[test]
+fn curate_zero_usage_charges_estimate() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = curate_fixture(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(r#"{"classification":"obsolete","action":"archive","confidence":"high","reason":"x"}"#, 0, 0);
+    let out = curate_with_client(&idx, &fake, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert_eq!(out.escalated, 1);
+    assert!(out.spent_usd > 0.0, "0/0 usage must floor to the estimate, not $0");
+    assert!((idx.budget_state().1 - out.spent_usd).abs() < 1e-9);
+}
+
 /// P4 crash-resume, end-to-end: per-pane journal → boot recovery (skips cleanly
 /// exited panes, keeps the latest captured session id) → Tier-2 launch rewrite.
 #[test]

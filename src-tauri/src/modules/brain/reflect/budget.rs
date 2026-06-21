@@ -8,6 +8,9 @@
 //! 3. reconcile(rid, actual)  -- ONE txn: mark 'spent', fold actual into total
 //! ```
 //!
+//! Shared by BOTH token-spending flows (reflect AND curation) — one ledger, one
+//! ceiling; the boot sweep has no source filter so it folds either's orphans.
+//!
 //! A crash between 1 and 3 leaves a committed 'reserved' row; the boot
 //! [sweep_orphaned_reservations] charges it at its estimate. So a crashed call is
 //! *over*-counted, never free — `spent_total_usd` can never silently reset or leak.

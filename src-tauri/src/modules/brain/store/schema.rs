@@ -21,7 +21,10 @@
 ///     table (`brain_vectors`) is created LAZILY at enablement — not here. As with
 ///     every bump, this rotates the gist cache key (see the v6 note) — one-time
 ///     post-upgrade agent-prompt-cache miss, expected.
-pub const SCHEMA_VERSION: i64 = 7;
+/// v8: `notes.supersedes` (the FORWARD supersession edge, V2 curation Flow G).
+///     `notes` is DERIVED-from-disk (rebuilt by `scan_project_memory`), so it joins
+///     the upgrade rebuild set — the next warm scan repopulates it with the column.
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS notes (
     provenance       TEXT,
     created          TEXT,
     revalidate_after TEXT,
+    supersedes       TEXT,   -- forward edge: this note supersedes <id> (V2 Flow G)
     superseded_by    TEXT,
     anchors          TEXT,
     hash             TEXT NOT NULL,

@@ -21,6 +21,8 @@ pub struct NoteRecord {
     pub id: String,
     pub note_type: Option<String>,
     pub revalidate_after: Option<String>,
+    /// Forward supersession edge: this note supersedes `<id>` (V2 curation Flow G).
+    pub supersedes: Option<String>,
     pub superseded_by: Option<String>,
     pub anchors: Vec<String>,
 }
@@ -158,6 +160,7 @@ mod tests {
             id: id.into(),
             note_type: Some("decision".into()),
             revalidate_after: None,
+            supersedes: None,
             superseded_by: None,
             anchors: vec![],
         }

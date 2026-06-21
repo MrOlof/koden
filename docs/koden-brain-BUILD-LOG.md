@@ -730,3 +730,39 @@ Green: clippy `-D warnings` clean · `cargo test` 289 / 1 pre-existing · brain_
 ⏭ Deferred (documented refinements): the `age`/`high-churn`/LLM-contradiction
 detection signals (need git + a created timestamp on NoteRecord); a curation status
 command/meter; the recovery/curation review-card UI (GUI).
+
+### V2.1 verification + hardening ✅
+3 reviewers (money-path/fail-open · detection-gate · proposal-safety) + synthesis.
+Verdict: **sound to close, no must-fix** — every hard rule independently verified
+(curation never edits/deletes a user file; never proposes silent deletion — delete
+down-maps to Archive; no spend leak/under-charge on the SHARED ledger; no panic;
+digest redacted pre-cloud; reject-sticky). Fixed the real correctness/quality
+findings the panel surfaced:
+- **Supersession direction (real under-detection)**: Flow G keys on the NEWER note's
+  forward `supersedes` edge, but detection used only the old note's `superseded_by`,
+  and `supersedes` was parsed yet never persisted — a spec-correct corpus yielded
+  ZERO candidates. Fixed: persist `notes.supersedes` (schema v8; `notes` reclassified
+  as DERIVED-from-disk so it joins the upgrade rebuild + the next scan repopulates it
+  with the column), thread it through upsert/select/NoteRecord, and detect via the
+  UNION of both edges (de-duped, no double-weight). + forward-edge + both-edges tests.
+- **Multiple broken anchors**: 0.6×N crossed LOW, defeating the "lone broken_anchor
+  skips" rule (the doctor owns re-anchoring). Fixed: broken_anchor saturates to one
+  unit per note → can never cross LOW alone. + multi-anchor-skip test.
+- **Self-supersession**: `superseded_by`/`supersedes` == own id resolved → flagged.
+  Fixed: guard `stale != newer`. + test.
+- **Observability**: curate now uses reflect's `reconcile_or_log` (made pub(crate))
+  instead of swallowing reconcile errors — identical money-path discipline.
+- **Front-door gate**: `curate_once` now shares reflect's `pre_flight` (no client
+  built when the ceiling is off; precise reason stamped).
+- **Coverage**: added 3 curate money-path sandbox tests mirroring reflect
+  (OverBudget-stops-escalation, call-failure-charges-estimate, 0/0-usage-floors).
+- Nits: corrected stale "reflect-only" boot-sweep/ledger comments (one shared ledger,
+  reflect OR curation), the `proposal.source` comment (+`curate`), the ACT-band doc
+  overclaim, and added a deferred-Flow-G-signals marker in detect.rs.
+⏭ Deferred (documented): the `supersedes`-back-link-only convention vs union is now
+moot (union handles both); stale_revalidate(doctor) vs archive(curation) are
+intentionally distinct cards; churn + LLM-contradiction signals remain refinements.
+Green: clippy `-D warnings` clean · `cargo test` 293 / 1 pre-existing · brain_sandbox
+34 · tsc + biome unaffected.
+
+**V2.1 closed (stale-ADR curation + adversarial pass + hardening).**

@@ -215,8 +215,9 @@ pub fn reflect_with_client(
 /// Reconcile a reservation, logging (not swallowing) a failure. A stranded
 /// 'reserved' row is still counted against the ceiling by the next
 /// [budget::check_and_reserve] and folded by the boot sweep, so a failed reconcile
-/// can never under-enforce the ceiling — but it must be visible in the log.
-fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_usd: f64, now_ms: i64) {
+/// can never under-enforce the ceiling — but it must be visible in the log. Shared
+/// with the curation path so both token-spending flows reconcile identically.
+pub(crate) fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_usd: f64, now_ms: i64) {
     if let Err(e) = budget::reconcile(index.conn(), reservation_id, charge_usd, now_ms) {
         log::warn!("brain: reflect budget reconcile failed ({e}); reservation {reservation_id} left for the boot sweep");
     }
