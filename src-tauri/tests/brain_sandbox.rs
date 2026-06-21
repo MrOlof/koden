@@ -22,7 +22,7 @@ use koden_lib::modules::brain::resume::{
 };
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, list_notes_readonly, list_proposals_readonly,
-    SearchIndex, SqliteIndex,
+    semantic_meta_readonly, SearchIndex, SqliteIndex,
 };
 use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
@@ -568,6 +568,16 @@ fn incremental_relink_equals_full_rebuild() {
 }
 
 /// Fingerprint is deterministic across rebuilds (a P3 cache-stability proxy).
+#[test]
+fn semantic_header_persisted_empty_in_v1() {
+    // P5 gate: a fresh brain.sqlite carries the embedderId header, empty (no
+    // embedder compiled in the default build).
+    let store = tempfile::tempdir().unwrap();
+    let db = store.path().join("i.sqlite");
+    let _idx = SqliteIndex::open(&db).unwrap();
+    assert_eq!(semantic_meta_readonly(&db).unwrap(), (String::new(), 0));
+}
+
 #[test]
 fn fingerprint_is_deterministic() {
     let work = tempfile::tempdir().unwrap();

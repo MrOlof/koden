@@ -15,6 +15,16 @@ edition = "2021"
 name = "koden_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Semantic search (P5, ADR-006) — DEFAULT-OFF, absent from the shipped binary.
+# v1 ships only the Embedder/VectorStore seams + a dependency-free reference impl
+# (gated here) that proves the seams compose and keeps the feature from rotting.
+# The PRODUCTION swap lands behind this SAME flag at enablement time, deps pinned
+# then: `semantic = ["dep:fastembed", "dep:hnsw_rs"]` (fastembed-rs Embedder via
+# ONNX + hnsw_rs persisted VectorStore). No heavy deps enter the tree until then.
+semantic = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

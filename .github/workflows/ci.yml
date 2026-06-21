@@ -95,6 +95,18 @@ jobs:
         working-directory: src-tauri
         run: cargo nextest run --locked
 
+      # P5 (ADR-006): the `semantic` feature is DEFAULT-OFF and absent from the
+      # shipped binary, but its gated code must keep compiling + passing so it does
+      # not bit-rot before enablement. This job turns it ON; the default jobs above
+      # prove it is OFF by default.
+      - name: cargo clippy (semantic feature)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked --features semantic -- -D warnings
+
+      - name: cargo nextest (semantic feature)
+        working-directory: src-tauri
+        run: cargo nextest run --locked --features semantic
+
   rust-platforms:
     name: rust-test (${{ matrix.os }})
     strategy:

@@ -15,7 +15,11 @@
 ///     (it is folded into the blake3 key in `gist/mod.rs`), so already-indexed
 ///     projects take a one-time agent-prompt-cache miss on the first post-upgrade
 ///     relaunch — correct and expected, no stored cache to invalidate.
-pub const SCHEMA_VERSION: i64 = 6;
+/// v7: added `brain_semantic_meta` (the `embedderId` header, P5). CANONICAL/preserved.
+///     Empty in v1 (no embedder); set when the `semantic` feature is enabled, so a
+///     later build can detect a model/dimension mismatch and rebuild. The vector
+///     table (`brain_vectors`) is created LAZILY at enablement — not here.
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -129,6 +133,18 @@ CREATE TABLE IF NOT EXISTS brain_budget_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_reserved
     ON brain_budget_ledger (status) WHERE status = 'reserved';
+
+-- Semantic embedderId header (P5). CANONICAL/preserved singleton. Empty in v1 (no
+-- embedder compiled); set when the `semantic` feature is enabled so a later build
+-- can detect a model/dimension change and rebuild the vector index rather than
+-- serve stale embeddings. The vector table itself is created LAZILY at enablement.
+CREATE TABLE IF NOT EXISTS brain_semantic_meta (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    embedder_id TEXT NOT NULL DEFAULT '',
+    dims        INTEGER NOT NULL DEFAULT 0,
+    built_at    INTEGER
+);
+INSERT OR IGNORE INTO brain_semantic_meta (id, embedder_id, dims) VALUES (1, '', 0);
 
 -- AST graph (P2). `code_nodes` = tree-sitter definitions; `code_imports` = raw
 -- per-file import specifiers; `code_edges` = RESOLVED file→file import edges,

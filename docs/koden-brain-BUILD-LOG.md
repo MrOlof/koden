@@ -559,3 +559,51 @@ backend-only for now.
 
 **P4 deterministic core closed (budget + reflect + resume + adversarial pass +
 hardening).** Next: P5 (deferred semantic seams) / the V2 advanced track.
+
+## Phase 5 — Deferred semantic seams ✅
+
+P5 is decision-DEFERRED by spec: v1 ships ONLY the shape that lets semantic slot in
+later with zero schema/search churn — no functional semantic search.
+
+- `brain/search/vector.rs`: the stable `Embedder` + `VectorStore` traits + `DocId`
+  (the same `project\0path` id space the lexical legs use, so a future vector leg
+  fuses without remapping). Compiled in the v1 default build.
+- `brain/search/mod.rs`: `registered_search_legs()` = `["identity","content"]` — the
+  no-vector-leg invariant made checkable. The semantic vector leg is NEVER registered
+  in the default build.
+- schema v7: `brain_semantic_meta` (the `embedderId` header), CANONICAL/preserved
+  (absent from the upgrade DROP batch), seeded empty (`""`,0) in v1; set at
+  enablement so a later build detects a model/dim change and rebuilds. No
+  `brain_vectors` table in v1 (created lazily at enablement).
+- `semantic` cargo feature (DEFAULT-OFF, absent from the shipped binary) gating a
+  real, **dependency-free reference impl** (`search/reference.rs`: a deterministic
+  hashed-token `HashEmbedder` + a brute-force cosine `BruteForceStore`). It exists to
+  prove the seams compose end-to-end and to keep the gated code from bit-rotting —
+  NOT as the production stack. The production swap (fastembed-rs ONNX embedder +
+  hnsw_rs persisted ANN) lands behind the SAME traits at enablement time, deps pinned
+  then (`semantic = ["dep:fastembed","dep:hnsw_rs"]`); no heavy ONNX/HNSW deps enter
+  the tree until then (ponytail: no speculative heavy infra for an off-by-default
+  feature).
+- CI: a `--features semantic` clippy + nextest step in the `rust` job (anti-bit-rot
+  gate 3), while the default jobs prove the feature is OFF by default.
+
+Tests: `semantic_feature_absent_from_default_build` (cfg, default-only),
+`search_index_has_no_vector_leg_in_v1`, `semantic_header_seeded_empty_and_preserved`
+(migrate: present, empty, survives an upgrade), `semantic_header_persisted_empty_in_v1`
+(sandbox via `semantic_meta_readonly`), and the gated `seams_roundtrip_ranks_similar_first`
++ `upsert_replaces_not_duplicates` (run under `--features semantic`).
+
+All three P5 acceptance gates met: (1) no functional semantic in v1 — default build
+links no embedding/vector code; (2) seams + `embedderId` header are real + persisted,
+enabling later needs no v1 schema migration (only new object = `brain_vectors`,
+lazy); (3) gated code compiles + passes under `--features semantic`.
+
+Green: default — clippy `-D warnings` clean · `cargo test` 280 passed / 1 pre-existing
+(`authorize_spawn_cwd_blocks_symlink_escape`, untouched) · brain_sandbox 27. semantic —
+`clippy --features semantic` clean · gated reference tests pass.
+
+**P5 closed (seams + header + default-off feature + reference impl + CI gate).**
+V1 (P0→P5) is functionally complete. Next: V2 advanced track (stale-ADR curation,
+HNSW ANN + real embedder enablement, Tier-2 capture, richer resume, cross-project
+graph) + the cross-phase live-evidence pass (`pnpm tauri dev`, real-kill crash sim,
+real-key smoke).

@@ -839,6 +839,17 @@ pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {
     )
 }
 
+/// The semantic `embedderId` header `(embedder_id, dims)` via a read-only
+/// connection. Empty `("", 0)` in v1 (no embedder); set at enablement. P5.
+pub fn semantic_meta_readonly(db_path: &Path) -> rusqlite::Result<(String, i64)> {
+    let conn = open_readonly(db_path)?;
+    conn.query_row(
+        "SELECT embedder_id, dims FROM brain_semantic_meta WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {
     let anchors_json: String = r.get(5)?;
     let anchors: Vec<String> = serde_json::from_str(&anchors_json).unwrap_or_default();

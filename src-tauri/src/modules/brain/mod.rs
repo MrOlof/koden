@@ -17,6 +17,7 @@ pub mod rank;
 pub mod reflect;
 pub mod registry;
 pub mod resume;
+pub mod search;
 pub mod secrets;
 pub mod store;
 pub mod tokenize;

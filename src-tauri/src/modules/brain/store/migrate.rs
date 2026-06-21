@@ -43,9 +43,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     // On any upgrade, drop the DERIVED (file-backed) tables so the DDL recreates
     // them at the current schema and the next warm pass rebuilds them — backfills
     // new columns + the AST-fed `symbols` column. Canonical data (notes,
-    // proposals, reject_signatures, brain_budget, brain_budget_ledger) is preserved
-    // (preserve-over-destroy) PURELY by being absent from this DROP batch — this is
-    // a drop-list, not a keep-list, so NEVER add a canonical table here.
+    // proposals, reject_signatures, brain_budget, brain_budget_ledger,
+    // brain_semantic_meta) is preserved (preserve-over-destroy) PURELY by being
+    // absent from this DROP batch — this is a drop-list, not a keep-list, so NEVER
+    // add a canonical table here.
     if matches!(current, Some(v) if v < SCHEMA_VERSION) {
         tx.execute_batch(
             "DROP TABLE IF EXISTS code_fts;
@@ -126,6 +127,30 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM brain_budget_ledger", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1, "ledger rows survive upgrade");
+    }
+
+    #[test]
+    fn semantic_header_seeded_empty_and_preserved() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        migrate(&conn).unwrap();
+        let (eid, dims): (String, i64) = conn
+            .query_row("SELECT embedder_id, dims FROM brain_semantic_meta WHERE id=1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(eid, "", "v1 has no embedder");
+        assert_eq!(dims, 0);
+        // simulate an enablement-time write, then force an upgrade — must survive.
+        conn.execute("UPDATE brain_semantic_meta SET embedder_id='bge-small', dims=384 WHERE id=1", [])
+            .unwrap();
+        conn.execute("UPDATE brain_meta SET value='6' WHERE key='schema_version'", []).unwrap();
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+        let (eid2, dims2): (String, i64) = conn
+            .query_row("SELECT embedder_id, dims FROM brain_semantic_meta WHERE id=1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((eid2.as_str(), dims2), ("bge-small", 384), "header survives upgrade");
     }
 
     #[test]
