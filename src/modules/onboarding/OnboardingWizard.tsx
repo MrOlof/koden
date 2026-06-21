@@ -42,16 +42,24 @@ import { useEffect, useState } from "react";
 
 const DONE_KEY = "koden.onboarding.v1.done";
 
-// Providers offered in the inline cloud quick-setup: keyed AND with at least one
-// curated model, so saving a key here yields a working default model. Everything
-// else (OpenRouter free-text models, local servers, custom endpoints) is richer
-// than a wizard should be — those route to the full Settings > Models panel.
+// Providers offered in the inline cloud quick-setup: keyed AND with a curated
+// (non "-custom") model, so saving a key here yields a WORKING default model.
+// Free-form providers (OpenRouter, openai-compatible) only ship a "-custom"
+// placeholder whose model id the user must supply — offering them here would let
+// someone finish onboarding with a non-working AI. Those + local servers route
+// to the full Settings > Models panel instead.
+const isCuratedModelId = (id: string): boolean => !id.endsWith("-custom");
+
 const CLOUD_PROVIDERS: readonly ProviderId[] = PROVIDERS.filter(
-  (p) => providerSupportsKey(p.id) && MODELS.some((m) => m.provider === p.id),
+  (p) =>
+    providerSupportsKey(p.id) &&
+    MODELS.some((m) => m.provider === p.id && isCuratedModelId(m.id)),
 ).map((p) => p.id);
 
 function defaultModelForProvider(id: ProviderId): ModelId | null {
-  return MODELS.find((m) => m.provider === id)?.id ?? null;
+  return (
+    MODELS.find((m) => m.provider === id && isCuratedModelId(m.id))?.id ?? null
+  );
 }
 
 type StepMeta = { title: string; subtitle: string };
@@ -672,7 +680,7 @@ function LibrarianBody({
         The Librarian uses an <span className="text-foreground">Anthropic</span>{" "}
         model to propose tidy-ups to your project memory — you always approve
         before anything is saved. It's Anthropic-only for now and costs a little
-        per run, so it's gated by a small monthly budget (set $0 anytime to turn
+        per run, so it's gated by a small spending cap (set $0 anytime to turn
         it off).
       </p>
 
@@ -703,7 +711,7 @@ function LibrarianBody({
 
       <div>
         <div className="mb-1.5 text-xs font-medium text-muted-foreground">
-          Monthly budget (USD)
+          Spending cap (USD)
         </div>
         <Input
           inputMode="decimal"
