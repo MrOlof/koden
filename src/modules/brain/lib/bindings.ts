@@ -156,6 +156,8 @@ export type GraphNode = {
   project_id: string;
   path: string | null;
   degree: number;
+  /** epoch-ms of the file's last meaningful change (0 for project/memory/unstamped). */
+  mtime: number;
 };
 
 export type GraphEdge = { a: string; b: string; kind: "contains" | "import" | "anchor" };

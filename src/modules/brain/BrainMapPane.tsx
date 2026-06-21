@@ -157,6 +157,7 @@ type Layout = {
   adj: Map<string, Set<string>>;
   colorByProject: Map<string, string>;
   stats: Map<string, ProjectStats>;
+  recent: Set<string>; // file node ids = most-recently-modified (top N/project)
   maxR: number;
   projectCount: number;
 };
@@ -312,6 +313,20 @@ function computeLayout(graph: BrainGraph): Layout {
   for (const [x, y] of treeEdges) link(x, y);
   for (const e of realEdges) link(e.a, e.b);
 
+  // Most-recently-modified files per project (by accessed_at_ms) — the "recently
+  // changed" cue. Empty on a fresh index (all stamped at index time); fills in as the
+  // watcher re-stamps edited files.
+  const recent = new Set<string>();
+  for (const proj of projectNodes) {
+    graph.nodes
+      .filter((n) => n.kind === "file" && n.project_id === proj.project_id && n.mtime > 0)
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 8)
+      .forEach((f) => {
+        recent.add(f.id);
+      });
+  }
+
   return {
     nodes,
     treeEdges,
@@ -320,6 +335,7 @@ function computeLayout(graph: BrainGraph): Layout {
     adj,
     colorByProject,
     stats: computeProjectStats(graph),
+    recent,
     maxR,
     projectCount: projectNodes.length,
   };
@@ -777,6 +793,29 @@ export function BrainMapPane() {
                 })}
             </g>
           ) : null}
+          {/* recently-modified pulse — emerald ping on the focused project's freshest files */}
+          {focusPid
+            ? layout.nodes.map((n) => {
+                if (n.kind !== "file" || n.projectId !== focusPid || !layout.recent.has(n.id)) return null;
+                const p = pos.get(n.id);
+                if (!p) return null;
+                return (
+                  <g key={`recent${n.id}`} transform={`translate(${p.x} ${p.y})`} pointerEvents="none">
+                    <circle
+                      cx={0}
+                      cy={0}
+                      r={7}
+                      fill="none"
+                      stroke="#34d399"
+                      strokeWidth={1.6}
+                      className="motion-safe:animate-ping"
+                      style={{ transformOrigin: "center" }}
+                    />
+                    <circle cx={0} cy={0} r={3.4} fill="#34d399" />
+                  </g>
+                );
+              })
+            : null}
           {/* hover ring — cheap overlay so the scene itself doesn't re-render on hover */}
           {hoverPos ? (
             <circle

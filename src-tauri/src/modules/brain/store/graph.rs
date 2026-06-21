@@ -27,6 +27,9 @@ pub struct GraphNode {
     pub project_id: String,
     pub path: Option<String>,
     pub degree: u32,
+    /// epoch-ms of the file's last meaningful change (`files.accessed_at_ms`); 0 for
+    /// project/memory nodes or unstamped files. Drives the "recently modified" cue.
+    pub mtime: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,18 +77,20 @@ pub fn graph_readonly(
             project_id: pid.clone(),
             path: None,
             degree: 0,
+            mtime: 0,
         });
 
         // Files — capped, most-accessed first (degree-light files drop off big repos).
         let mut included: HashSet<String> = HashSet::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT path FROM files WHERE project_id=?1 ORDER BY accessed_count DESC, path LIMIT ?2",
+                "SELECT path, accessed_at_ms FROM files WHERE project_id=?1 ORDER BY accessed_count DESC, path LIMIT ?2",
             )?;
-            let rows =
-                stmt.query_map(rusqlite::params![pid, max_files as i64], |r| r.get::<_, String>(0))?;
-            for path in rows {
-                let path = path?;
+            let rows = stmt.query_map(rusqlite::params![pid, max_files as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (path, mtime) = row?;
                 let fid = format!("f:{pid}:{path}");
                 nodes.push(GraphNode {
                     id: fid.clone(),
@@ -94,6 +99,7 @@ pub fn graph_readonly(
                     project_id: pid.clone(),
                     path: Some(path.clone()),
                     degree: 0,
+                    mtime,
                 });
                 edges.push(GraphEdge { a: proj_id.clone(), b: fid, kind: "contains".into() });
                 included.insert(path);
@@ -111,6 +117,7 @@ pub fn graph_readonly(
                 project_id: pid.clone(),
                 path: Some(n.path.clone()),
                 degree: 0,
+                mtime: 0,
             });
             for a in &n.anchors {
                 if let Some(ap) = anchor_path(a) {
