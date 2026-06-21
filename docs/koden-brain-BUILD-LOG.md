@@ -820,3 +820,32 @@ strict-`>` claim is enforced (production beats the 1.0 equal-weight case); scope
 Green: clippy `-D warnings` clean · brain_bench 3 + 1 ignored · lib 297 / 1 pre-existing.
 
 **V2.2 closed (ranking calibration + adversarial pass + honesty corrections).**
+
+### V2.3 — temporal re-rank ([DP-12]) ✅ (core)
+Recency + frequency feed a deterministic, snapshot-stable multiplicative boost on
+search — the natural follow-on now that V2.2 gives a discriminating benchmark to judge
+it against. The whole design hinges on NOT breaking the P3 gist byte-identity gate
+(`search_with_conn` feeds the gist's "Relevant files"), so:
+- schema v9: `files.accessed_at_ms` + `files.accessed_count` (STORED). `files` is
+  DERIVED — the upgrade now DROPs it (was DELETE) so the columns backfill on the next
+  warm pass.
+- `record_access(project, rel, now_ms)` is called by the worker ONLY on a real content
+  change (`index_file → Ok(true)`), never on an unchanged hash-skip — so a warm pass
+  over an unchanged index leaves `accessed_at_ms` fixed. Recency advances only when the
+  fingerprint already changes (the gist is expected to differ then anyway).
+- `temporal_boost(accessed_at_ms, accessed_count, ref_ms)`: quantized buckets (recency
+  ladder <1d/<7d/<30d/<90d + log2 frequency), bounded `(1+RECENCY_W·r)·(1+FREQ_W·f)`.
+  Applied as a POST-FUSION step in `search_with_weights` (RRF stays leg-pure), re-sorted
+  with the SAME (score desc, id asc) comparator. `ref_ms = MAX(accessed_at_ms)` read off
+  the SAME connection's snapshot — never `now()` on the read side. All-zero (unstamped)
+  rows → a uniform boost → no reordering, so existing tests + the bench are unaffected.
+- Determinism PROVEN: `temporal_boost_is_byte_stable_across_reads` (two searches over a
+  stamped, unchanged index are identical) + the existing `gist_byte_identical_on_unchanged_relaunch`
+  still passes (recency uniform across the two builds). `recency_reorders_equal_score_files`
+  proves a fresher equal-score file is promoted; `temporal_boost_rewards_fresh_and_frequent`
+  unit-tests the pure boost (fresh+frequent > stale+rare, bounded, uniform when zero).
+Green: clippy `-D warnings` clean · `cargo test` 300 / 1 pre-existing · brain_sandbox
+34 · brain_bench 3 + 1 ignored.
+⏭ Deferred refinements: an explicit `touch_file` on agent file-open (a real access
+counter beyond index-time recency); the same boost on the gist Memory (notes) layer;
+weight tuning of RECENCY_W/FREQ_W via a recency-labeled bench fixture.

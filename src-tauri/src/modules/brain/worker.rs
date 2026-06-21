@@ -317,13 +317,18 @@ pub struct IndexStats {
 }
 
 /// Read → binary-sniff → blake3 → secrets-redact → index one file. Returns true
-/// iff it was indexed (false on read error / binary / store error). Shared by the
-/// full walk (`index_dir`) and the incremental watcher path (`index_changed`).
+/// iff present (indexed OR an unchanged no-op; false on read error / binary / store
+/// error). Shared by the full walk (`index_dir`) and the incremental watcher
+/// (`index_changed`). On a REAL content change (index_file → Ok(true)) it stamps the
+/// temporal recency via `record_access(now_ms)`; an unchanged no-op (Ok(false)) does
+/// NOT re-stamp — so a warm pass over an unchanged index leaves accessed_at_ms fixed,
+/// preserving the gist byte-identity gate ([DP-12]).
 fn index_one_file(
     index: &SqliteIndex,
     project_id: &str,
     rel: &str,
     path: &std::path::Path,
+    now_ms: i64,
 ) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -341,7 +346,12 @@ fn index_one_file(
         log::debug!("brain: redacted {nredact} secret-shaped span(s) in {rel}");
     }
     match index.index_file(project_id, rel, &redacted, &file_hash, bytes.len() as i64) {
-        Ok(_) => true,
+        Ok(true) => {
+            // Real change → advance recency (only here, so unchanged passes don't move it).
+            let _ = index.record_access(project_id, rel, now_ms);
+            true
+        }
+        Ok(false) => true, // unchanged no-op — present, but recency unchanged
         Err(e) => {
             log::debug!("brain: index_file failed for {rel}: {e}");
             false
@@ -355,11 +365,12 @@ fn index_one_file(
 /// is the absolute project root; `project_id` the id the rows are keyed under.
 pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) -> IndexStats {
     let files = walk::walk_files(root);
+    let now_ms = now_epoch_ms(); // one recency stamp for everything changed in this pass
     let mut indexed = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in files {
         let rel = rel_path(root, &path);
-        if index_one_file(index, project_id, &rel, &path) {
+        if index_one_file(index, project_id, &rel, &path, now_ms) {
             seen.insert(rel);
             indexed += 1;
         }
@@ -403,6 +414,7 @@ pub fn index_changed(
     root: &std::path::Path,
     changed: &[std::path::PathBuf],
 ) -> IndexStats {
+    let now_ms = now_epoch_ms(); // recency stamp for whatever changed in this delta
     let mut indexed = 0usize;
     let mut pruned = 0usize;
     for path in changed {
@@ -418,7 +430,7 @@ pub fn index_changed(
                 if m.len() > walk::MAX_INDEX_FILE_BYTES {
                     continue;
                 }
-                if index_one_file(index, project_id, &rel, path) {
+                if index_one_file(index, project_id, &rel, path, now_ms) {
                     indexed += 1;
                 }
             }
@@ -428,7 +440,7 @@ pub fn index_changed(
                 // incremental graph converges with a full rebuild.
                 for child in walk::walk_files(path) {
                     let crel = rel_path(root, &child);
-                    if !crel.is_empty() && index_one_file(index, project_id, &crel, &child) {
+                    if !crel.is_empty() && index_one_file(index, project_id, &crel, &child, now_ms) {
                         indexed += 1;
                     }
                 }

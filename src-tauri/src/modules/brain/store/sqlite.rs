@@ -42,6 +42,47 @@ const W_CONTENT: (f64, f64, f64) = (0.0, 0.0, 1.0);
 const RRF_W_IDENTITY: f64 = 1.5;
 const RRF_W_CONTENT: f64 = 1.0;
 
+/// V2 temporal re-rank ([DP-12]) weights: a bounded multiplicative boost so a
+/// recently-touched / frequently-touched file is NUDGED up, never buried (preserves
+/// the path-match-outranks invariant). Quantized into coarse buckets so sub-threshold
+/// drift can never reorder two near-equal docs. Boost = (1 + RECENCY_W·recency) ·
+/// (1 + FREQ_W·freq), each factor in [1, 1+W]. DETERMINISTIC: computed from STORED
+/// `accessed_at_ms`/`accessed_count` and a snapshot-stable `ref_ms` (never `now()`).
+const RECENCY_W: f64 = 0.5;
+const FREQ_W: f64 = 0.25;
+const DAY_MS: i64 = 86_400_000;
+
+/// Recency bucket (0=stale .. 4=fresh) for an age (ms) measured against `ref_ms`.
+fn recency_bucket(age_ms: i64) -> i64 {
+    if age_ms < DAY_MS {
+        4
+    } else if age_ms < 7 * DAY_MS {
+        3
+    } else if age_ms < 30 * DAY_MS {
+        2
+    } else if age_ms < 90 * DAY_MS {
+        1
+    } else {
+        0
+    }
+}
+
+/// Frequency bucket = floor(log2(1+count)), capped at 4 → normalized 0..1.
+fn freq_norm(count: i64) -> f64 {
+    let n = (count.max(0) as u64).saturating_add(1); // 1 + count
+    let bucket = (63 - n.leading_zeros() as i64).clamp(0, 4); // floor(log2(n)), capped
+    bucket as f64 / 4.0
+}
+
+/// The multiplicative temporal boost for one doc. Pure + quantized → unit-testable.
+/// `ref_ms` is the snapshot's max accessed_at_ms (so age is relative + stable). All-
+/// zero inputs (unstamped rows) yield a UNIFORM boost → no reordering.
+fn temporal_boost(accessed_at_ms: i64, accessed_count: i64, ref_ms: i64) -> f64 {
+    let age = (ref_ms - accessed_at_ms).max(0);
+    let recency = recency_bucket(age) as f64 / 4.0;
+    (1.0 + RECENCY_W * recency) * (1.0 + FREQ_W * freq_norm(accessed_count))
+}
+
 /// The labels of the RRF legs `search_with_conn` actually fuses, in order. The
 /// single source of truth for the P5 no-vector-leg gate (`search::registered_search_legs`
 /// returns this) — keep it in lockstep with the legs built in `search_with_conn`.
@@ -84,6 +125,21 @@ impl SqliteIndex {
     /// estimate, so a crashed reflect over-counts rather than leaking free spend (P4).
     pub fn sweep_orphaned_reservations(&self, now: i64) -> Result<usize, String> {
         crate::modules::brain::reflect::budget::sweep_orphaned_reservations(&self.conn, now)
+    }
+
+    /// Record a meaningful touch of a file for the V2 temporal re-rank ([DP-12]):
+    /// stamp `accessed_at_ms = now_ms` and bump `accessed_count`. Called by the worker
+    /// only when a file is actually (re)indexed (a real content change), so the stored
+    /// recency advances only when the fingerprint already changes — an unchanged
+    /// relaunch leaves it fixed, preserving the gist byte-identity gate. No-op if the
+    /// file row is absent. Writer-side.
+    pub fn record_access(&self, project_id: &str, rel_path: &str, now_ms: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE files SET accessed_at_ms=?3, accessed_count=accessed_count+1
+             WHERE project_id=?1 AND path=?2",
+            rusqlite::params![project_id, rel_path, now_ms],
+        )?;
+        Ok(())
     }
 
     /// Search with EXPLICIT ranking weights — the offline CALIBRATION seam, used
@@ -780,10 +836,16 @@ pub fn search_with_weights(
     let key = |p: &(String, String)| format!("{}\u{0}{}", p.0, p.1);
     let a_ids: Vec<String> = leg_a.iter().map(key).collect();
     let b_ids: Vec<String> = leg_b.iter().map(key).collect();
-    let fused = rank::weighted_rrf(&[
+    let mut fused = rank::weighted_rrf(&[
         Leg { weight: w.rrf_identity, ranked: &a_ids },
         Leg { weight: w.rrf_content, ranked: &b_ids },
     ]);
+
+    // V2 temporal re-rank ([DP-12]): a snapshot-stable multiplicative boost applied
+    // AFTER fusion (RRF stays leg-pure — a per-doc multiplier is a document property,
+    // not a leg). All inputs are STORED + read from this connection's snapshot, so
+    // two reads of an unchanged index re-derive the same order → byte-identical gist.
+    apply_temporal_boost(conn, project, &mut fused)?;
 
     let hits = fused
         .into_iter()
@@ -797,6 +859,53 @@ pub fn search_with_weights(
         })
         .collect();
     Ok(hits)
+}
+
+/// Multiply each fused score by its [temporal_boost] and re-sort with the SAME
+/// comparator as `weighted_rrf` (score desc, then composite id asc) so the
+/// deterministic tie-break is preserved. `ref_ms` = MAX(accessed_at_ms) over the
+/// scope on THIS connection (snapshot-stable). A no-op (uniform boost) when all
+/// files are unstamped (accessed_* == 0).
+fn apply_temporal_boost(
+    conn: &Connection,
+    project: Option<&str>,
+    fused: &mut [(String, f64)],
+) -> rusqlite::Result<()> {
+    if fused.is_empty() {
+        return Ok(());
+    }
+    // Load (composite id → accessed_at_ms, accessed_count) + ref_ms in one scan.
+    let mut access: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    let mut ref_ms: i64 = 0;
+    let mut scan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<()> {
+        let mut stmt = conn.prepare(sql)?;
+        let it = stmt.query_map(params, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+        })?;
+        for row in it {
+            let (proj, path, at, count) = row?;
+            ref_ms = ref_ms.max(at);
+            access.insert(format!("{proj}\u{0}{path}"), (at, count));
+        }
+        Ok(())
+    };
+    match project {
+        Some(pid) => scan(
+            "SELECT project_id, path, accessed_at_ms, accessed_count FROM files WHERE project_id=?1",
+            &[&pid],
+        )?,
+        None => scan("SELECT project_id, path, accessed_at_ms, accessed_count FROM files", &[])?,
+    }
+
+    for (id, score) in fused.iter_mut() {
+        let (at, count) = access.get(id).copied().unwrap_or((0, 0));
+        *score *= temporal_boost(at, count, ref_ms);
+    }
+    // Re-sort with the weighted_rrf comparator (score desc, id asc) — see rank.rs.
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0))
+    });
+    Ok(())
 }
 
 fn open_readonly(db_path: &Path) -> rusqlite::Result<Connection> {
@@ -1062,6 +1171,57 @@ mod tests {
         idx.index_file("p", "src/other.rs", "// login flow happens here", "b", 10).unwrap();
         let hits = search_with_conn(&idx.conn, Some("p"), "login", 10).unwrap();
         assert_eq!(hits[0].path, "src/login.rs", "path hit should win, got {hits:?}");
+    }
+
+    #[test]
+    fn temporal_boost_rewards_fresh_and_frequent() {
+        let r = 1_000_000_000i64; // ref_ms
+        let fresh_freq = temporal_boost(r, 20, r); // age 0 (fresh), count 20
+        let stale_rare = temporal_boost(r - 120 * DAY_MS, 0, r); // age 120d (>90 → bucket 0)
+        assert!(fresh_freq > stale_rare, "fresh+frequent must out-boost stale+rare");
+        // a fresh doc beats a 120d-stale one even with equal (zero) frequency.
+        assert!(temporal_boost(r, 0, r) > temporal_boost(r - 120 * DAY_MS, 0, r));
+        // all-zero (unstamped) inputs → a fixed UNIFORM boost (no reordering).
+        assert_eq!(temporal_boost(0, 0, 0), temporal_boost(0, 0, 0));
+        assert_eq!(temporal_boost(0, 0, 0), 1.0 + RECENCY_W); // age 0, freq 0
+        // bounded: never more than the max recency × max freq factor.
+        assert!(fresh_freq <= (1.0 + RECENCY_W) * (1.0 + FREQ_W) + 1e-9);
+    }
+
+    #[test]
+    fn recency_reorders_equal_score_files() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        // identical content → identical bm25 → adjacent RRF ranks (a_old wins on path asc).
+        idx.index_file("p", "src/a_old.rs", "pub fn sharedThing() {}", "h1", 24).unwrap();
+        idx.index_file("p", "src/z_new.rs", "pub fn sharedThing() {}", "h2", 24).unwrap();
+        // Without recency, a_old is rank-1 (path tie-break).
+        let base = search_with_conn(&idx.conn, Some("p"), "shared thing", 10).unwrap();
+        assert_eq!(base[0].path, "src/a_old.rs", "baseline: path tie-break → a_old first");
+        // Stamp z_new as fresh and a_old as 40 days stale.
+        let now = 100 * DAY_MS;
+        idx.record_access("p", "src/z_new.rs", now).unwrap();
+        idx.record_access("p", "src/a_old.rs", now - 40 * DAY_MS).unwrap();
+        let boosted = search_with_conn(&idx.conn, Some("p"), "shared thing", 10).unwrap();
+        assert_eq!(boosted[0].path, "src/z_new.rs", "recency promotes the fresher equal-score file: {boosted:?}");
+    }
+
+    #[test]
+    fn temporal_boost_is_byte_stable_across_reads() {
+        // Two searches over an UNCHANGED (but recency-stamped) index must be identical
+        // — the property the gist byte-identity gate depends on.
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "src/a.rs", "pub fn alpha() {}", "h1", 20).unwrap();
+        idx.index_file("p", "src/b.rs", "pub fn alphaTwo() {}", "h2", 24).unwrap();
+        idx.record_access("p", "src/a.rs", 5 * DAY_MS).unwrap();
+        idx.record_access("p", "src/b.rs", 100 * DAY_MS).unwrap();
+        let r1 = search_with_conn(&idx.conn, Some("p"), "alpha", 10).unwrap();
+        let r2 = search_with_conn(&idx.conn, Some("p"), "alpha", 10).unwrap();
+        assert_eq!(r1.len(), r2.len());
+        for (x, y) in r1.iter().zip(&r2) {
+            assert_eq!((&x.path, x.score), (&y.path, y.score), "search not byte-stable across reads");
+        }
     }
 
     #[test]

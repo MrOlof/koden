@@ -24,7 +24,12 @@
 /// v8: `notes.supersedes` (the FORWARD supersession edge, V2 curation Flow G).
 ///     `notes` is DERIVED-from-disk (rebuilt by `scan_project_memory`), so it joins
 ///     the upgrade rebuild set — the next warm scan repopulates it with the column.
-pub const SCHEMA_VERSION: i64 = 8;
+/// v9: `files.accessed_at_ms` + `files.accessed_count` (V2 temporal re-rank [DP-12]).
+///     `files` is DERIVED (rebuilt by the index walk); the upgrade now DROPs it (was
+///     DELETE) so the new columns backfill. Recency/frequency feed a deterministic,
+///     snapshot-stable multiplicative boost — stamped only on a real content change,
+///     so an unchanged relaunch re-derives a byte-identical gist.
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -42,6 +47,12 @@ CREATE TABLE IF NOT EXISTS files (
     hash       TEXT NOT NULL,
     size       INTEGER NOT NULL,
     fts_rowid  INTEGER NOT NULL,
+    -- V2 temporal re-rank ([DP-12]): epoch-ms of the last meaningful touch (stamped
+    -- on a real content change) + a touch counter. STORED so search reads them off
+    -- the pinned WAL snapshot — never `now()` on the read side — keeping the gist
+    -- byte-identity gate intact. Both default 0 (no boost) for legacy/unstamped rows.
+    accessed_at_ms INTEGER NOT NULL DEFAULT 0,
+    accessed_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, path)
 );
 -- UNIQUE: one FTS document per file row; the search JOIN assumes a 1:1 mapping.

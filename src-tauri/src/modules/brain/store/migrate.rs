@@ -42,9 +42,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     let tx = conn.unchecked_transaction()?;
     // On any upgrade, drop the DERIVED tables so the DDL recreates them at the
     // current schema and the next warm pass rebuilds them — backfills new columns
-    // (incl. the AST-fed `symbols` and `notes.supersedes`). DERIVED = rebuildable
-    // from disk: the code index (code_fts/code_nodes/code_imports/code_edges + the
-    // `files` manifest) AND `notes` (re-scanned from the `.md` files by
+    // (incl. the AST-fed `symbols`, `notes.supersedes`, and `files.accessed_*`).
+    // DERIVED = rebuildable from disk: the code index (code_fts/code_nodes/
+    // code_imports/code_edges + the `files` manifest — DROPped, not just DELETEd, so
+    // added columns backfill) AND `notes` (re-scanned from the `.md` files by
     // `scan_project_memory` on the next warm pass). Truly CANONICAL data — proposals,
     // reject_signatures (human decisions), brain_budget(+ledger) (spend state),
     // brain_semantic_meta — is preserved PURELY by being absent from this DROP batch.
@@ -56,7 +57,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
              DROP TABLE IF EXISTS code_imports;
              DROP TABLE IF EXISTS code_edges;
              DROP TABLE IF EXISTS notes;
-             DELETE FROM files;",
+             DROP TABLE IF EXISTS files;",
         )?;
     }
     tx.execute_batch(DDL)?;
