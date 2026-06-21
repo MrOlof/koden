@@ -766,3 +766,30 @@ Green: clippy `-D warnings` clean · `cargo test` 293 / 1 pre-existing · brain_
 34 · tsc + biome unaffected.
 
 **V2.1 closed (stale-ADR curation + adversarial pass + hardening).**
+
+### V2.2 — ranking-quality calibration ✅
+Turns the GUESSED BM25/RRF weights into MEASURED ones (the scout fan-out's top
+recommendation: build the measurement layer before temporal re-rank, which is riskier
+and must be judged against a discriminating benchmark).
+- Parameterized the search core: `search_with_weights(conn, …, &SearchWeights)` +
+  `SqliteIndex::search_weighted` (the calibration seam); `search_with_conn` is now a
+  thin wrapper with `SearchWeights::default()`. + a byte-identical equivalence test.
+- `brain_bench.rs`: graded metrics (recall@5 floor gate + MRR + precision@1) and 3
+  CONFUSER pairs — the query term lives ONLY in the target's path and ONLY in a
+  distractor's body, so the target sits solely in the identity leg and the distractor
+  solely in the content leg → identity-vs-content weight alone decides rank-1. Without
+  these the corpus scored a vanity 1.0 for any weighting.
+- Offline calibration sweep (`weight_sweep_reports_mrr_subject_to_zero_leaks`,
+  `#[ignore]`d): grid-sweeps weights maximizing MRR SUBJECT TO zero negative-control
+  leaks (the regularizer). Result: identity-dominant (rrf_identity ≥ rrf_content) →
+  MRR 1.000; content-dominant → MRR 0.875; all leak-free. So production
+  `rrf_identity = 1.5` is in the optimal band — `provisional` comment downgraded to
+  `measured` (with the §13.12 before/after note). RRF fuses by rank, so path_bm25 ∈
+  {2,3,4} doesn't move MRR — the leg weights are the load-bearing knob.
+- CI-running anti-vanity guard (`production_weights_beat_content_dominant`): asserts
+  default MRR > content-dominant MRR, so the 1.000 can never be a vanity number.
+- BENCH.md updated with the graded numbers + the calibration section.
+Green: clippy `-D warnings` clean · brain_bench 3 + 1 ignored · lib 294 / 1
+pre-existing · brain_sandbox 34. ⏭ temporal re-rank [DP-12] is the natural follow-on
+(now has a discriminating benchmark to be judged against); its byte-identity trap is
+documented (recency MUST be a stored snapshot-stable timestamp, never now()).

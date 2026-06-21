@@ -29,8 +29,14 @@ const W_IDENTITY: (f64, f64, f64) = (3.0, 1.5, 0.0);
 const W_CONTENT: (f64, f64, f64) = (0.0, 0.0, 1.0);
 /// RRF leg weights ([DP-9]). Identity (path+symbols) weighted above content so a
 /// filename match outranks a body-only mention (CONCEPT [DP-2]); content still
-/// contributes for recall. Provisional defaults — the benchmark suite (labeled
-/// ground-truth + negative control) calibrates these against real fixtures.
+/// contributes for recall. MEASURED (not guessed): the `brain_bench` calibration
+/// sweep over the labeled corpus + confusers shows `rrf_identity >= rrf_content` is
+/// MRR-optimal (1.000 vs 0.875 when content dominates), at zero negative-control
+/// leaks across the whole grid; 1.5 sits in that optimal band. Re-run the sweep
+/// (`cargo test --test brain_bench -- --ignored`) and record before/after on any
+/// change (§13.12). NB: RRF fuses by RANK, so the bm25 column MAGNITUDES above
+/// (path 3×) only order WITHIN a leg — the leg RRF weights here are the load-bearing
+/// cross-leg knob (the sweep confirms path_bm25 ∈ {2,3,4} doesn't move MRR).
 const RRF_W_IDENTITY: f64 = 1.5;
 const RRF_W_CONTENT: f64 = 1.0;
 
@@ -76,6 +82,18 @@ impl SqliteIndex {
     /// estimate, so a crashed reflect over-counts rather than leaking free spend (P4).
     pub fn sweep_orphaned_reservations(&self, now: i64) -> Result<usize, String> {
         crate::modules::brain::reflect::budget::sweep_orphaned_reservations(&self.conn, now)
+    }
+
+    /// Search with EXPLICIT ranking weights (the offline calibration seam, used by
+    /// the relevance benchmark to sweep weights over the labeled corpus).
+    pub fn search_weighted(
+        &self,
+        project: Option<&str>,
+        query: &str,
+        limit: usize,
+        w: &SearchWeights,
+    ) -> rusqlite::Result<Vec<Hit>> {
+        search_with_weights(&self.conn, project, query, limit, w)
     }
 
     /// Index (insert or update) one file's pre-tokenized streams. No-ops when the
@@ -695,12 +713,53 @@ fn run_leg(
     Ok(rows)
 }
 
-/// Core hybrid search over an arbitrary connection (writer reuse or r/o reader).
+/// The tunable ranking weights — the per-column bm25 weights for each FTS5 leg plus
+/// the per-leg RRF weights. Extracted so the offline calibration sweep
+/// (`brain_bench`) can vary them over the labeled corpus; production search uses
+/// [SearchWeights::defaults] (the consts above).
+#[derive(Clone, Copy, Debug)]
+pub struct SearchWeights {
+    /// bm25 (path, symbols, content) weights for the identity leg.
+    pub identity_bm25: (f64, f64, f64),
+    /// bm25 (path, symbols, content) weights for the content leg.
+    pub content_bm25: (f64, f64, f64),
+    /// RRF fusion weight for the identity leg.
+    pub rrf_identity: f64,
+    /// RRF fusion weight for the content leg.
+    pub rrf_content: f64,
+}
+
+impl Default for SearchWeights {
+    fn default() -> Self {
+        Self {
+            identity_bm25: W_IDENTITY,
+            content_bm25: W_CONTENT,
+            rrf_identity: RRF_W_IDENTITY,
+            rrf_content: RRF_W_CONTENT,
+        }
+    }
+}
+
+/// Core hybrid search over an arbitrary connection (writer reuse or r/o reader),
+/// with the PRODUCTION weights. Thin wrapper over [search_with_weights].
 pub fn search_with_conn(
     conn: &Connection,
     project: Option<&str>,
     query: &str,
     limit: usize,
+) -> rusqlite::Result<Vec<Hit>> {
+    search_with_weights(conn, project, query, limit, &SearchWeights::default())
+}
+
+/// Core hybrid search with EXPLICIT weights (the calibration seam). Identical to
+/// `search_with_conn` when given `SearchWeights::default()` — proven by
+/// `search_with_weights_defaults_equal_search_with_conn`.
+pub fn search_with_weights(
+    conn: &Connection,
+    project: Option<&str>,
+    query: &str,
+    limit: usize,
+    w: &SearchWeights,
 ) -> rusqlite::Result<Vec<Hit>> {
     let q_tokens = tokenize::tokenize(query);
     if q_tokens.is_empty() {
@@ -709,16 +768,16 @@ pub fn search_with_conn(
     let overfetch = (limit * 4).max(40);
     // The two FTS5 legs — labelled by SEARCH_LEG_LABELS (identity, content). A
     // semantic vector leg is NOT fused here in v1 (the P5 no-vector-leg invariant).
-    let leg_a = run_leg(conn, &build_match("path symbols", &q_tokens), project, W_IDENTITY, overfetch)?;
-    let leg_b = run_leg(conn, &build_match("content", &q_tokens), project, W_CONTENT, overfetch)?;
+    let leg_a = run_leg(conn, &build_match("path symbols", &q_tokens), project, w.identity_bm25, overfetch)?;
+    let leg_b = run_leg(conn, &build_match("content", &q_tokens), project, w.content_bm25, overfetch)?;
 
     // Composite id "project\0path" keeps paths unique across projects.
     let key = |p: &(String, String)| format!("{}\u{0}{}", p.0, p.1);
     let a_ids: Vec<String> = leg_a.iter().map(key).collect();
     let b_ids: Vec<String> = leg_b.iter().map(key).collect();
     let fused = rank::weighted_rrf(&[
-        Leg { weight: RRF_W_IDENTITY, ranked: &a_ids },
-        Leg { weight: RRF_W_CONTENT, ranked: &b_ids },
+        Leg { weight: w.rrf_identity, ranked: &a_ids },
+        Leg { weight: w.rrf_content, ranked: &b_ids },
     ]);
 
     let hits = fused
@@ -998,6 +1057,25 @@ mod tests {
         idx.index_file("p", "src/other.rs", "// login flow happens here", "b", 10).unwrap();
         let hits = search_with_conn(&idx.conn, Some("p"), "login", 10).unwrap();
         assert_eq!(hits[0].path, "src/login.rs", "path hit should win, got {hits:?}");
+    }
+
+    #[test]
+    fn search_with_weights_defaults_equal_search_with_conn() {
+        // The parameterized core with default weights must be byte-identical to the
+        // production search (guards the V2.2 refactor).
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "src/auth/login.rs", "pub fn loginHandler() {}", "a", 24).unwrap();
+        idx.index_file("p", "src/db/pool.rs", "pub fn buildConnectionPool() {}", "b", 30).unwrap();
+        idx.index_file("p", "src/api/router.rs", "// login route registered here", "c", 30).unwrap();
+        for q in ["login handler", "connection pool", "login"] {
+            let a = search_with_conn(&idx.conn, Some("p"), q, 10).unwrap();
+            let b = search_with_weights(&idx.conn, Some("p"), q, 10, &SearchWeights::default()).unwrap();
+            assert_eq!(a.len(), b.len(), "q={q}");
+            for (x, y) in a.iter().zip(&b) {
+                assert_eq!((&x.path, x.score), (&y.path, y.score), "q={q}: divergent hit");
+            }
+        }
     }
 
     #[test]
