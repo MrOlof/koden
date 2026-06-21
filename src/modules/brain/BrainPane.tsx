@@ -281,7 +281,7 @@ export function BrainPane() {
           <select
             value={project ?? ""}
             onChange={(e) => setProject(e.target.value || null)}
-            className="h-7 flex-1 rounded border bg-transparent px-1.5 text-[11px] text-foreground/80"
+            className="h-7 flex-1 rounded border bg-background px-1.5 text-[11px] text-foreground/80 [&>option]:bg-popover [&>option]:text-popover-foreground"
             title="Filter by project"
           >
             <option value="">All projects</option>
