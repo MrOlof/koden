@@ -512,13 +512,34 @@ export function BrainMapPane() {
   const focusProject = useCallback(
     (pid: string, pang: number) => {
       animateSpread(pid, SPREAD_TO);
-      // Zoom in along the project's spine, centred between K and the tree so the core
-      // stays visible but the branches are big enough to read.
-      flyTo(Math.cos(pang) * 250, Math.sin(pang) * 250, 1.7, true);
+      // Adaptive fit: frame the project's FULLY-SPREAD tree + the brain core (0,0) so
+      // nothing clips and the zoom scales to the project's actual size.
+      let minX = 0;
+      let maxX = 0;
+      let minY = 0;
+      let maxY = 0;
+      if (layout) {
+        for (const n of layout.nodes) {
+          if (n.projectId !== pid) continue;
+          const ang = n.pang + n.aoff * SPREAD_TO;
+          const rad = n.rad * (1 + (SPREAD_TO - 1) * 0.16);
+          const x = Math.cos(ang) * rad;
+          const y = Math.sin(ang) * rad;
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+      const pad = 70;
+      const bw = maxX - minX + pad * 2;
+      const bh = maxY - minY + pad * 2;
+      const s = Math.max(0.4, Math.min(2.6, Math.min(W / bw, H / bh)));
+      flyTo((minX + maxX) / 2, (minY + maxY) / 2, s, true);
       setFocusPid(pid);
       setSelected(null);
     },
-    [animateSpread, flyTo],
+    [animateSpread, flyTo, layout],
   );
   const selectNode = useCallback(
     (n: RNode) => {
@@ -649,12 +670,13 @@ export function BrainMapPane() {
                   focusProject(n.projectId, n.pang);
                 }}
               >
+                <circle cx={h.x} cy={h.y} r={r + 16} fill="transparent" />
                 <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={n.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
                 <circle cx={h.x} cy={h.y} r={r} fill={n.color} className="stroke-background" strokeWidth={2.4} />
                 <text x={h.x} y={h.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-semibold" fontSize={10.5}>
                   {(n.label.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
                 </text>
-                <text x={h.x} y={h.y + r + 13} textAnchor="middle" className="pointer-events-none fill-foreground font-semibold" fontSize={11}>
+                <text x={h.x} y={h.y + r + 13} textAnchor="middle" className="fill-foreground font-semibold" fontSize={11}>
                   {n.label}
                 </text>
               </g>
