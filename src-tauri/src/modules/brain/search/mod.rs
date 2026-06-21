@@ -9,10 +9,17 @@
 pub mod vector;
 
 /// Dependency-free reference Embedder/VectorStore — gated, NOT in the v1 binary.
-/// Proves the seams compose + keeps the feature from rotting; the production swap
-/// (fastembed-rs + hnsw_rs) lands behind the same traits at enablement time.
+/// Proves the seams compose + keeps the feature from rotting.
 #[cfg(feature = "semantic")]
 pub mod reference;
+
+/// V2.5 — the REAL hnsw_rs-backed VectorStore (pure Rust, offline-testable).
+#[cfg(feature = "semantic")]
+pub mod hnsw_store;
+
+/// V2.5 — the REAL fastembed-rs ONNX Embedder (needs network at build + runtime).
+#[cfg(feature = "semantic-embed")]
+pub mod fastembed_embedder;
 
 pub use vector::{DocId, Embedder, VectorStore};
 

@@ -17,13 +17,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
-# Semantic search (P5, ADR-006) — DEFAULT-OFF, absent from the shipped binary.
-# v1 ships only the Embedder/VectorStore seams + a dependency-free reference impl
-# (gated here) that proves the seams compose and keeps the feature from rotting.
-# The PRODUCTION swap lands behind this SAME flag at enablement time, deps pinned
-# then: `semantic = ["dep:fastembed", "dep:hnsw_rs"]` (fastembed-rs Embedder via
-# ONNX + hnsw_rs persisted VectorStore). No heavy deps enter the tree until then.
-semantic = []
+# Semantic search (P5/V2.5, ADR-006) — DEFAULT-OFF, absent from the shipped binary.
+# Split so the offline-testable half (real HNSW, pure Rust) is independent of the
+# network-/native-heavy embedder:
+#   semantic       = real hnsw_rs VectorStore + the Embedder/VectorStore seams + the
+#                    dependency-free reference embedder. Pure Rust, builds + tests offline.
+#   semantic-embed = adds the REAL fastembed-rs ONNX embedder. Needs network at BUILD
+#                    (ort downloads the ONNX runtime) and at RUNTIME (model download),
+#                    so it is its own feature + its real run is an online/GUI step.
+semantic = ["dep:hnsw_rs"]
+semantic-embed = ["semantic", "dep:fastembed"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -63,6 +66,21 @@ notify = "8.2.0"
 # bundled SQLite ships FTS5 and predates that. Revisit on a rustc bump.
 rusqlite = { version = "0.31", features = ["bundled"] }
 blake3 = "1.8.5"
+# Semantic search (V2.5) — optional, behind the `semantic`/`semantic-embed` features
+# (DEFAULT-OFF, absent from the shipped binary). hnsw_rs is pure Rust; fastembed pulls
+# the ONNX runtime + a model download (network), hence its own feature.
+hnsw_rs = { version = "0.3", optional = true }
+# default-features=false drops `image-models` (text-only) AND swaps ort to
+# `load-dynamic`: ONNX Runtime is dlopen'd from `onnxruntime.dll` at first use
+# instead of statically linked. That (a) keeps ONNX + GPU EPs OUT of the binary —
+# matching "default-off, absent from the shipped binary", (b) avoids statically
+# linking the DirectML EP (needs dxcore.lib, absent from Win SDK < 10.0.19041),
+# and (c) skips the image/ravif/exr compile subtree. Runtime cost: onnxruntime.dll
+# must be discoverable (ORT_DYLIB_PATH) — that's the online/GUI embed step.
+fastembed = { version = "5", optional = true, default-features = false, features = [
+	"ort-load-dynamic",
+	"hf-hub-rustls-tls",
+] }
 serde_yaml = "0.9"
 tree-sitter = "0.26.9"
 tree-sitter-rust = "0.24.2"
