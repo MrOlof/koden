@@ -9,7 +9,7 @@ use std::sync::RwLock;
 
 use crate::modules::brain::ProjectId;
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
@@ -17,9 +17,24 @@ pub struct Project {
     pub root: String,
 }
 
+/// On-disk source of truth (app-data `workspace.json`). The registry is otherwise
+/// in-memory and re-seeded each boot; this makes the project list + the workspace
+/// root survive restarts.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Persisted {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    workspace_root: Option<String>,
+    #[serde(default)]
+    projects: Vec<Project>,
+}
+
 #[derive(Default)]
 pub struct KodenBrainRegistry {
     projects: RwLock<Vec<Project>>,
+    /// The user's workspace parent (each child project is registered separately).
+    workspace_root: RwLock<Option<String>>,
 }
 
 impl KodenBrainRegistry {
@@ -58,6 +73,51 @@ impl KodenBrainRegistry {
         let before = guard.len();
         guard.retain(|p| p.id != id);
         guard.len() != before
+    }
+
+    /// The configured workspace root (parent of all projects), if any.
+    pub fn workspace_root(&self) -> Option<String> {
+        self.workspace_root.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Set (or clear) the workspace root.
+    pub fn set_workspace_root(&self, root: Option<String>) {
+        if let Ok(mut g) = self.workspace_root.write() {
+            *g = root;
+        }
+    }
+
+    /// Persist the project list + workspace root to `path` (app-data workspace.json).
+    pub fn save_to(&self, path: &Path) {
+        let snap = Persisted {
+            version: 1,
+            workspace_root: self.workspace_root(),
+            projects: self.projects(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&snap) {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Load the persisted project list + workspace root (best-effort). Returns true
+    /// if a config file was read.
+    pub fn load_from(&self, path: &Path) -> bool {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(p) = serde_json::from_str::<Persisted>(&raw) else {
+            return false;
+        };
+        if let Ok(mut g) = self.projects.write() {
+            *g = p.projects;
+        }
+        if let Ok(mut w) = self.workspace_root.write() {
+            *w = p.workspace_root;
+        }
+        true
     }
 
     /// Longest-prefix match `cwd` → project (CONCEPT §5.2; used by P3 gist

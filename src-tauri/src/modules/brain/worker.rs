@@ -136,9 +136,21 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
         }
     }
 
-    // 5. Bootstrap registry (P0: authorized launch dir; P1 wizard manages the
-    // canonical multi-project source).
-    seed_registry(&app, launch_dir.as_deref());
+    // 5. Bootstrap registry: load the persisted workspace.json (the source of truth)
+    // so projects + the workspace root survive restarts; fall back to the authorized
+    // launch dir only on first run (no config yet).
+    let cfg_path = db_path.with_file_name("workspace.json");
+    let loaded = app
+        .try_state::<BrainState>()
+        .map(|s| s.registry.load_from(&cfg_path))
+        .unwrap_or(false);
+    let has_projects = app
+        .try_state::<BrainState>()
+        .map(|s| !s.registry.projects().is_empty())
+        .unwrap_or(false);
+    if !loaded || !has_projects {
+        seed_registry(&app, launch_dir.as_deref());
+    }
 
     // 6. Warm population — project by project so the first is searchable early.
     warm_population(&app, &index);
@@ -159,6 +171,9 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 warm_population(&app, &index); // full reconcile (add/change/delete)
                 drop(watcher.take()); // drop the old watcher first → no double-watch window
                 watcher = arm_watcher(&app, &tx); // pick up any new project roots
+                if let Some(s) = app.try_state::<BrainState>() {
+                    s.registry.save_to(&cfg_path); // persist the project list
+                }
             }
             BrainEvent::RemoveProject { project } => {
                 if let Err(e) = index.remove_project(&project) {
@@ -168,6 +183,9 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 }
                 drop(watcher.take());
                 watcher = arm_watcher(&app, &tx); // stop watching the removed root
+                if let Some(s) = app.try_state::<BrainState>() {
+                    s.registry.save_to(&cfg_path); // persist the updated project list
+                }
             }
             BrainEvent::Tick => index.checkpoint(),
             BrainEvent::Doctor { project, now_date } => {
