@@ -109,13 +109,13 @@ export function BrainHeaderMenu({ onOpenBrain, onOpenBrainMap, onOpenSettings }:
           </div>
         </div>
         <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={onOpenBrain} className="gap-2">
+          <HugeiconsIcon icon={Search01Icon} size={15} strokeWidth={1.75} />
+          Brain Search
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenBrainMap} className="gap-2">
           <HugeiconsIcon icon={HierarchySquare01Icon} size={15} strokeWidth={1.75} />
           Brain Map
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={onOpenBrain} className="gap-2">
-          <HugeiconsIcon icon={Search01Icon} size={15} strokeWidth={1.75} />
-          Open Brain
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenSettings} className="gap-2">
           <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />
