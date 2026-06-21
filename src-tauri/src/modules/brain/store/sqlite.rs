@@ -1060,6 +1060,39 @@ mod tests {
     }
 
     #[test]
+    fn resolve_import_edges() {
+        let files: std::collections::HashSet<String> = [
+            "src/a.ts",
+            "src/util/index.ts", // a directory import resolves here via the EXTS fallback
+            "shared.ts",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        // bare / package specifiers are not relative → no edge.
+        assert_eq!(resolve_import("src/b.ts", "react", &files), None);
+        // relative file import resolves with an extension appended.
+        assert_eq!(resolve_import("src/b.ts", "./a", &files), Some("src/a.ts".into()));
+        // directory import resolves to <dir>/index.ts.
+        assert_eq!(resolve_import("src/b.ts", "./util", &files), Some("src/util/index.ts".into()));
+        // a spec that ESCAPES the project root (more `..` than depth) is NOT an edge,
+        // even if a same-named file exists at the root (the false-edge guard).
+        assert_eq!(resolve_import("src/b.ts", "../../shared", &files), None);
+        // one `..` from src/ lands at the root → resolves to the root file.
+        assert_eq!(resolve_import("src/b.ts", "../shared", &files), Some("shared.ts".into()));
+        // ?query / #hash suffixes are stripped before resolving.
+        assert_eq!(resolve_import("src/b.ts", "./a?raw", &files), Some("src/a.ts".into()));
+    }
+
+    #[test]
+    fn normalize_rel_rejects_root_escape() {
+        use std::path::Path;
+        assert_eq!(normalize_rel(Path::new("src/./util/../a.ts")).as_deref(), Some("src/a.ts"));
+        assert_eq!(normalize_rel(Path::new("src/../../x")), None, "escapes above root → None");
+    }
+
+    #[test]
     fn search_with_weights_defaults_equal_search_with_conn() {
         // The parameterized core with default weights must be byte-identical to the
         // production search (guards the V2.2 refactor).

@@ -164,6 +164,42 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_preserves_canonical_drops_derived() {
+        // The load-bearing migration invariant: human/spend state (proposals,
+        // reject_signatures, brain_budget) MUST survive an upgrade, while DERIVED-
+        // from-disk tables (notes — rebuilt by scan) are dropped + rebuilt. A
+        // regression that moved a canonical table into the DROP batch would
+        // resurrect declined proposals on every version bump — this guards it.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO proposals(project_id,signature,action,target_id,title,detail,source,status,created_ms)
+             VALUES('p','sig','archive','n','t','d','curate','rejected',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO reject_signatures(project_id,reject_sig) VALUES('p','rj')", []).unwrap();
+        conn.execute("UPDATE brain_budget SET spent_total_usd=0.5 WHERE id=1", []).unwrap();
+        conn.execute(
+            "INSERT INTO notes(project_id,id,path,hash) VALUES('p','n1','.koden-memory/n1.md','h')",
+            [],
+        )
+        .unwrap();
+        // force an upgrade
+        conn.execute("UPDATE brain_meta SET value='1' WHERE key='schema_version'", []).unwrap();
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+
+        let count = |t: &str| -> i64 {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count("proposals"), 1, "CANONICAL proposals must survive (declined stays declined)");
+        assert_eq!(count("reject_signatures"), 1, "CANONICAL reject_signatures must survive");
+        let spent: f64 = conn.query_row("SELECT spent_total_usd FROM brain_budget WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(spent, 0.5, "CANONICAL budget spend must survive");
+        assert_eq!(count("notes"), 0, "DERIVED notes is dropped + rebuilt by the next scan");
+    }
+
+    #[test]
     fn fts5_is_available() {
         // Proves the bundled SQLite has FTS5 (else CREATE VIRTUAL TABLE errors).
         let conn = Connection::open_in_memory().expect("in-memory db");
