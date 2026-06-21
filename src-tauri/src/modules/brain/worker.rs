@@ -11,6 +11,7 @@ use tauri::{AppHandle, Listener, Manager};
 use crate::modules::brain::events::{AgentSignalPayload, BrainEvent};
 use crate::modules::brain::freshness::{hash, walk, watch};
 use crate::modules::brain::memory;
+use crate::modules::brain::reflect;
 use crate::modules::brain::registry::Project;
 use crate::modules::brain::secrets;
 use crate::modules::brain::store::SqliteIndex;
@@ -63,6 +64,15 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
         if let Ok(mut p) = state.db_path.write() {
             *p = Some(db_path.clone());
         }
+    }
+
+    // Boot sweep (P4): charge any reflect reservation orphaned by a mid-call crash
+    // at its estimate, so a crashed reflect over-counts rather than leaking free
+    // spend. Fail-open — a sweep error never blocks startup.
+    match index.sweep_orphaned_reservations(now_epoch_ms()) {
+        Ok(n) if n > 0 => log::info!("brain: swept {n} orphaned reflect reservation(s)"),
+        Ok(_) => {}
+        Err(e) => log::warn!("brain: budget sweep failed ({e}); continuing"),
     }
 
     // 2. Internal event channel; register the sender so commands can enqueue.
@@ -147,6 +157,32 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             }
             BrainEvent::ResolveProposal { project, signature, reject } => {
                 let _ = index.resolve_proposal(&project, &signature, reject);
+            }
+            BrainEvent::SetBudget { ceiling_usd } => {
+                if let Err(e) = index.set_budget_ceiling(ceiling_usd, now_epoch_ms()) {
+                    log::warn!("brain: set budget ceiling failed ({e})");
+                }
+            }
+            BrainEvent::Reflect { project, now_date } => {
+                // Manual, single-flight, $0-by-default. The network call blocks this
+                // worker briefly (acceptable for a rare manual action); fail-open.
+                let pids: Vec<String> = match &project {
+                    Some(p) => vec![p.clone()],
+                    None => app
+                        .try_state::<BrainState>()
+                        .map(|s| s.registry.projects().into_iter().map(|p| p.id).collect())
+                        .unwrap_or_default(),
+                };
+                let now_ms = now_epoch_ms();
+                for pid in pids {
+                    let outcome = reflect::reflect_once(&app, &index, &pid, now_date.as_deref(), now_ms);
+                    log::info!(
+                        "brain: reflect '{pid}' → {:?} ({} proposal(s), ${:.4})",
+                        outcome.reason,
+                        outcome.proposals.len(),
+                        outcome.spent_usd
+                    );
+                }
             }
             BrainEvent::Fs { project, changed } => {
                 if let Some(root) = project_root(&app, &project) {

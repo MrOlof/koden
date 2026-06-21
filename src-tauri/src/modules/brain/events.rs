@@ -54,4 +54,13 @@ pub enum BrainEvent {
         signature: String,
         reject: bool,
     },
+    /// Run a budgeted LLM reflect pass (P4) — the only token-spending path.
+    /// Manual-trigger only; `project = None` reflects every registered project.
+    /// `now_date` (ISO YYYY-MM-DD) feeds the doctor findings in the digest.
+    Reflect {
+        project: Option<ProjectId>,
+        now_date: Option<String>,
+    },
+    /// Set the reflect spend ceiling (USD; 0.0 disables). Writer-side (P4).
+    SetBudget { ceiling_usd: f64 },
 }

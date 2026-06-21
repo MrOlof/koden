@@ -227,6 +227,34 @@ pub fn brain_resolve_proposal(
     enqueue(&state, BrainEvent::ResolveProposal { project, signature, reject })
 }
 
+/// Trigger a budgeted LLM reflect pass (P4) — the only token-spending path.
+/// Runs on the worker (single writer); proposals land in the review inbox and the
+/// spend updates `brain_budget_status`. Off unless a ceiling > 0 is set. Manual only.
+#[tauri::command]
+pub fn brain_reflect(
+    state: State<BrainState>,
+    project: Option<String>,
+    now_date: Option<String>,
+) -> Result<(), String> {
+    enqueue(&state, BrainEvent::Reflect { project, now_date })
+}
+
+/// Set the reflect monthly spend ceiling (USD). `0.0` disables reflect entirely.
+/// The only feature that spends money, and it uses the user's own Anthropic key.
+#[tauri::command]
+pub fn brain_set_budget(state: State<BrainState>, ceiling_usd: f64) -> Result<(), String> {
+    enqueue(&state, BrainEvent::SetBudget { ceiling_usd })
+}
+
+/// Reflect budget meter: `(ceiling_usd, spent_total_usd)`. Read-only.
+#[tauri::command]
+pub fn brain_budget_status(state: State<BrainState>) -> (f64, f64) {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return (0.0, 0.0);
+    };
+    store::budget_state_readonly(&db).unwrap_or((0.0, 0.0))
+}
+
 /// Enqueue a worker event via the registered sender (single-writer discipline).
 fn enqueue(state: &State<BrainState>, ev: BrainEvent) -> Result<(), String> {
     let guard = state.tx.lock().map_err(|_| "brain tx poisoned".to_string())?;

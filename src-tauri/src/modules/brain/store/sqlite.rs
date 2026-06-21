@@ -828,6 +828,17 @@ pub fn file_count_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result
     file_count_with_conn(&open_readonly(db_path)?, project_id)
 }
 
+/// Reflect budget `(ceiling_usd, spent_total_usd)` via a read-only connection
+/// (the command-thread status read — WAL → wait-free vs the writer). P4.
+pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {
+    let conn = open_readonly(db_path)?;
+    conn.query_row(
+        "SELECT ceiling_usd, spent_total_usd FROM brain_budget WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {
     let anchors_json: String = r.get(5)?;
     let anchors: Vec<String> = serde_json::from_str(&anchors_json).unwrap_or_default();

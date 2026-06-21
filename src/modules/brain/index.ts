@@ -1,5 +1,11 @@
 export { BrainPane } from "./BrainPane";
-export { brainBuildGist, resolveProjectForCwd } from "./lib/bindings";
+export {
+  brainBudgetStatus,
+  brainBuildGist,
+  brainReflect,
+  brainSetBudget,
+  resolveProjectForCwd,
+} from "./lib/bindings";
 export type {
   BrainStatus,
   BrainStatusReport,

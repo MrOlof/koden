@@ -95,6 +95,26 @@ export function brainResolveProposal(
   return invoke<void>("brain_resolve_proposal", { project, signature, reject });
 }
 
+/** Trigger a budgeted LLM reflect pass (P4 — the only token-spending path).
+ *  `project = null` reflects every registered project. `nowDate` = ISO YYYY-MM-DD
+ *  for the doctor findings in the digest. Off unless a ceiling > 0 is set. */
+export function brainReflect(
+  project: string | null = null,
+  nowDate: string | null = null,
+): Promise<void> {
+  return invoke<void>("brain_reflect", { project, nowDate });
+}
+
+/** Set the reflect monthly spend ceiling (USD). `0` disables reflect entirely. */
+export function brainSetBudget(ceilingUsd: number): Promise<void> {
+  return invoke<void>("brain_set_budget", { ceilingUsd });
+}
+
+/** Reflect budget meter: `[ceilingUsd, spentTotalUsd]`. */
+export function brainBudgetStatus(): Promise<[number, number]> {
+  return invoke<[number, number]>("brain_budget_status", {});
+}
+
 export type Gist = { bytes: string; fingerprint: string; sources: string[] };
 
 /** Build the cache-stable gist for a project + intent (blank intent → cold-start
