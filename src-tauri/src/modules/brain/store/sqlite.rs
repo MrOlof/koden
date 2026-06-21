@@ -713,6 +713,22 @@ fn open_readonly(db_path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Open a read-only connection and pin ONE WAL snapshot for the whole read
+/// session via a deferred read transaction. Every statement run on the returned
+/// connection observes the same index state, so a multi-read consumer (the gist)
+/// cannot tear across a concurrent worker commit — the P3 byte-identity gate
+/// depends on the cache key (fingerprint) and the rendered body coming from one
+/// state. Dropping the connection rolls the (read-only) transaction back.
+pub fn open_readonly_snapshot(db_path: &Path) -> rusqlite::Result<Connection> {
+    let conn = open_readonly(db_path)?;
+    conn.execute_batch("BEGIN DEFERRED")?;
+    // The WAL read mark is taken on the first table read; force it now by
+    // touching the schema b-tree so the snapshot is pinned at open time,
+    // independent of which read the caller runs first.
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))?;
+    Ok(conn)
+}
+
 /// Search via a fresh read-only connection (command-thread path). Fail-soft: if
 /// the DB isn't there yet, callers get an empty result, not an error.
 pub fn search_readonly(
@@ -725,9 +741,9 @@ pub fn search_readonly(
     search_with_conn(&conn, project, query, limit)
 }
 
-/// Project aggregate fingerprint via a read-only connection (gist cache key).
-pub fn project_fingerprint_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result<String> {
-    let conn = open_readonly(db_path)?;
+/// Project aggregate fingerprint over a caller-supplied connection (gist cache
+/// key). Use `*_with_conn` variants when several reads must share one snapshot.
+pub fn project_fingerprint_with_conn(conn: &Connection, project_id: &str) -> rusqlite::Result<String> {
     let mut stmt = conn.prepare("SELECT path, hash FROM files WHERE project_id=?1")?;
     let it = stmt.query_map([project_id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -739,14 +755,19 @@ pub fn project_fingerprint_readonly(db_path: &Path, project_id: &str) -> rusqlit
     Ok(crate::modules::brain::freshness::aggregate_fingerprint(&mut entries))
 }
 
-/// Top distinct definition names in a file (sorted) — for the gist skeleton.
-pub fn symbols_for_path_readonly(
-    db_path: &Path,
+/// Project aggregate fingerprint via a fresh read-only connection.
+pub fn project_fingerprint_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result<String> {
+    project_fingerprint_with_conn(&open_readonly(db_path)?, project_id)
+}
+
+/// Top distinct definition names in a file (sorted) over a caller-supplied
+/// connection — for the gist skeleton.
+pub fn symbols_for_path_with_conn(
+    conn: &Connection,
     project_id: &str,
     path: &str,
     limit: usize,
 ) -> rusqlite::Result<Vec<String>> {
-    let conn = open_readonly(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT DISTINCT name FROM code_nodes WHERE project_id=?1 AND path=?2 ORDER BY name LIMIT ?3",
     )?;
@@ -760,14 +781,28 @@ pub fn symbols_for_path_readonly(
     Ok(v)
 }
 
-/// File count for a project via a read-only connection.
-pub fn file_count_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result<i64> {
-    let conn = open_readonly(db_path)?;
+/// Top distinct definition names in a file via a fresh read-only connection.
+pub fn symbols_for_path_readonly(
+    db_path: &Path,
+    project_id: &str,
+    path: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    symbols_for_path_with_conn(&open_readonly(db_path)?, project_id, path, limit)
+}
+
+/// File count for a project over a caller-supplied connection.
+pub fn file_count_with_conn(conn: &Connection, project_id: &str) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM files WHERE project_id=?1",
         [project_id],
         |r| r.get(0),
     )
+}
+
+/// File count for a project via a fresh read-only connection.
+pub fn file_count_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result<i64> {
+    file_count_with_conn(&open_readonly(db_path)?, project_id)
 }
 
 fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {
@@ -825,13 +860,12 @@ pub fn list_proposals_readonly(
     Ok(rows)
 }
 
-/// List structured memory notes (for the review inbox / cards) via a read-only
-/// connection. `project = None` lists every project's notes.
-pub fn list_notes_readonly(
-    db_path: &Path,
+/// List structured memory notes (for the review inbox / cards) over a
+/// caller-supplied connection. `project = None` lists every project's notes.
+pub fn list_notes_with_conn(
+    conn: &Connection,
     project: Option<&str>,
 ) -> rusqlite::Result<Vec<NoteSummary>> {
-    let conn = open_readonly(db_path)?;
     let mut rows = Vec::new();
     match project {
         Some(pid) => {
@@ -854,6 +888,14 @@ pub fn list_notes_readonly(
         }
     }
     Ok(rows)
+}
+
+/// List structured memory notes via a fresh read-only connection.
+pub fn list_notes_readonly(
+    db_path: &Path,
+    project: Option<&str>,
+) -> rusqlite::Result<Vec<NoteSummary>> {
+    list_notes_with_conn(&open_readonly(db_path)?, project)
 }
 
 #[cfg(test)]

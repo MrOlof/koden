@@ -428,3 +428,44 @@ confidence gate + snippet-text + git/recent-files synthesis remain refinements.
 
 **P3 is functionally complete (backend + gate + launcher wiring).** Next: a P3
 adversarial-verification pass, then P4 (budgeted reflect + crash-resume).
+
+### P3.4 — adversarial verification + hardening ✅
+8 reviewers (waved 4-at-a-time to dodge burst rate-limits) + synthesis, ~1M tokens,
+across cache-stability, launcher-wiring, faithfulness, synth-determinism, secret-
+safety, budget-quality, and concurrency-perf. 33 findings; all load-bearing claims
+spot-verified against the code before acting. Fixed the must-fix + the cheap real wins:
+- **HIGH — torn snapshot breaks the byte-identity gate (the headline)**: `build_gist`
+  read the fingerprint (cache key) and the body across 4+N *separate* read-only
+  connections, each taking its own WAL snapshot at open. The single worker could
+  commit a reindex between opens → a gist whose advertised key (state A) doesn't match
+  its bytes (state B), so the same key could map to two different byte strings under
+  concurrency — directly violating the P3 gate (the single-threaded gate test can't
+  see it). Fix: `open_readonly_snapshot` pins ONE deferred read transaction; added
+  `*_with_conn` variants (`project_fingerprint`/`file_count`/`symbols_for_path`/
+  `list_notes`, joining the existing `search_with_conn`); `build_gist`/`build_gist_auto`/
+  `synthesize_intent` now thread that one connection so fingerprint, file_count, search,
+  every symbols read, and notes observe one state. Also drops ~15 redundant opens/spawn.
+  + **real concurrent-write regression test** (`gist_cache_key_stable_under_concurrent_writes`):
+  a writer thread toggles the index while a reader builds 400 gists; asserts no cache
+  key ever maps to two bodies, and that >1 state was actually observed (non-vacuous).
+- **MEDIUM — case-sensitive cwd→project match**: `resolveProjectForCwd` compared paths
+  case-sensitively while Windows/macOS fold case → gist silently un-injected on case
+  drift. Now case-insensitive (a missed match only skips injection, so over-matching
+  is the safe error).
+- **MEDIUM — "stored cache" expectation**: clarified in the module doc that byte-
+  identity is a *property of the deterministic single-snapshot build*, not a memoized
+  blob — CONCEPT Flow C step 5 is satisfied by re-deriving identical bytes; there is
+  deliberately no on-disk gist cache (nothing to stale/invalidate). [ponytail]
+⏭ Honestly deferred (logged, non-blocking — LOWs / faithful deferrals): an explicit
+[DP-22] confidence/thin gate (today thin only falls out incidentally when the index
+is empty); snippet-text + graph-neighbor gist layers; note status/provenance downrank
+([DP-26]); Director-path gist injection; toast wording when a gist is freshness-only;
+git/recent-files cold-start synth signal. None affect the cache gate.
+Green: clippy `-D warnings` clean · `cargo test` 244 passed / 1 pre-existing
+(`authorize_spawn_cwd_blocks_symlink_escape`, Windows symlink privilege, untouched) ·
+brain lib 52 · brain_sandbox 16 · tsc clean · biome lint clean.
+⏭ Still pending for P3 (cross-phase): the live `pnpm tauri dev` run proving an actual
+agent launch picks up the gist (the one piece that needs a GUI, not a test harness).
+
+**P3 closed (backend + gate + launcher wiring + adversarial pass + hardening).**
+Next: P4 (budgeted reflect + crash-resume).

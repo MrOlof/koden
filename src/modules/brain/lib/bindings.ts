@@ -107,15 +107,17 @@ export function brainBuildGist(
   return invoke<Gist | null>("brain_build_gist", { project, intent, budget });
 }
 
-/** Longest-prefix match a cwd against registered project roots → project id. */
+/** Longest-prefix match a cwd against registered project roots → project id.
+ *  Case-insensitive: Windows/macOS paths fold case, and a missed match only
+ *  means a silently un-injected gist, so over-matching here is the safe error. */
 export async function resolveProjectForCwd(cwd: string): Promise<string | null> {
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
   const c = norm(cwd);
-  let best: { id: string; root: string } | null = null;
+  let best: { id: string; rootLen: number } | null = null;
   for (const p of await brainListProjects()) {
     const root = norm(p.root);
-    if ((c === root || c.startsWith(`${root}/`)) && (!best || root.length > best.root.length)) {
-      best = { id: p.id, root };
+    if ((c === root || c.startsWith(`${root}/`)) && (!best || root.length > best.rootLen)) {
+      best = { id: p.id, rootLen: root.length };
     }
   }
   return best?.id ?? null;

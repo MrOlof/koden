@@ -372,6 +372,65 @@ fn gist_cold_start_synth_and_write() {
     assert!(g3.bytes.contains("checkout.ts"));
 }
 
+/// P3 gate under concurrency: while the single writer toggles the index between
+/// two states, a reader building gists must never observe a TORN snapshot — i.e.
+/// for any cache key, the bytes are always identical. Before the single-snapshot
+/// fix, build_gist read the fingerprint (key) and the body over separate
+/// connections, so a key could map to two different byte strings.
+#[test]
+fn gist_cache_key_stable_under_concurrent_writes() {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+
+    // Writer thread: toggle one "login"-matching file in/out, committing each step.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_w = Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        let mut present = false;
+        while !stop_w.load(Ordering::Relaxed) {
+            if present {
+                idx.remove_file(PID, "src/auth/loginExtra.ts").ok();
+            } else {
+                idx.index_file(
+                    PID,
+                    "src/auth/loginExtra.ts",
+                    "export function loginExtra() {}",
+                    "h-extra",
+                    33,
+                )
+                .ok();
+            }
+            present = !present;
+        }
+    });
+
+    // Reader: build gists in a tight loop, asserting key→bytes is a function.
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for _ in 0..400 {
+        let g = build_gist(&db, PID, "proj", "login", 400);
+        if let Some(prev) = seen.get(&g.fingerprint) {
+            assert_eq!(prev, &g.bytes, "torn snapshot: one cache key, two gist bodies");
+        } else {
+            seen.insert(g.fingerprint.clone(), g.bytes.clone());
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    // Sanity: the writer actually churned the index, so the reader observed more
+    // than one state (otherwise the no-tear assertion would be vacuous).
+    assert!(seen.len() >= 2, "expected to observe >1 index state, saw {}", seen.len());
+}
+
 fn ts_chain(root: &Path) {
     write(root, "src/a.ts", b"export function alpha() {}");
     write(root, "src/b.ts", b"import { alpha } from './a';\nexport function bravo() { alpha(); }");
