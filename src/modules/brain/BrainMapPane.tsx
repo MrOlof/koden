@@ -336,7 +336,7 @@ export function BrainMapPane() {
   const [hover, setHover] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [focusPid, setFocusPid] = useState<string | null>(null);
-  const [, force] = useState(0);
+  const [tick, force] = useState(0);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const camG = useRef<SVGGElement>(null);
@@ -509,22 +509,162 @@ export function BrainMapPane() {
     if (d && !d.moved && d.bg) reset();
   };
 
-  const focusProject = (pid: string, pang: number) => {
-    animateSpread(pid, SPREAD_TO);
-    // Centre the camera on the project's spread tree (out along its spine direction).
-    flyTo(Math.cos(pang) * 340, Math.sin(pang) * 340, 1.0, true);
-    setFocusPid(pid);
-    setSelected(null);
-  };
-  const selectNode = (n: RNode) => {
-    if (n.projectId !== spreadPid.current) animateSpread(n.projectId, SPREAD_TO);
-    const p = livePos(n);
-    flyTo(p.x, p.y, Math.max(1.7, cam.current.s), true);
-    setSelected(n.id);
-    if (n.projectId) setFocusPid(n.projectId);
-  };
+  const focusProject = useCallback(
+    (pid: string, pang: number) => {
+      animateSpread(pid, SPREAD_TO);
+      // Centre the camera on the project's spread tree (out along its spine direction).
+      flyTo(Math.cos(pang) * 340, Math.sin(pang) * 340, 1.0, true);
+      setFocusPid(pid);
+      setSelected(null);
+    },
+    [animateSpread, flyTo],
+  );
+  const selectNode = useCallback(
+    (n: RNode) => {
+      if (n.projectId !== spreadPid.current) animateSpread(n.projectId, SPREAD_TO);
+      const p = livePos(n);
+      flyTo(p.x, p.y, Math.max(1.7, cam.current.s), true);
+      setSelected(n.id);
+      if (n.projectId) setFocusPid(n.projectId);
+    },
+    [animateSpread, flyTo, livePos],
+  );
 
-  if (!graph || !layout) {
+  // Position map + whole STATIC scene, memoized so hovering re-renders only the thin
+  // overlay below — not all ~400 nodes/edges. Recomputes on layout / spread-tick
+  // (animation) / focus / selection. Folders render as project-coloured DOTS (sized
+  // by contents), files grey, memory amber; only project hubs carry letter badges.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` isn't read; it forces a recompute each spread-animation frame so positions follow the animation.
+  const posMap = useMemo(
+    () => (layout ? new Map<string, Pos>(layout.nodes.map((n) => [n.id, livePos(n)])) : null),
+    [layout, tick, livePos],
+  );
+  const sceneEls = useMemo(() => {
+    if (!layout || !posMap) return null;
+    const pos = posMap;
+    const { byId, adj } = layout;
+    const neighbors = selected ? (adj.get(selected) ?? new Set<string>()) : null;
+    const color = (pid: string) => layout.colorByProject.get(pid) ?? PALETTE[9];
+    const opacityOf = (n: RNode): number => {
+      if (n.kind === "project" && focusPid && n.projectId !== focusPid) return 0.2;
+      if (focusPid && n.projectId !== focusPid && n.kind !== "project") return 0.07;
+      if (neighbors && selected) return n.id === selected || neighbors.has(n.id) ? 1 : 0.14;
+      return 1;
+    };
+    return (
+      <>
+        <g className="text-muted-foreground">
+          {layout.nodes.map((n) => {
+            if (n.kind !== "project") return null;
+            const h = pos.get(n.id);
+            if (!h) return null;
+            const on = !focusPid || focusPid === n.projectId;
+            return (
+              <line
+                key={`spine${n.id}`}
+                x1={0}
+                y1={0}
+                x2={h.x}
+                y2={h.y}
+                stroke={focusPid === n.projectId ? n.color : "currentColor"}
+                strokeWidth={focusPid === n.projectId ? 1.6 : 1.1}
+                strokeOpacity={on ? 0.45 : 0.06}
+              />
+            );
+          })}
+        </g>
+        <g className="text-muted-foreground">
+          {layout.treeEdges.map(([aId, bId]) => {
+            const a = pos.get(aId);
+            const b = pos.get(bId);
+            if (!a || !b) return null;
+            const an = byId.get(aId);
+            const dimmed = !!focusPid && an?.projectId !== focusPid;
+            const hot = (!!selected && (aId === selected || bId === selected)) || (!!focusPid && an?.projectId === focusPid);
+            return (
+              <line
+                key={`t${aId}>${bId}`}
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke={hot && an?.projectId ? color(an.projectId) : "currentColor"}
+                strokeWidth={hot ? 1.2 : 0.8}
+                strokeOpacity={dimmed ? 0.05 : hot ? 0.6 : 0.34}
+              />
+            );
+          })}
+        </g>
+        <g>
+          {layout.nodes.map((n) => {
+            if (n.kind === "project") return null;
+            const p = pos.get(n.id);
+            if (!p) return null;
+            const emph = n.id === selected;
+            const isFolder = n.kind === "folder";
+            const isMem = n.kind === "memory";
+            const r = (isFolder ? Math.min(7.5, 3.6 + Math.log2(n.leaf + 1) * 0.95) : isMem ? 4.2 : 3.2) * (emph ? 1.8 : 1);
+            const fill = isFolder ? n.color : isMem ? MEMORY_COLOR : undefined;
+            return (
+              // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven graph node; keyboard access is via the Brain search list
+              <circle
+                key={n.id}
+                cx={p.x}
+                cy={p.y}
+                r={r}
+                className={fill ? undefined : "fill-muted-foreground"}
+                fill={fill}
+                stroke={emph ? "currentColor" : isFolder ? "var(--color-background)" : "none"}
+                strokeWidth={emph ? 1.4 : isFolder ? 1 : 0}
+                opacity={opacityOf(n)}
+                style={{ cursor: "pointer" }}
+                onMouseEnter={() => setHover(n.id)}
+                onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  selectNode(n);
+                }}
+              />
+            );
+          })}
+        </g>
+        <g>
+          {layout.nodes.map((n) => {
+            if (n.kind !== "project") return null;
+            const h = pos.get(n.id);
+            if (!h) return null;
+            const emph = focusPid === n.projectId;
+            const r = 16 * (emph ? 1.12 : 1);
+            return (
+              // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven project hub; keyboard access is via the Brain search list
+              <g
+                key={n.id}
+                opacity={opacityOf(n)}
+                style={{ cursor: "pointer" }}
+                onMouseEnter={() => setHover(n.id)}
+                onMouseLeave={() => setHover((hv) => (hv === n.id ? null : hv))}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  focusProject(n.projectId, n.pang);
+                }}
+              >
+                <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={n.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
+                <circle cx={h.x} cy={h.y} r={r} fill={n.color} className="stroke-background" strokeWidth={2.4} />
+                <text x={h.x} y={h.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-semibold" fontSize={10.5}>
+                  {(n.label.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
+                </text>
+                <text x={h.x} y={h.y + r + 13} textAnchor="middle" className="pointer-events-none fill-foreground font-semibold" fontSize={11}>
+                  {n.label}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </>
+    );
+  }, [layout, posMap, focusPid, selected, focusProject, selectNode]);
+
+  if (!graph || !layout || !posMap) {
     return (
       <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
         Loading the brain map…
@@ -539,22 +679,14 @@ export function BrainMapPane() {
     );
   }
 
-  // Live positions for this frame (spread animation re-renders via `force`).
-  const pos = new Map<string, Pos>(layout.nodes.map((n) => [n.id, livePos(n)]));
-  const { byId, adj } = layout;
+  const pos = posMap; // memoized; non-null after the guard above
+  const { byId } = layout;
   const focusName = focusPid ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)?.label : null;
   const selNode = selected ? byId.get(selected) : null;
   const focusStats = focusPid && !selNode ? (layout.stats.get(focusPid) ?? null) : null;
   const activeId = selected ?? hover;
-  const neighbors = selected ? (adj.get(selected) ?? new Set<string>()) : null;
+  const hoverPos = hover ? (pos.get(hover) ?? null) : null;
   const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
-
-  const nodeOpacity = (n: RNode): number => {
-    if (n.kind === "project" && focusPid && n.projectId !== focusPid) return 0.2;
-    if (focusPid && n.projectId !== focusPid && n.kind !== "project") return 0.07;
-    if (neighbors && selected) return n.id === selected || neighbors.has(n.id) ? 1 : 0.14;
-    return 1;
-  };
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-background">
@@ -596,51 +728,8 @@ export function BrainMapPane() {
         </defs>
         <rect data-bg="1" x={-W} y={-H} width={W * 2} height={H * 2} fill="transparent" />
         <g ref={camG}>
-          {/* spines: brain core → project hubs */}
-          <g className="text-muted-foreground">
-            {layout.nodes.map((n) => {
-              if (n.kind !== "project") return null;
-              const h = pos.get(n.id);
-              if (!h) return null;
-              const on = !focusPid || focusPid === n.projectId;
-              return (
-                <line
-                  key={`spine${n.id}`}
-                  x1={0}
-                  y1={0}
-                  x2={h.x}
-                  y2={h.y}
-                  stroke={focusPid === n.projectId ? n.color : "currentColor"}
-                  strokeWidth={focusPid === n.projectId ? 1.6 : 1.1}
-                  strokeOpacity={on ? 0.45 : 0.06}
-                />
-              );
-            })}
-          </g>
-          {/* tree branches */}
-          <g className="text-muted-foreground">
-            {layout.treeEdges.map(([aId, bId]) => {
-              const a = pos.get(aId);
-              const b = pos.get(bId);
-              if (!a || !b) return null;
-              const an = byId.get(aId);
-              const dimmed = !!focusPid && an?.projectId !== focusPid;
-              const hot = (!!activeId && (aId === activeId || bId === activeId)) || (!!focusPid && an?.projectId === focusPid);
-              return (
-                <line
-                  key={`t${aId}>${bId}`}
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke={hot && an?.projectId ? projColorOf(an.projectId) : "currentColor"}
-                  strokeWidth={hot ? 1.2 : 0.8}
-                  strokeOpacity={dimmed ? 0.05 : hot ? 0.6 : 0.34}
-                />
-              );
-            })}
-          </g>
-          {/* real import/anchor edges — only for the active node */}
+          {sceneEls}
+          {/* real import/anchor edges — only for the active node (hover/selected) */}
           {activeId ? (
             <g>
               {layout.realEdges
@@ -665,100 +754,19 @@ export function BrainMapPane() {
                 })}
             </g>
           ) : null}
-          {/* leaf nodes: files (grey) + memory (amber) */}
-          <g>
-            {layout.nodes.map((n) => {
-              if (n.kind !== "file" && n.kind !== "memory") return null;
-              const p = pos.get(n.id);
-              if (!p) return null;
-              const emph = n.id === hover || n.id === selected;
-              const isMem = n.kind === "memory";
-              const r = (isMem ? 4.2 : 3.3) * (emph ? 1.9 : 1);
-              return (
-                // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven graph node; keyboard access is via the Brain search list
-                <circle
-                  key={n.id}
-                  cx={p.x}
-                  cy={p.y}
-                  r={r}
-                  className={isMem ? undefined : "fill-muted-foreground"}
-                  fill={isMem ? MEMORY_COLOR : undefined}
-                  stroke={emph ? "currentColor" : "none"}
-                  strokeWidth={emph ? 1.3 : 0}
-                  opacity={nodeOpacity(n)}
-                  style={{ cursor: "pointer" }}
-                  onMouseEnter={() => setHover(n.id)}
-                  onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    selectNode(n);
-                  }}
-                />
-              );
-            })}
-          </g>
-          {/* folder / module nodes */}
-          <g>
-            {layout.nodes.map((n) => {
-              if (n.kind !== "folder") return null;
-              const p = pos.get(n.id);
-              if (!p) return null;
-              const emph = n.id === hover || n.id === selected;
-              const s = Math.min(10, 4.5 + Math.log2(n.leaf + 1) * 1.3) * (emph ? 1.25 : 1);
-              return (
-                // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven folder node; keyboard access is via the Brain search list
-                <g
-                  key={n.id}
-                  opacity={nodeOpacity(n)}
-                  style={{ cursor: "pointer" }}
-                  onMouseEnter={() => setHover(n.id)}
-                  onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    selectNode(n);
-                  }}
-                >
-                  <rect x={p.x - s} y={p.y - s} width={s * 2} height={s * 2} rx={s * 0.45} fill={n.color} className="stroke-background" strokeWidth={1.5} />
-                  <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-bold" fontSize={s * 1.05}>
-                    {(n.label[0] ?? "?").toUpperCase()}
-                  </text>
-                </g>
-              );
-            })}
-          </g>
-          {/* project hubs */}
-          <g>
-            {layout.nodes.map((n) => {
-              if (n.kind !== "project") return null;
-              const h = pos.get(n.id);
-              if (!h) return null;
-              const emph = n.id === hover || focusPid === n.projectId;
-              const r = 16 * (emph ? 1.12 : 1);
-              return (
-                // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven project hub; keyboard access is via the Brain search list
-                <g
-                  key={n.id}
-                  opacity={nodeOpacity(n)}
-                  style={{ cursor: "pointer" }}
-                  onMouseEnter={() => setHover(n.id)}
-                  onMouseLeave={() => setHover((hv) => (hv === n.id ? null : hv))}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    focusProject(n.projectId, n.pang);
-                  }}
-                >
-                  <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={n.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
-                  <circle cx={h.x} cy={h.y} r={r} fill={n.color} className="stroke-background" strokeWidth={2.4} />
-                  <text x={h.x} y={h.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-semibold" fontSize={10.5}>
-                    {(n.label.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
-                  </text>
-                  <text x={h.x} y={h.y + r + 13} textAnchor="middle" className="pointer-events-none fill-foreground font-semibold" fontSize={11}>
-                    {n.label}
-                  </text>
-                </g>
-              );
-            })}
-          </g>
+          {/* hover ring — cheap overlay so the scene itself doesn't re-render on hover */}
+          {hoverPos ? (
+            <circle
+              cx={hoverPos.x}
+              cy={hoverPos.y}
+              r={10}
+              fill="none"
+              className="stroke-foreground"
+              strokeWidth={1.5}
+              strokeOpacity={0.9}
+              pointerEvents="none"
+            />
+          ) : null}
           {/* brain core */}
           {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven brain core (click = reset view) */}
           <g style={{ cursor: "pointer" }} onClick={(ev) => { ev.stopPropagation(); reset(); }}>
@@ -783,7 +791,7 @@ export function BrainMapPane() {
           node={selNode}
           color={projColorOf(selNode.projectId)}
           projectName={layout.nodes.find((n) => n.kind === "project" && n.projectId === selNode.projectId)?.label ?? "—"}
-          connections={adj.get(selNode.id)?.size ?? 0}
+          connections={layout.adj.get(selNode.id)?.size ?? 0}
           onClose={reset}
         />
       ) : focusStats ? (
