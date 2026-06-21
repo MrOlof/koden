@@ -510,7 +510,7 @@ export function BrainMapPane() {
   };
 
   const focusProject = useCallback(
-    (pid: string, pang: number) => {
+    (pid: string) => {
       animateSpread(pid, SPREAD_TO);
       // Adaptive fit: frame the project's FULLY-SPREAD tree + the brain core (0,0) so
       // nothing clips and the zoom scales to the project's actual size.
@@ -667,7 +667,7 @@ export function BrainMapPane() {
                 onMouseLeave={() => setHover((hv) => (hv === n.id ? null : hv))}
                 onClick={(ev) => {
                   ev.stopPropagation();
-                  focusProject(n.projectId, n.pang);
+                  focusProject(n.projectId);
                 }}
               >
                 <circle cx={h.x} cy={h.y} r={r + 16} fill="transparent" />
