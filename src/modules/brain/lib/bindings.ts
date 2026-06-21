@@ -110,6 +110,17 @@ export function brainSetBudget(ceilingUsd: number): Promise<void> {
   return invoke<void>("brain_set_budget", { ceilingUsd });
 }
 
+/** Run stale-ADR / memory curation (V2 Flow G). `project = null` curates all.
+ *  `nowDate` = ISO YYYY-MM-DD for the staleness signal. Decisive stale notes get a
+ *  $0 archive proposal; borderline ones escalate to a budget-gated LLM judgment.
+ *  Archive-biased + human-gated; results land in the proposal inbox. */
+export function brainCurate(
+  project: string | null = null,
+  nowDate: string | null = null,
+): Promise<void> {
+  return invoke<void>("brain_curate", { project, nowDate });
+}
+
 /** Reflect budget meter: `[ceilingUsd, spentTotalUsd]`. */
 export function brainBudgetStatus(): Promise<[number, number]> {
   return invoke<[number, number]>("brain_budget_status", {});

@@ -10,6 +10,7 @@ use tauri::{AppHandle, Listener, Manager};
 
 use crate::modules::brain::events::{AgentSignalPayload, BrainEvent};
 use crate::modules::brain::freshness::{hash, walk, watch};
+use crate::modules::brain::curate;
 use crate::modules::brain::memory;
 use crate::modules::brain::reflect;
 use crate::modules::brain::registry::Project;
@@ -182,6 +183,27 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             BrainEvent::SetBudget { ceiling_usd } => {
                 if let Err(e) = index.set_budget_ceiling(ceiling_usd, now_epoch_ms()) {
                     log::warn!("brain: set budget ceiling failed ({e})");
+                }
+            }
+            BrainEvent::Curate { project, now_date } => {
+                let pids: Vec<String> = match &project {
+                    Some(p) => vec![p.clone()],
+                    None => app
+                        .try_state::<BrainState>()
+                        .map(|s| s.registry.projects().into_iter().map(|p| p.id).collect())
+                        .unwrap_or_default(),
+                };
+                let now_ms = now_epoch_ms();
+                for pid in pids {
+                    let o = curate::curate_once(&app, &index, &pid, now_date.as_deref(), now_ms);
+                    log::info!(
+                        "brain: curate '{pid}' → {:?} ({} proposal(s): {} acted/{} escalated, ${:.4})",
+                        o.reason,
+                        o.proposals.len(),
+                        o.acted,
+                        o.escalated,
+                        o.spent_usd
+                    );
                 }
             }
             BrainEvent::Reflect { project, now_date } => {

@@ -672,6 +672,15 @@ Produced autonomously (headless), the parts that don't need the GUI:
   `use`-edges are the documented P2 deferral, so ast_dependents is empty and the
   lexical over-approximation carries it).
 
+⏭ DEFERRED FOLLOW-UP (user decision 2026-06-21 — chose to proceed to V2): wire the
+**real Koden e2e CLI (`pnpm test:e2e`) to cover the brain** — the Phase-0 WebDriver
+spike (`tauri-plugin-webdriver` behind a dev `webdriver` feature + un-stub
+`wdio.conf.ts`) + brain methods on the `window.__KODEN_TEST__` bus (the brain
+commands exist; just not exposed on the bus) + brain e2e scenario files. This is the
+only way to test the brain through the REAL app/worker headlessly; bundle it with the
+Phase-0 spike. Until then the pre-V2 gate is: brain_cli 14/14 + real-kill crash sim +
+26 integration tests.
+
 ⏭ Still needs the running GUI app / the user (cannot be driven from a test harness
 here): the **fake-claude → agent-detect → brain-worker replay** (the worker is
 Tauri-`AppHandle`-coupled; needs `pnpm tauri dev` + a real terminal tab — harness in
@@ -681,3 +690,37 @@ reflect smoke** (needs the user's Anthropic key — real spend, must not run wit
 explicit authorization; a real-kill BUDGET sim rides along with it, since leaving a
 `reserved` row requires a real reflect — its crash-safety is already unit-proven by
 `crash_midcall_is_overcounted_never_leaked`).
+
+## V2 — advanced track
+
+### V2.1 — Stale-ADR / memory curation (CONCEPT Flow G) ✅ (core)
+The write-judgment scenario. `brain/curate/`:
+- `detect.rs` — the two-stage significance gate (§5.4). REUSES the P1 doctor's
+  `check()` for `broken_anchor`/`stale_revalidate` and ADDS `superseded_present`
+  (a note whose `superseded_by` resolves to an existing note). Transparent weighted
+  score → bands: a LONE `broken_anchor` (0.6) SKIPs (the doctor already proposes
+  re-anchoring — no double-proposing); a single strong signal ESCALATEs to the LLM
+  (the keep-as-history vs obsolete call earns the paid judgment); stacked signals
+  ACT ($0).
+- `schema.rs` — the Tier-2 verdict (`classification` still_valid|keep_as_history|
+  obsolete + graded `action` archive|supersede|update|delete + confidence + reason),
+  loose-parsed. Preserve-biased system prompt ("old ≠ wrong"). `delete` down-grades
+  to the `Archive` apply-op — the Librarian never proposes silent deletion; deletion
+  stays a human call.
+- `mod.rs` — `curate_with_client` (testable core): ACT-band → $0 archive proposals;
+  ESCALATE-band → budget-gated Tier-2 classify → graded archive-biased proposal.
+  REUSES the P4 money path (one shared budget ledger + `ReflectClient` seam +
+  charge-on-uncertainty + 0/0-usage floor). `curate_act_only` runs detection + the
+  $0 ACT band when there's no key; `curate_once` is the real wrapper. All output
+  flows into the existing human-gated P1 queue, deduped by signature, reject-sticky.
+- Wired: `BrainEvent::Curate` on the single-writer worker + `brain_curate` command +
+  `brainCurate` binding.
+- Tests: 9 unit (detection bands incl. lone-broken-anchor-skips + dangling-
+  supersession-not-a-candidate; verdict parse + delete→archive downgrade) + 4
+  sandbox (act+escalate enqueues archive/supersede + charges; escalation-disabled
+  still acts $0; still-valid → no proposal; act-only no-key).
+Green: clippy `-D warnings` clean · `cargo test` 289 / 1 pre-existing · brain_sandbox
+31 · tsc + biome lint clean.
+⏭ Deferred (documented refinements): the `age`/`high-churn`/LLM-contradiction
+detection signals (need git + a created timestamp on NoteRecord); a curation status
+command/meter; the recovery/curation review-card UI (GUI).

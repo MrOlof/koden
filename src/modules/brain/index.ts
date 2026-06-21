@@ -2,6 +2,7 @@ export { BrainPane } from "./BrainPane";
 export {
   brainBudgetStatus,
   brainBuildGist,
+  brainCurate,
   brainRecoveredPanes,
   brainReflect,
   brainSetBudget,

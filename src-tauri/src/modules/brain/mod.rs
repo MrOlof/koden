@@ -9,6 +9,7 @@
 
 pub mod ast;
 pub mod commands;
+pub mod curate;
 pub mod events;
 pub mod freshness;
 pub mod gist;

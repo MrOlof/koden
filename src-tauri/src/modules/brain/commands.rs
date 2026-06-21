@@ -246,6 +246,18 @@ pub fn brain_set_budget(state: State<BrainState>, ceiling_usd: f64) -> Result<()
     enqueue(&state, BrainEvent::SetBudget { ceiling_usd })
 }
 
+/// Run stale-ADR / memory curation (V2 Flow G) on the worker. Decisive stale notes
+/// get a $0 archive proposal; borderline ones escalate to a budget-gated LLM
+/// classification. Archive-biased, human-gated — never edits/deletes a user file.
+#[tauri::command]
+pub fn brain_curate(
+    state: State<BrainState>,
+    project: Option<String>,
+    now_date: Option<String>,
+) -> Result<(), String> {
+    enqueue(&state, BrainEvent::Curate { project, now_date })
+}
+
 /// Reflect budget meter: `(ceiling_usd, spent_total_usd)`. Read-only.
 #[tauri::command]
 pub fn brain_budget_status(state: State<BrainState>) -> (f64, f64) {

@@ -94,22 +94,24 @@ fn pricing(model: &str) -> (f64, f64) {
 }
 
 /// Conservative pre-flight cost estimate: input tokens ≈ (system+user) chars/3
-/// (over-count), output tokens = the full `max_output_tokens` cap.
-fn estimate_cost(cfg: &ReflectConfig, system: &str, user: &str) -> f64 {
+/// (over-count), output tokens = the full `max_output_tokens` cap. `pub(crate)` so
+/// the P4 reflect path AND the V2 curation path share ONE pricing source of truth.
+pub(crate) fn estimate_cost(cfg: &ReflectConfig, system: &str, user: &str) -> f64 {
     let (in_rate, out_rate) = pricing(&cfg.model);
     let in_tok = (system.len() + user.len()).div_ceil(EST_CHARS_PER_TOKEN) as f64;
     in_tok * in_rate + cfg.max_output_tokens as f64 * out_rate
 }
 
-/// Actual cost from the API's reported usage (reconcile path).
-fn actual_cost(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+/// Actual cost from the API's reported usage (reconcile path). Shared with curation.
+pub(crate) fn actual_cost(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
     let (in_rate, out_rate) = pricing(model);
     input_tokens as f64 * in_rate + output_tokens as f64 * out_rate
 }
 
 /// Pure pre-flight gate (testable without an `AppHandle`/keyring): `Disabled` when
-/// the ceiling is off, `NoKey` when the key is absent, else proceed.
-fn pre_flight(ceiling_usd: f64, key_present: bool) -> Option<ReflectReason> {
+/// the ceiling is off, `NoKey` when the key is absent, else proceed. Shared with
+/// the curation path (the same daily ceiling gates both token-spending flows).
+pub(crate) fn pre_flight(ceiling_usd: f64, key_present: bool) -> Option<ReflectReason> {
     if ceiling_usd <= 0.0 {
         Some(ReflectReason::Disabled)
     } else if !key_present {

@@ -14,6 +14,8 @@ use koden_lib::modules::brain::gist::synth::synthesize_intent;
 use koden_lib::modules::brain::gist::{build_gist, build_gist_auto, write_gist};
 use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
+use koden_lib::modules::brain::curate::{curate_act_only, curate_with_client, CurationReason};
+use koden_lib::modules::brain::memory::proposal::ProposalAction;
 use koden_lib::modules::brain::reflect::{
     reflect_with_client, ReflectClient, ReflectConfig, ReflectReason, ReflectResponse,
 };
@@ -769,6 +771,94 @@ fn reflect_dedups_on_rerun() {
     assert_eq!(fake2.calls(), 1, "still calls the model");
     let props = list_proposals_readonly(&db, Some(PID)).unwrap();
     assert_eq!(props.iter().filter(|p| p.source == "reflect").count(), 1, "queue holds one");
+}
+
+// ---------------------------------------------------------------------------
+// V2 Flow G — stale-ADR curation. Notes that trip the signals → detect →
+// ACT-band ($0 archive) + ESCALATE-band (budget-gated LLM verdict). Archive-
+// biased, curate-sourced proposals into the human-gated P1 queue.
+// ---------------------------------------------------------------------------
+fn curate_fixture(work: &Path, store: &Path) -> (std::path::PathBuf, SqliteIndex) {
+    // new: clean. old: superseded_by new (resolves) → escalate. stacked: revalidate
+    // passed + superseded_by new → ACT band ($0).
+    write(work, ".koden-memory/new.md", b"---\nid: new\ntype: decision\ntitle: New approach\n---\nbody\n");
+    write(work, ".koden-memory/old.md", b"---\nid: old\ntype: decision\ntitle: Old approach\nsuperseded_by: new\n---\nbody\n");
+    write(
+        work,
+        ".koden-memory/stacked.md",
+        b"---\nid: stacked\ntype: decision\ntitle: Stacked\nsuperseded_by: new\nrevalidate_after: 2000-01-01\n---\nbody\n",
+    );
+    let db = store.join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, work);
+    scan_project_memory(&idx, PID, work);
+    (db, idx)
+}
+
+#[test]
+fn curate_acts_and_escalates_into_archive_proposals() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_fixture(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(
+        r#"{"classification":"obsolete","action":"supersede","confidence":"high","reason":"replaced by new"}"#,
+        1000,
+        200,
+    );
+    let out = curate_with_client(&idx, &fake, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert!(matches!(out.reason, CurationReason::Ok), "{:?}", out.reason);
+    assert_eq!(out.acted, 1, "stacked (2.5) acted with no LLM");
+    assert_eq!(out.escalated, 1, "old (1.5) escalated to the LLM");
+    assert_eq!(fake.calls(), 1, "exactly one paid call (the escalate band)");
+    assert!((out.spent_usd - 0.002).abs() < 1e-9, "charged the escalation: {}", out.spent_usd);
+    let props = list_proposals_readonly(&db, Some(PID)).unwrap();
+    let curate: Vec<_> = props.iter().filter(|p| p.source == "curate").collect();
+    assert_eq!(curate.len(), 2, "one ACT archive + one escalated graded proposal");
+    assert!(curate.iter().any(|p| p.target_id.as_deref() == Some("stacked") && p.action == ProposalAction::Archive));
+    assert!(curate.iter().any(|p| p.target_id.as_deref() == Some("old") && p.action == ProposalAction::Supersede));
+}
+
+#[test]
+fn curate_escalation_disabled_still_acts_for_free() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_fixture(work.path(), store.path());
+    // ceiling 0 (default): the ACT band still runs $0; escalation is gated.
+    let fake = FakeClient::ok(r#"{"classification":"obsolete","action":"archive","confidence":"high","reason":"x"}"#, 100, 100);
+    let out = curate_with_client(&idx, &fake, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert!(matches!(out.reason, CurationReason::Disabled), "{:?}", out.reason);
+    assert_eq!(out.acted, 1, "ACT-band archive still made for free");
+    assert_eq!(fake.calls(), 0, "no paid call when the ceiling is off");
+    assert_eq!(out.spent_usd, 0.0);
+    let curate: Vec<_> = list_proposals_readonly(&db, Some(PID)).unwrap().into_iter().filter(|p| p.source == "curate").collect();
+    assert_eq!(curate.len(), 1, "only the $0 ACT archive (escalate candidate not judged)");
+}
+
+#[test]
+fn curate_still_valid_verdict_yields_no_proposal() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_fixture(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(r#"{"classification":"still_valid","action":"update","confidence":"high","reason":"still good"}"#, 100, 100);
+    let out = curate_with_client(&idx, &fake, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    let curate: Vec<_> = list_proposals_readonly(&db, Some(PID)).unwrap().into_iter().filter(|p| p.source == "curate").collect();
+    assert!(curate.iter().all(|p| p.target_id.as_deref() != Some("old")), "still-valid → not proposed");
+    assert_eq!(out.escalated, 1, "it was still escalated (judged), just not proposed");
+}
+
+#[test]
+fn curate_act_only_no_key_makes_free_proposals() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_fixture(work.path(), store.path());
+    let out = curate_act_only(&idx, PID, Some("2026-01-01"), 10);
+    assert!(matches!(out.reason, CurationReason::NoKey), "{:?}", out.reason);
+    assert_eq!(out.acted, 1);
+    assert_eq!(out.spent_usd, 0.0);
+    let curate: Vec<_> = list_proposals_readonly(&db, Some(PID)).unwrap().into_iter().filter(|p| p.source == "curate").collect();
+    assert_eq!(curate.len(), 1);
 }
 
 /// P4 crash-resume, end-to-end: per-pane journal → boot recovery (skips cleanly
