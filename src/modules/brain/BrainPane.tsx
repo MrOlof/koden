@@ -6,14 +6,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   brainAddProject,
+  brainBudgetStatus,
+  brainCurate,
   brainDoctor,
   brainIndexStatus,
   brainListProjects,
   brainNotes,
   brainProposals,
+  brainReflect,
   brainRescan,
   brainResolveProposal,
   brainSearch,
+  brainSetBudget,
   type BrainStatusReport,
   type Hit,
   type MemoryProposal,
@@ -71,6 +75,7 @@ export function BrainPane() {
   const [addError, setAddError] = useState<string | null>(null);
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [proposals, setProposals] = useState<MemoryProposal[]>([]);
+  const [budget, setBudget] = useState<[number, number] | null>(null); // [ceiling, spent], global
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastKeyboardNavAt = useRef(0);
@@ -140,9 +145,16 @@ export function BrainPane() {
 
   const loadMemory = useCallback(async () => {
     try {
-      const [ns, ps] = await Promise.all([brainProposals(project), brainNotes(project)]);
-      setProposals(ns);
-      setNotes(ps);
+      // Budget is global (not per-project); tolerate its absence so a degraded
+      // budget read never blocks the proposals/notes inbox.
+      const [proposalsRes, notesRes, bud] = await Promise.all([
+        brainProposals(project),
+        brainNotes(project),
+        brainBudgetStatus().catch(() => null),
+      ]);
+      setProposals(proposalsRes);
+      setNotes(notesRes);
+      setBudget(bud);
     } catch (e) {
       console.error("brain memory load failed:", e);
     }
@@ -151,6 +163,24 @@ export function BrainPane() {
   useEffect(() => {
     if (mode === "memory") void loadMemory();
   }, [mode, loadMemory]);
+
+  // Keep the spend meter live (it ticks up as a reflect/curate pass charges) while
+  // the Memory tab is open — the worker LLM call can outlast the post-action poll.
+  useEffect(() => {
+    if (mode !== "memory") return;
+    let alive = true;
+    const id = setInterval(() => {
+      brainBudgetStatus()
+        .then((bud) => {
+          if (alive) setBudget(bud);
+        })
+        .catch(() => {});
+    }, STATUS_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [mode]);
 
   const copyPath = (path: string) => {
     void navigator.clipboard?.writeText(path);
@@ -190,6 +220,27 @@ export function BrainPane() {
     void brainResolveProposal(p.project, p.signature, reject);
     // optimistic removal; the poll reconciles once the worker applies it
     setProposals((prev) => prev.filter((x) => x.signature !== p.signature));
+    pollMemory();
+  };
+
+  // Setting the ceiling is the ENABLE knob for the paid librarian: 0 = off. Refresh
+  // the meter immediately so the UI reflects the new ceiling without a poll round-trip.
+  const setCeiling = async (usd: number) => {
+    try {
+      await brainSetBudget(usd);
+      setBudget(await brainBudgetStatus().catch(() => null));
+    } catch (e) {
+      console.error("brain_set_budget failed:", e);
+    }
+  };
+
+  const runReflect = () => {
+    void brainReflect(project, today());
+    pollMemory(); // re-reads proposals + the spend meter once the worker charges
+  };
+
+  const runCurate = () => {
+    void brainCurate(project, today());
     pollMemory();
   };
 
@@ -299,8 +350,12 @@ export function BrainPane() {
         <MemoryView
           notes={notes}
           proposals={proposals}
+          budget={budget}
           onRunDoctor={runDoctor}
           onResolve={resolve}
+          onSetCeiling={setCeiling}
+          onReflect={runReflect}
+          onCurate={runCurate}
         />
       )}
     </div>
@@ -423,14 +478,34 @@ function SearchView({
 type MemoryViewProps = {
   notes: NoteSummary[];
   proposals: MemoryProposal[];
+  budget: [number, number] | null;
   onRunDoctor: () => void;
   onResolve: (p: MemoryProposal, reject: boolean) => void;
+  onSetCeiling: (usd: number) => void;
+  onReflect: () => void;
+  onCurate: () => void;
 };
 
-function MemoryView({ notes, proposals, onRunDoctor, onResolve }: MemoryViewProps) {
+function MemoryView({
+  notes,
+  proposals,
+  budget,
+  onRunDoctor,
+  onResolve,
+  onSetCeiling,
+  onReflect,
+  onCurate,
+}: MemoryViewProps) {
   return (
     <ScrollArea className="min-h-0 flex-1">
       <div className="flex flex-col gap-3 p-2">
+        <LibrarianSection
+          budget={budget}
+          onSetCeiling={onSetCeiling}
+          onReflect={onReflect}
+          onCurate={onCurate}
+        />
+
         {/* Review inbox */}
         <section>
           <div className="mb-1 flex items-center gap-2">
@@ -513,5 +588,109 @@ function MemoryView({ notes, proposals, onRunDoctor, onResolve }: MemoryViewProp
         </section>
       </div>
     </ScrollArea>
+  );
+}
+
+type LibrarianSectionProps = {
+  budget: [number, number] | null;
+  onSetCeiling: (usd: number) => void;
+  onReflect: () => void;
+  onCurate: () => void;
+};
+
+/**
+ * The paid librarian (Tier 2) controls: the monthly spend ceiling — which is the
+ * ENABLE knob (0 = off) — plus manual Reflect / Curate triggers. Reflect is purely
+ * paid so it's disabled until a ceiling is set; Curate still runs its $0 archive
+ * proposals (only borderline judgments escalate to budget-gated LLM calls).
+ */
+function LibrarianSection({ budget, onSetCeiling, onReflect, onCurate }: LibrarianSectionProps) {
+  const [ceiling, spent] = budget ?? [0, 0];
+  const enabled = ceiling > 0;
+  const [draft, setDraft] = useState("");
+  const [editing, setEditing] = useState(false);
+
+  // Reflect the stored ceiling into the field unless the user is mid-edit.
+  useEffect(() => {
+    if (!editing) setDraft(ceiling > 0 ? String(ceiling) : "");
+  }, [ceiling, editing]);
+
+  const save = () => {
+    const v = Number.parseFloat(draft);
+    onSetCeiling(Number.isFinite(v) && v > 0 ? v : 0);
+    setEditing(false);
+  };
+
+  return (
+    <section>
+      <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Librarian
+      </h3>
+      <div className="rounded border p-2 text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="text-muted-foreground">Monthly spend</span>
+          <span className="ml-auto tabular-nums">
+            ${spent.toFixed(4)} / {enabled ? `$${ceiling.toFixed(2)}` : "off"}
+          </span>
+        </div>
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <span className="text-[10px] text-muted-foreground">Ceiling&nbsp;$</span>
+          <Input
+            value={draft}
+            inputMode="decimal"
+            onChange={(e) => {
+              setEditing(true);
+              setDraft(e.target.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                save();
+              }
+            }}
+            placeholder="0.00 (0 = off)"
+            className="h-6 w-24 text-[11px]"
+          />
+          <button
+            type="button"
+            onClick={save}
+            className="rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent"
+            title="Set the monthly USD ceiling (0 disables the paid librarian)"
+          >
+            Save
+          </button>
+        </div>
+        {!enabled ? (
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Reflect is off. Set a monthly ceiling to enable the paid librarian (reflect +
+            contradiction). Curate still runs its free archive proposals.
+          </p>
+        ) : null}
+        <div className="mt-1.5 flex gap-1.5">
+          <button
+            type="button"
+            onClick={onReflect}
+            disabled={!enabled}
+            className={cn(
+              "rounded border px-1.5 py-0.5 text-[11px]",
+              enabled
+                ? "hover:bg-accent"
+                : "cursor-not-allowed border-dashed text-muted-foreground/50",
+            )}
+            title={enabled ? "Run a budgeted LLM reflect pass" : "Set a budget to enable reflect"}
+          >
+            Reflect
+          </button>
+          <button
+            type="button"
+            onClick={onCurate}
+            className="rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent"
+            title="Curate stale/contradictory notes (free archive proposals; paid judgments only within budget)"
+          >
+            Curate
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
