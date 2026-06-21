@@ -9,6 +9,7 @@
 //! Reuses the P4 money path: ONE budget ledger + the `ReflectClient` seam +
 //! charge-on-uncertainty. $0-testable via a fake client ([curate_with_client]).
 
+pub mod contradiction;
 pub mod detect;
 pub mod schema;
 

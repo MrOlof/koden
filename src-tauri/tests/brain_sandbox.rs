@@ -14,6 +14,7 @@ use koden_lib::modules::brain::gist::synth::synthesize_intent;
 use koden_lib::modules::brain::gist::{build_gist, build_gist_auto, write_gist};
 use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
+use koden_lib::modules::brain::curate::contradiction::curate_contradictions_with_client;
 use koden_lib::modules::brain::curate::{curate_act_only, curate_with_client, CurationReason};
 use koden_lib::modules::brain::memory::proposal::ProposalAction;
 use koden_lib::modules::brain::reflect::{
@@ -1042,6 +1043,74 @@ fn reflect_redacts_secrets_before_cloud() {
     // and the stored note (UI/table surface) also has the anchor redacted at scan.
     let notes = list_notes_readonly(&db, Some(PID)).unwrap();
     assert!(notes[0].anchors.iter().all(|a| !a.contains(SECRET)), "anchor secret in table: {:?}", notes[0].anchors);
+}
+
+/// V2.4 contradiction detection: two notes co-anchored to the same file, judged by
+/// the (fake) LLM to contradict → an Update proposal flags the stale one; charged.
+#[test]
+fn contradiction_flags_stale_co_anchored_note() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth.rs", b"pub fn auth() {}");
+    write(root, ".koden-memory/old.md", b"---\nid: old\ntype: decision\ntitle: Auth via sessions\nanchors:\n  - src/auth.rs\n---\nbody\n");
+    write(root, ".koden-memory/new.md", b"---\nid: new\ntype: decision\ntitle: Auth via JWT\nanchors:\n  - src/auth.rs\n---\nbody\n");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(r#"{"contradicts":true,"stale_id":"old","reason":"sessions vs JWT"}"#, 100, 100);
+    let out = curate_contradictions_with_client(&idx, &fake, &ReflectConfig::default(), PID, 10);
+    assert!(matches!(out.reason, CurationReason::Ok), "{:?}", out.reason);
+    assert_eq!(out.escalated, 1, "one co-anchored pair judged");
+    assert_eq!(fake.calls(), 1);
+    assert!(out.spent_usd > 0.0);
+    let props = list_proposals_readonly(&db, Some(PID)).unwrap();
+    let flagged: Vec<_> = props.iter().filter(|p| p.source == "curate" && p.target_id.as_deref() == Some("old")).collect();
+    assert_eq!(flagged.len(), 1, "stale note flagged for contradiction resolution");
+    assert_eq!(flagged[0].action, ProposalAction::Update, "flag for human resolution, never auto-edit");
+}
+
+/// Notes with no shared anchors → no pairs → no LLM call, no spend.
+#[test]
+fn contradiction_no_co_anchored_pairs_is_noop() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, ".koden-memory/a.md", b"---\nid: a\ntype: decision\ntitle: A\nanchors:\n  - src/a.rs\n---\nx\n");
+    write(root, ".koden-memory/b.md", b"---\nid: b\ntype: decision\ntitle: B\nanchors:\n  - src/b.rs\n---\ny\n");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(r#"{"contradicts":false}"#, 100, 100);
+    let out = curate_contradictions_with_client(&idx, &fake, &ReflectConfig::default(), PID, 10);
+    assert!(matches!(out.reason, CurationReason::NoCandidates), "{:?}", out.reason);
+    assert_eq!(fake.calls(), 0, "no co-anchored pair → no paid call");
+    assert_eq!(out.spent_usd, 0.0);
+}
+
+/// A non-contradiction verdict enqueues nothing (but is still judged + charged).
+#[test]
+fn contradiction_false_verdict_no_proposal() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, ".koden-memory/old.md", b"---\nid: old\ntype: decision\ntitle: Auth approach\nanchors:\n  - src/auth.rs\n---\nx\n");
+    write(root, ".koden-memory/new.md", b"---\nid: new\ntype: decision\ntitle: Auth details\nanchors:\n  - src/auth.rs\n---\ny\n");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(r#"{"contradicts":false,"reason":"elaboration not conflict"}"#, 100, 100);
+    let out = curate_contradictions_with_client(&idx, &fake, &ReflectConfig::default(), PID, 10);
+    assert_eq!(out.escalated, 1, "judged");
+    assert!(out.spent_usd > 0.0, "charged even on a no-contradiction verdict");
+    let c = list_proposals_readonly(&db, Some(PID)).unwrap().into_iter().filter(|p| p.source == "curate").count();
+    assert_eq!(c, 0, "no contradiction → no proposal");
 }
 
 /// No notes → EmptyCorpus, no call, no spend (don't burn a token on nothing).

@@ -204,6 +204,18 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         o.escalated,
                         o.spent_usd
                     );
+                    // V2.4: contradiction detection over co-anchored pairs (shares the
+                    // same budget ledger; a separate paid pass).
+                    let c = curate::contradiction::curate_contradictions_once(&app, &index, &pid, now_ms);
+                    if c.escalated > 0 || !c.proposals.is_empty() {
+                        log::info!(
+                            "brain: contradictions '{pid}' → {:?} ({} flagged, {} judged, ${:.4})",
+                            c.reason,
+                            c.proposals.len(),
+                            c.escalated,
+                            c.spent_usd
+                        );
+                    }
                 }
             }
             BrainEvent::Reflect { project, now_date } => {

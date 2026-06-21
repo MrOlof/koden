@@ -878,3 +878,19 @@ Green: clippy `-D warnings` clean · `cargo test` 301 / 1 pre-existing · brain_
 35 · brain_bench 4 + 1 ignored.
 
 **V2.3 closed (temporal re-rank + adversarial pass + boundedness/cache-key hardening).**
+
+### V2.4 — contradiction detection (Flow G LLM-only signal) ✅ (core)
+The deferred Flow G "direct contradiction by a newer note" signal. `curate/contradiction.rs`:
+co-anchored note pairs (share ≥1 anchor → likely about the same decision) are the
+candidates; each pair is a budget-gated Tier-2 judgment ("do these contradict? which is
+stale?"), and a `true` verdict enqueues an Update proposal flagging the stale note for
+HUMAN resolution (never auto-edits). Reuses the ONE budget ledger + ReflectClient +
+charge-on-uncertainty + reject-signature. Bounded: only co-anchored pairs, capped at
+MAX_PAIRS=24. Secret-safe: the pair digest is already-scan-redacted metadata (titles +
+types + anchors), run through the belt-and-suspenders redact-before-send; no raw note
+body re-read (a redacted body-excerpt comparison is a documented refinement). Wired into
+the worker's Curate event (a second paid pass after stale-ADR curation). Tests: 3 unit
+(co-anchored pairing deterministic, no-anchors no-pairs, verdict parse fail-closed) + 3
+sandbox (flags the stale note + charges; no-pairs noop with zero calls; false verdict →
+no proposal but still charged).
+Green: clippy `-D warnings` clean · contradiction unit 3 · brain_sandbox 38.
