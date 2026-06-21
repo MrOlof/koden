@@ -412,8 +412,19 @@ non-thin auto-synth gist + byte-stable + the write path lands the bytes.
 Green: clippy `-D warnings` clean · `cargo test` 244 passed / 1 pre-existing ·
 brain_sandbox 15.
 
-⏭ P3 remaining: the FRONTEND launcher wiring (App.tsx agent-spawn calls
-`brain_write_gist` pre-spawn so the gist is in `agent-<id>.txt` before
-`--append-system-prompt`, + an injection toast) — tsc-verifiable but the actual
-inject needs a live `pnpm tauri dev` run; richer confidence gate + snippet-text
-enrichment; git/recent-files synthesis; then a P3 verification pass.
+### P3.3 — launcher wiring (gist injected at agent spawn) ✅
+Recon mapped the flow: the launcher already feeds `~/.koden/agent-<agentId>.txt`
+to `--append-system-prompt` (`App.tsx:914-916`), and `brain_write_gist` would
+**clobber** that file. Fix (recon option a): in `handleSpawnTerminalAgent`, resolve
+the pane's project (`resolveProjectForCwd` — longest-prefix match of the spawn cwd
+against `brain_list_projects` roots), `brain_build_gist` (no write), and **prepend**
+the gist as the cache-stable PREFIX of the worker prompt in the existing single
+`native.writeFile` — one writer, gist first (prompt-cache-stable), launch command
+untouched, fail-open, with a `toast.success` ("injected gist: N files"). New TS
+bindings (`brainBuildGist`, `resolveProjectForCwd`, `Gist`). tsc + biome clean.
+⏭ The ACTUAL injection (an agent launch picking up the gist) needs a live
+`pnpm tauri dev` run — the cross-phase live evidence. Director-path gist + richer
+confidence gate + snippet-text + git/recent-files synthesis remain refinements.
+
+**P3 is functionally complete (backend + gate + launcher wiring).** Next: a P3
+adversarial-verification pass, then P4 (budgeted reflect + crash-resume).

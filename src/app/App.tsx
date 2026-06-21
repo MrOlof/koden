@@ -28,6 +28,7 @@ import {
   CommandPalette,
   createCommandItems,
 } from "@/modules/command-palette";
+import { brainBuildGist, resolveProjectForCwd } from "@/modules/brain";
 import {
   NewEditorDialog,
   useEditorFileSync,
@@ -893,7 +894,8 @@ export default function App() {
       }
       const name =
         useOrchestrationStore.getState().agents[req.agentId]?.name ?? req.role;
-      const { tabId, leafId } = newAgentTab(inheritedCwdForNewTab(), name);
+      const spawnCwd = inheritedCwdForNewTab();
+      const { tabId, leafId } = newAgentTab(spawnCwd, name);
       linkOrchestrationTerminal(req.agentId, { leafId, tabId });
       usePaneTitleStore
         .getState()
@@ -911,8 +913,25 @@ export default function App() {
         const dir = await ensureKodenDir();
         if (dir && busPath) {
           try {
+            // P3: prepend the cache-stable Koden Brain gist as the system-prompt
+            // PREFIX (it must be the first bytes so the agent's prompt cache stays
+            // stable). One writer into the existing agent-<id>.txt channel so the
+            // gist and worker prompt never clobber each other. Fail-open.
+            let combined = workerPrompt;
+            try {
+              const projectId = spawnCwd ? await resolveProjectForCwd(spawnCwd) : null;
+              if (projectId) {
+                const gist = await brainBuildGist(projectId, task, 800);
+                if (gist && gist.bytes) {
+                  combined = `${gist.bytes}\n\n${workerPrompt}`;
+                  toast.success(`Brain: injected gist (${gist.sources.length} files)`);
+                }
+              }
+            } catch (e) {
+              console.error("brain gist injection failed:", e);
+            }
             const promptPath = `${dir}/agent-${req.agentId}.txt`;
-            await native.writeFile(promptPath, workerPrompt);
+            await native.writeFile(promptPath, combined);
             promptArg = `"$(Get-Content -Raw ${quoteShellArg(promptPath)})"`;
           } catch {
             promptArg = quoteShellArg(flattenPrompt(workerPrompt));

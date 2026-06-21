@@ -94,3 +94,29 @@ export function brainResolveProposal(
 ): Promise<void> {
   return invoke<void>("brain_resolve_proposal", { project, signature, reject });
 }
+
+export type Gist = { bytes: string; fingerprint: string; sources: string[] };
+
+/** Build the cache-stable gist for a project + intent (blank intent → cold-start
+ *  synthesis). `null` if the index isn't ready. */
+export function brainBuildGist(
+  project: string,
+  intent: string,
+  budget = 800,
+): Promise<Gist | null> {
+  return invoke<Gist | null>("brain_build_gist", { project, intent, budget });
+}
+
+/** Longest-prefix match a cwd against registered project roots → project id. */
+export async function resolveProjectForCwd(cwd: string): Promise<string | null> {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const c = norm(cwd);
+  let best: { id: string; root: string } | null = null;
+  for (const p of await brainListProjects()) {
+    const root = norm(p.root);
+    if ((c === root || c.startsWith(`${root}/`)) && (!best || root.length > best.root.length)) {
+      best = { id: p.id, root };
+    }
+  }
+  return best?.id ?? null;
+}
