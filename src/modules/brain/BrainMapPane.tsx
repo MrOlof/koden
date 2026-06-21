@@ -467,7 +467,9 @@ export function BrainMapPane() {
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
-  }, [clientToWorld, applyCam]);
+    // `layout` so this re-runs once the graph loads and the <svg> actually mounts
+    // (on first mount the pane is still "Loading…" and svgRef is null).
+  }, [clientToWorld, applyCam, layout]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
