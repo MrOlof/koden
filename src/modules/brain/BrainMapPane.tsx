@@ -6,10 +6,9 @@ import { brainGraph, type BrainGraph, type GraphEdge, type GraphNode } from "./l
 const W = 1600;
 const H = 1000;
 const R_HUB = 150; // project-hub ring radius
-const RING = 62; // radial gap between directory-tree depths
+const RING = 60; // radial gap between directory-tree depths
+const SPREAD_TO = 2.7; // angular multiplier a project fans to when focused
 
-// Project palette — saturated mid-tones legible on both light and dark themes
-// (from the design handoff). Assigned deterministically by project index.
 const PALETTE = [
   "#2f6df6",
   "#1f9d57",
@@ -27,23 +26,25 @@ const MEMORY_COLOR = "#f2b417";
 type Pos = { x: number; y: number };
 type Kind = "project" | "folder" | "file" | "memory";
 
-// A laid-out node (projects + synthetic folder nodes + files + memory).
+// A laid-out node. Position is NOT absolute: it's `pang + aoff*spread` at `rad`, so a
+// focused project can fan its nodes apart (spread 1 → SPREAD_TO) without relayout.
 type RNode = {
   id: string;
   kind: Kind;
   label: string;
   projectId: string;
   path?: string;
-  depth: number;
-  leaf: number; // subtree leaf count (drives angular share + folder size)
+  leaf: number;
   color: string;
+  aoff: number; // angular offset from the project's spine direction
+  rad: number; // radius from the brain core
+  pang: number; // the owning project's base angle
 };
 
 type Layout = {
-  pos: Map<string, Pos>;
   nodes: RNode[];
   treeEdges: [string, string][];
-  realEdges: GraphEdge[]; // imports + anchors (containment is the tree)
+  realEdges: GraphEdge[];
   byId: Map<string, RNode>;
   adj: Map<string, Set<string>>;
   colorByProject: Map<string, string>;
@@ -51,7 +52,6 @@ type Layout = {
   projectCount: number;
 };
 
-// ── directory tree from file paths ──────────────────────────────────────────
 type Tree = {
   id: string;
   kind: Kind;
@@ -76,7 +76,6 @@ function buildTree(
     let prefix = "";
     segs.forEach((seg, i) => {
       if (i === segs.length - 1) {
-        // file leaf — reuse the backend id so real import/anchor edges resolve
         if (!cur.children.has(f.id)) {
           cur.children.set(f.id, { id: f.id, kind: "file", label: seg, path, children: new Map(), leaf: 1 });
         }
@@ -113,9 +112,7 @@ function buildTree(
     return t.leaf;
   };
   computeLeaf(root);
-  // Collapse single-child folder chains: src → modules → brain becomes one
-  // "src/modules/brain" node, killing the long thin branches a real (deep) tree
-  // produces but a hand-balanced mock never has.
+  // Collapse single-child folder chains (src/modules/brain → one node).
   const compress = (t: Tree) => {
     const merged = new Map<string, Tree>();
     for (let c of t.children.values()) {
@@ -135,7 +132,6 @@ function buildTree(
 }
 
 function computeLayout(graph: BrainGraph): Layout {
-  const pos = new Map<string, Pos>();
   const nodes: RNode[] = [];
   const treeEdges: [string, string][] = [];
   const colorByProject = new Map<string, string>();
@@ -144,12 +140,13 @@ function computeLayout(graph: BrainGraph): Layout {
   const projectNodes = graph.nodes.filter((n) => n.kind === "project");
   const P = Math.max(1, projectNodes.length);
 
-  const place = (t: Tree, depth: number, angStart: number, angEnd: number, color: string, pid: string) => {
+  // depth d sits at radius R_HUB + d*RING; `pang` is the project's spine angle, and we
+  // store each node's angular OFFSET from pang so focus can multiply it (spread).
+  const place = (t: Tree, depth: number, angStart: number, angEnd: number, color: string, pid: string, pang: number) => {
     const ang = (angStart + angEnd) / 2;
-    const radius = R_HUB + depth * RING;
-    pos.set(t.id, { x: Math.cos(ang) * radius, y: Math.sin(ang) * radius });
-    if (radius > maxR) maxR = radius;
-    nodes.push({ id: t.id, kind: t.kind, label: t.label, projectId: pid, path: t.path, depth, leaf: t.leaf, color });
+    const rad = R_HUB + depth * RING;
+    if (rad > maxR) maxR = rad;
+    nodes.push({ id: t.id, kind: t.kind, label: t.label, projectId: pid, path: t.path, leaf: t.leaf, color, aoff: ang - pang, rad, pang });
     const kids = [...t.children.values()];
     if (!kids.length) return;
     const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
@@ -157,7 +154,7 @@ function computeLayout(graph: BrainGraph): Layout {
     for (const k of kids) {
       const span = (angEnd - angStart) * (Math.sqrt(k.leaf) / total);
       treeEdges.push([t.id, k.id]);
-      place(k, depth + 1, cursor, cursor + span, color, pid);
+      place(k, depth + 1, cursor, cursor + span, color, pid, pang);
       cursor += span;
     }
   };
@@ -166,22 +163,22 @@ function computeLayout(graph: BrainGraph): Layout {
     const color = PALETTE[i % PALETTE.length];
     colorByProject.set(proj.project_id, color);
     const a = -Math.PI / 2 + (i * 2 * Math.PI) / P;
-    pos.set(proj.id, { x: Math.cos(a) * R_HUB, y: Math.sin(a) * R_HUB });
-    nodes.push({ id: proj.id, kind: "project", label: proj.label, projectId: proj.project_id, depth: 0, leaf: 1, color });
+    nodes.push({ id: proj.id, kind: "project", label: proj.label, projectId: proj.project_id, leaf: 1, color, aoff: 0, rad: R_HUB, pang: a });
 
     const files = graph.nodes.filter((n) => n.kind === "file" && n.project_id === proj.project_id);
     const memory = graph.nodes.filter((n) => n.kind === "memory" && n.project_id === proj.project_id);
     const root = buildTree(proj.project_id, proj.id, proj.label, files, memory);
 
-    // The project's subtree fans across an angular sector centered on its direction.
-    const sector = P === 1 ? Math.PI * 1.8 : ((2 * Math.PI) / P) * 0.86;
+    // COMPACT base cone (capped) so the overview reads as tidy blooms with gaps —
+    // focus then spreads the cone to SPREAD_TO× for the readable tree.
+    const sector = Math.min(0.82, ((2 * Math.PI) / P) * 0.7);
     const kids = [...root.children.values()];
     const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
     let cursor = a - sector / 2;
     for (const k of kids) {
       const span = sector * (Math.sqrt(k.leaf) / total);
       treeEdges.push([proj.id, k.id]);
-      place(k, 1, cursor, cursor + span, color, proj.project_id);
+      place(k, 1, cursor, cursor + span, color, proj.project_id, a);
       cursor += span;
     }
   });
@@ -206,26 +203,29 @@ function computeLayout(graph: BrainGraph): Layout {
   for (const [x, y] of treeEdges) link(x, y);
   for (const e of realEdges) link(e.a, e.b);
 
-  return { pos, nodes, treeEdges, realEdges, byId, adj, colorByProject, maxR, projectCount: projectNodes.length };
+  return { nodes, treeEdges, realEdges, byId, adj, colorByProject, maxR, projectCount: projectNodes.length };
 }
 
 /**
- * Brain Map — radial directory-tree of the whole brain (design handoff). Project
- * hubs → folders → files branch outward (real containment = the tree); memory notes
- * are amber leaves; imports/anchors light up on hover. Follows the app theme.
- * Camera (pan/zoom/fly-to) is imperative via refs for smoothness; hover/select/focus
- * drive React re-renders.
+ * Brain Map — radial directory-tree of the whole brain (design handoff). Overview =
+ * compact project blooms; clicking a project ANIMATES it apart (spread 1 → SPREAD_TO)
+ * into the readable fan-tree. Follows the app theme. Camera + spread are imperative
+ * (refs + rAF); a force counter re-renders during the spread animation.
  */
 export function BrainMapPane() {
   const [graph, setGraph] = useState<BrainGraph | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [focusPid, setFocusPid] = useState<string | null>(null);
+  const [, force] = useState(0);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const camG = useRef<SVGGElement>(null);
   const cam = useRef({ x: 0, y: 0, s: 0.85 });
   const drag = useRef<{ x: number; y: number; cx: number; cy: number; moved: boolean; bg: boolean } | null>(null);
+  const spread = useRef(1); // current spread factor of the focused project
+  const spreadPid = useRef<string | null>(null);
+  const raf = useRef<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -234,15 +234,13 @@ export function BrainMapPane() {
       .catch(() => alive && setGraph({ nodes: [], edges: [] }));
     return () => {
       alive = false;
+      if (raf.current) cancelAnimationFrame(raf.current);
     };
   }, []);
 
   const layout = useMemo(() => (graph ? computeLayout(graph) : null), [graph]);
 
-  const camTransform = useCallback(
-    () => `translate(${cam.current.x} ${cam.current.y}) scale(${cam.current.s})`,
-    [],
-  );
+  const camTransform = useCallback(() => `translate(${cam.current.x} ${cam.current.y}) scale(${cam.current.s})`, []);
   const applyCam = useCallback(
     (animate: boolean) => {
       const g = camG.current;
@@ -261,7 +259,7 @@ export function BrainMapPane() {
   );
 
   const fitScale = useCallback(
-    () => Math.min(1.1, Math.max(0.25, ((Math.min(W, H) / 2) * 0.92) / Math.max(1, layout?.maxR ?? 1))),
+    () => Math.min(1.1, Math.max(0.22, ((Math.min(W, H) / 2) * 0.9) / Math.max(1, layout?.maxR ?? 1))),
     [layout],
   );
   useLayoutEffect(() => {
@@ -269,6 +267,34 @@ export function BrainMapPane() {
     cam.current = { x: 0, y: 0, s: fitScale() };
     applyCam(false);
   }, [layout, applyCam, fitScale]);
+
+  const animateSpread = useCallback((pid: string | null, to: number) => {
+    if (pid !== null) spreadPid.current = pid;
+    if (raf.current) cancelAnimationFrame(raf.current);
+    const from = spread.current;
+    const start = performance.now();
+    const dur = 600;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / dur);
+      const e = 1 - (1 - t) ** 3;
+      spread.current = from + (to - from) * e;
+      force((x) => x + 1);
+      if (t < 1) {
+        raf.current = requestAnimationFrame(tick);
+      } else {
+        raf.current = null;
+        if (to <= 1) spreadPid.current = null;
+      }
+    };
+    raf.current = requestAnimationFrame(tick);
+  }, []);
+
+  const livePos = useCallback((n: RNode): Pos => {
+    const sp = n.projectId === spreadPid.current ? spread.current : 1;
+    const ang = n.pang + n.aoff * sp;
+    const rad = n.rad * (1 + (sp - 1) * 0.16);
+    return { x: Math.cos(ang) * rad, y: Math.sin(ang) * rad };
+  }, []);
 
   const vbScale = useCallback(() => {
     const r = svgRef.current?.getBoundingClientRect();
@@ -287,10 +313,11 @@ export function BrainMapPane() {
 
   const reset = useCallback(() => {
     flyTo(0, 0, fitScale(), true);
+    animateSpread(spreadPid.current, 1);
     setFocusPid(null);
     setSelected(null);
     setHover(null);
-  }, [flyTo, fitScale]);
+  }, [flyTo, fitScale, animateSpread]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -316,15 +343,8 @@ export function BrainMapPane() {
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     const target = e.target as Element;
-    drag.current = {
-      x: e.clientX,
-      y: e.clientY,
-      cx: cam.current.x,
-      cy: cam.current.y,
-      moved: false,
-      bg: target.getAttribute("data-bg") === "1",
-    };
-    applyCam(false); // cancel any in-flight fly-to transition before dragging
+    drag.current = { x: e.clientX, y: e.clientY, cx: cam.current.x, cy: cam.current.y, moved: false, bg: target.getAttribute("data-bg") === "1" };
+    applyCam(false);
     if (svgRef.current) svgRef.current.style.cursor = "grabbing";
   };
   const onPointerMove = (e: React.PointerEvent) => {
@@ -332,8 +352,6 @@ export function BrainMapPane() {
     if (!d) return;
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
-    // Capture only once a real DRAG starts (not on a click) — capturing on
-    // pointerdown would steal the click from nodes and break focus/select.
     if (!d.moved && Math.abs(dx) + Math.abs(dy) > 4) {
       d.moved = true;
       try {
@@ -359,17 +377,17 @@ export function BrainMapPane() {
     if (d && !d.moved && d.bg) reset();
   };
 
-  const focusProject = (pid: string, projNodeId: string) => {
-    if (!layout) return;
-    const p = layout.pos.get(projNodeId);
-    if (p) flyTo(p.x * 1.15, p.y * 1.15, 1.0, true);
+  const focusProject = (pid: string, pang: number) => {
+    animateSpread(pid, SPREAD_TO);
+    // Centre the camera on the project's spread tree (out along its spine direction).
+    flyTo(Math.cos(pang) * 340, Math.sin(pang) * 340, 1.0, true);
     setFocusPid(pid);
     setSelected(null);
   };
   const selectNode = (n: RNode) => {
-    if (!layout) return;
-    const p = layout.pos.get(n.id);
-    if (p) flyTo(p.x, p.y, Math.max(1.7, cam.current.s), true);
+    if (n.projectId !== spreadPid.current) animateSpread(n.projectId, SPREAD_TO);
+    const p = livePos(n);
+    flyTo(p.x, p.y, Math.max(1.7, cam.current.s), true);
     setSelected(n.id);
     if (n.projectId) setFocusPid(n.projectId);
   };
@@ -389,18 +407,18 @@ export function BrainMapPane() {
     );
   }
 
-  const { pos, byId, adj } = layout;
-  const focusName = focusPid
-    ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)?.label
-    : null;
+  // Live positions for this frame (spread animation re-renders via `force`).
+  const pos = new Map<string, Pos>(layout.nodes.map((n) => [n.id, livePos(n)]));
+  const { byId, adj } = layout;
+  const focusName = focusPid ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)?.label : null;
   const selNode = selected ? byId.get(selected) : null;
-  const active = selected ?? hover;
+  const activeId = selected ?? hover;
   const neighbors = selected ? (adj.get(selected) ?? new Set<string>()) : null;
   const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
 
   const nodeOpacity = (n: RNode): number => {
     if (n.kind === "project" && focusPid && n.projectId !== focusPid) return 0.2;
-    if (focusPid && n.projectId !== focusPid && n.kind !== "project") return 0.08;
+    if (focusPid && n.projectId !== focusPid && n.kind !== "project") return 0.07;
     if (neighbors && selected) return n.id === selected || neighbors.has(n.id) ? 1 : 0.14;
     return 1;
   };
@@ -414,9 +432,7 @@ export function BrainMapPane() {
       </div>
       <div className="pointer-events-none absolute top-2.5 left-1/2 z-10 -translate-x-1/2">
         <span className="rounded-full border bg-background/70 px-3 py-1 font-mono text-[10.5px] text-muted-foreground backdrop-blur">
-          {focusName
-            ? `Viewing ${focusName} · click background to zoom out`
-            : "Click a project to focus · scroll to zoom · drag to pan"}
+          {focusName ? `Viewing ${focusName} · click background to zoom out` : "Click a project to focus · scroll to zoom · drag to pan"}
         </span>
       </div>
       <div className="absolute bottom-3 left-3 z-10 flex flex-col gap-1.5 rounded-lg border bg-background/80 px-3 py-2 backdrop-blur">
@@ -468,7 +484,7 @@ export function BrainMapPane() {
               );
             })}
           </g>
-          {/* tree branches (project → folder → file/memory) */}
+          {/* tree branches */}
           <g className="text-muted-foreground">
             {layout.treeEdges.map(([aId, bId]) => {
               const a = pos.get(aId);
@@ -476,9 +492,7 @@ export function BrainMapPane() {
               if (!a || !b) return null;
               const an = byId.get(aId);
               const dimmed = !!focusPid && an?.projectId !== focusPid;
-              const hot =
-                (!!active && (aId === active || bId === active)) ||
-                (!!focusPid && an?.projectId === focusPid);
+              const hot = (!!activeId && (aId === activeId || bId === activeId)) || (!!focusPid && an?.projectId === focusPid);
               return (
                 <line
                   key={`t${aId}>${bId}`}
@@ -488,16 +502,16 @@ export function BrainMapPane() {
                   y2={b.y}
                   stroke={hot && an?.projectId ? projColorOf(an.projectId) : "currentColor"}
                   strokeWidth={hot ? 1.2 : 0.8}
-                  strokeOpacity={dimmed ? 0.05 : hot ? 0.55 : 0.32}
+                  strokeOpacity={dimmed ? 0.05 : hot ? 0.6 : 0.34}
                 />
               );
             })}
           </g>
-          {/* real import/anchor edges — only for the active (hovered/selected) node */}
-          {active ? (
+          {/* real import/anchor edges — only for the active node */}
+          {activeId ? (
             <g>
               {layout.realEdges
-                .filter((e) => e.a === active || e.b === active)
+                .filter((e) => e.a === activeId || e.b === activeId)
                 .map((e) => {
                   const a = pos.get(e.a);
                   const b = pos.get(e.b);
@@ -550,7 +564,7 @@ export function BrainMapPane() {
               );
             })}
           </g>
-          {/* folder / module nodes: colored rounded squares with a letter badge */}
+          {/* folder / module nodes */}
           <g>
             {layout.nodes.map((n) => {
               if (n.kind !== "folder") return null;
@@ -571,24 +585,8 @@ export function BrainMapPane() {
                     selectNode(n);
                   }}
                 >
-                  <rect
-                    x={p.x - s}
-                    y={p.y - s}
-                    width={s * 2}
-                    height={s * 2}
-                    rx={s * 0.45}
-                    fill={n.color}
-                    className="stroke-background"
-                    strokeWidth={1.5}
-                  />
-                  <text
-                    x={p.x}
-                    y={p.y}
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    className="pointer-events-none fill-white font-bold"
-                    fontSize={s * 1.05}
-                  >
+                  <rect x={p.x - s} y={p.y - s} width={s * 2} height={s * 2} rx={s * 0.45} fill={n.color} className="stroke-background" strokeWidth={1.5} />
+                  <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-bold" fontSize={s * 1.05}>
                     {(n.label[0] ?? "?").toUpperCase()}
                   </text>
                 </g>
@@ -613,7 +611,7 @@ export function BrainMapPane() {
                   onMouseLeave={() => setHover((hv) => (hv === n.id ? null : hv))}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    focusProject(n.projectId, n.id);
+                    focusProject(n.projectId, n.pang);
                   }}
                 >
                   <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={n.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
@@ -644,7 +642,7 @@ export function BrainMapPane() {
         </g>
       </svg>
 
-      {hover ? <Tooltip id={hover} layout={layout} cam={cam.current} svgRef={svgRef} /> : null}
+      {hover ? <Tooltip id={hover} byId={byId} pos={pos} cam={cam.current} svgRef={svgRef} /> : null}
 
       {selNode ? (
         <SidePanel
@@ -670,17 +668,19 @@ function Legend({ swatch, label, style }: { swatch: string; label: string; style
 
 function Tooltip({
   id,
-  layout,
+  byId,
+  pos,
   cam,
   svgRef,
 }: {
   id: string;
-  layout: Layout;
+  byId: Map<string, RNode>;
+  pos: Map<string, Pos>;
   cam: { x: number; y: number; s: number };
   svgRef: React.RefObject<SVGSVGElement | null>;
 }) {
-  const n = layout.byId.get(id);
-  const p = layout.pos.get(id);
+  const n = byId.get(id);
+  const p = pos.get(id);
   const r = svgRef.current?.getBoundingClientRect();
   if (!n || !p || !r) return null;
   const sc = Math.min(r.width / W, r.height / H);
@@ -714,13 +714,7 @@ function SidePanel({
   onClose: () => void;
 }) {
   const kind =
-    node.kind === "memory"
-      ? "Memory node"
-      : node.kind === "project"
-        ? "Project"
-        : node.kind === "folder"
-          ? "Folder / module"
-          : "File";
+    node.kind === "memory" ? "Memory node" : node.kind === "project" ? "Project" : node.kind === "folder" ? "Folder / module" : "File";
   return (
     <aside className="absolute top-14 right-3 bottom-3 z-20 flex w-72 flex-col overflow-hidden rounded-2xl border bg-background/95 shadow-2xl backdrop-blur">
       <div className="flex items-center justify-between border-b px-4 py-3">
