@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { brainGraph, type BrainGraph, type GraphNode } from "./lib/bindings";
+import { brainGraph, type BrainGraph, type GraphEdge, type GraphNode } from "./lib/bindings";
 
-// Viewport coordinate space (the radial graph is laid out centered on 0,0).
+// Viewport coordinate space (the radial tree is laid out centered on 0,0).
 const W = 1600;
 const H = 1000;
-const R_HUB = 170; // project-hub ring radius
+const R_HUB = 150; // project-hub ring radius
+const RING = 62; // radial gap between directory-tree depths
 
 // Project palette — saturated mid-tones legible on both light and dark themes
 // (from the design handoff). Assigned deterministically by project index.
@@ -24,107 +25,178 @@ const PALETTE = [
 const MEMORY_COLOR = "#f2b417";
 
 type Pos = { x: number; y: number };
+type Kind = "project" | "folder" | "file" | "memory";
 
-type ProjectMeta = {
-  node: GraphNode;
+// A laid-out node (projects + synthetic folder nodes + files + memory).
+type RNode = {
+  id: string;
+  kind: Kind;
+  label: string;
+  projectId: string;
+  path?: string;
+  depth: number;
+  leaf: number; // subtree leaf count (drives angular share + folder size)
   color: string;
-  angle: number;
-  childCount: number;
 };
 
 type Layout = {
   pos: Map<string, Pos>;
-  byId: Map<string, GraphNode>;
+  nodes: RNode[];
+  treeEdges: [string, string][];
+  realEdges: GraphEdge[]; // imports + anchors (containment is the tree)
+  byId: Map<string, RNode>;
   adj: Map<string, Set<string>>;
-  projects: ProjectMeta[];
   colorByProject: Map<string, string>;
   maxR: number;
+  projectCount: number;
 };
 
-/** Stable [0,1) hash of a string — deterministic jitter so layout never flickers. */
-function hash01(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
+// ── directory tree from file paths ──────────────────────────────────────────
+type Tree = {
+  id: string;
+  kind: Kind;
+  label: string;
+  path?: string;
+  children: Map<string, Tree>;
+  leaf: number;
+};
+
+function buildTree(
+  projId: string,
+  projNodeId: string,
+  projLabel: string,
+  files: GraphNode[],
+  memory: GraphNode[],
+): Tree {
+  const root: Tree = { id: projNodeId, kind: "project", label: projLabel, children: new Map(), leaf: 0 };
+  for (const f of files) {
+    const path = f.path ?? f.label;
+    const segs = path.split(/[\\/]/).filter(Boolean);
+    let cur = root;
+    let prefix = "";
+    segs.forEach((seg, i) => {
+      if (i === segs.length - 1) {
+        // file leaf — reuse the backend id so real import/anchor edges resolve
+        if (!cur.children.has(f.id)) {
+          cur.children.set(f.id, { id: f.id, kind: "file", label: seg, path, children: new Map(), leaf: 1 });
+        }
+      } else {
+        prefix = prefix ? `${prefix}/${seg}` : seg;
+        const fid = `fold:${projId}:${prefix}`;
+        let next = cur.children.get(fid);
+        if (!next) {
+          next = { id: fid, kind: "folder", label: seg, path: prefix, children: new Map(), leaf: 0 };
+          cur.children.set(fid, next);
+        }
+        cur = next;
+      }
+    });
   }
-  return ((h >>> 0) % 100000) / 100000;
+  for (const m of memory) {
+    root.children.set(m.id, {
+      id: m.id,
+      kind: "memory",
+      label: m.label,
+      path: m.path ?? undefined,
+      children: new Map(),
+      leaf: 1,
+    });
+  }
+  const computeLeaf = (t: Tree): number => {
+    if (t.children.size === 0) {
+      t.leaf = t.kind === "folder" ? 0 : 1;
+      return t.leaf;
+    }
+    let s = 0;
+    for (const c of t.children.values()) s += computeLeaf(c);
+    t.leaf = Math.max(1, s);
+    return t.leaf;
+  };
+  computeLeaf(root);
+  return root;
 }
 
 function computeLayout(graph: BrainGraph): Layout {
-  const byId = new Map<string, GraphNode>();
-  for (const n of graph.nodes) byId.set(n.id, n);
-
-  const adj = new Map<string, Set<string>>();
-  const link = (a: string, b: string) => {
-    let sa = adj.get(a);
-    if (!sa) {
-      sa = new Set();
-      adj.set(a, sa);
-    }
-    sa.add(b);
-    let sb = adj.get(b);
-    if (!sb) {
-      sb = new Set();
-      adj.set(b, sb);
-    }
-    sb.add(a);
-  };
-  for (const e of graph.edges) link(e.a, e.b);
-
-  // Node positions. The brain core is hard-pinned at (0,0) in the render (it is a
-  // frontend-only node; the backend emits no "brain" node/edge), so it needs no entry.
   const pos = new Map<string, Pos>();
+  const nodes: RNode[] = [];
+  const treeEdges: [string, string][] = [];
+  const colorByProject = new Map<string, string>();
+  let maxR = R_HUB;
 
   const projectNodes = graph.nodes.filter((n) => n.kind === "project");
   const P = Math.max(1, projectNodes.length);
-  const projects: ProjectMeta[] = [];
-  const colorByProject = new Map<string, string>();
-  let maxR = R_HUB;
+
+  const place = (t: Tree, depth: number, angStart: number, angEnd: number, color: string, pid: string) => {
+    const ang = (angStart + angEnd) / 2;
+    const radius = R_HUB + depth * RING;
+    pos.set(t.id, { x: Math.cos(ang) * radius, y: Math.sin(ang) * radius });
+    if (radius > maxR) maxR = radius;
+    nodes.push({ id: t.id, kind: t.kind, label: t.label, projectId: pid, path: t.path, depth, leaf: t.leaf, color });
+    const kids = [...t.children.values()];
+    if (!kids.length) return;
+    const total = kids.reduce((s, k) => s + k.leaf, 0) || 1;
+    let cursor = angStart;
+    for (const k of kids) {
+      const span = (angEnd - angStart) * (k.leaf / total);
+      treeEdges.push([t.id, k.id]);
+      place(k, depth + 1, cursor, cursor + span, color, pid);
+      cursor += span;
+    }
+  };
 
   projectNodes.forEach((proj, i) => {
     const color = PALETTE[i % PALETTE.length];
     colorByProject.set(proj.project_id, color);
-    const angle = -Math.PI / 2 + (i * 2 * Math.PI) / P;
-    pos.set(proj.id, { x: Math.cos(angle) * R_HUB, y: Math.sin(angle) * R_HUB });
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / P;
+    pos.set(proj.id, { x: Math.cos(a) * R_HUB, y: Math.sin(a) * R_HUB });
+    nodes.push({ id: proj.id, kind: "project", label: proj.label, projectId: proj.project_id, depth: 0, leaf: 1, color });
 
-    // This project's children: files (by degree desc) then memory notes.
-    const files = graph.nodes
-      .filter((n) => n.kind === "file" && n.project_id === proj.project_id)
-      .sort((a, b) => b.degree - a.degree);
-    const memory = graph.nodes.filter(
-      (n) => n.kind === "memory" && n.project_id === proj.project_id,
-    );
-    const children = [...files, ...memory];
+    const files = graph.nodes.filter((n) => n.kind === "file" && n.project_id === proj.project_id);
+    const memory = graph.nodes.filter((n) => n.kind === "memory" && n.project_id === proj.project_id);
+    const root = buildTree(proj.project_id, proj.id, proj.label, files, memory);
 
-    // Fan children into concentric bands within an angular sector. Per-band count
-    // scales with total so a 1-project / many-file brain doesn't make a thin spike.
-    const sector = ((2 * Math.PI) / P) * (P === 1 ? 1.7 : 0.78);
-    const perBand = Math.min(22, Math.max(6, Math.ceil(Math.sqrt(children.length) * 1.4)));
-    children.forEach((node, j) => {
-      const ring = Math.floor(j / perBand);
-      const inRing = j % perBand;
-      const ringTotal = Math.min(perBand, children.length - ring * perBand);
-      const frac = ringTotal <= 1 ? 0.5 : inRing / (ringTotal - 1);
-      const aoff = (frac - 0.5) * sector + (hash01(`${node.id}a`) - 0.5) * 0.05;
-      const r = R_HUB + 70 + ring * 46 + (hash01(node.id) - 0.5) * 28;
-      const a = angle + aoff;
-      pos.set(node.id, { x: Math.cos(a) * r, y: Math.sin(a) * r });
-      if (r > maxR) maxR = r;
-    });
-
-    projects.push({ node: proj, color, angle, childCount: children.length });
+    // The project's subtree fans across an angular sector centered on its direction.
+    const sector = P === 1 ? Math.PI * 1.8 : ((2 * Math.PI) / P) * 0.86;
+    const kids = [...root.children.values()];
+    const total = kids.reduce((s, k) => s + k.leaf, 0) || 1;
+    let cursor = a - sector / 2;
+    for (const k of kids) {
+      const span = sector * (k.leaf / total);
+      treeEdges.push([proj.id, k.id]);
+      place(k, 1, cursor, cursor + span, color, proj.project_id);
+      cursor += span;
+    }
   });
 
-  return { pos, byId, adj, projects, colorByProject, maxR };
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const realEdges = graph.edges.filter((e) => e.kind !== "contains");
+  const adj = new Map<string, Set<string>>();
+  const link = (x: string, y: string) => {
+    let sx = adj.get(x);
+    if (!sx) {
+      sx = new Set();
+      adj.set(x, sx);
+    }
+    sx.add(y);
+    let sy = adj.get(y);
+    if (!sy) {
+      sy = new Set();
+      adj.set(y, sy);
+    }
+    sy.add(x);
+  };
+  for (const [x, y] of treeEdges) link(x, y);
+  for (const e of realEdges) link(e.a, e.b);
+
+  return { pos, nodes, treeEdges, realEdges, byId, adj, colorByProject, maxR, projectCount: projectNodes.length };
 }
 
 /**
- * Brain Map — the interactive radial knowledge graph (design handoff). Brain core →
- * project hubs → file/memory nodes, with real containment/import/anchor edges from
- * `brain_graph`. Follows the app theme (Tailwind theme classes for structure;
- * per-project palette for hubs). Camera (pan/zoom/fly-to) is imperative via refs so
- * dragging never thrashes React; hover/select/focus drive re-renders.
+ * Brain Map — radial directory-tree of the whole brain (design handoff). Project
+ * hubs → folders → files branch outward (real containment = the tree); memory notes
+ * are amber leaves; imports/anchors light up on hover. Follows the app theme.
+ * Camera (pan/zoom/fly-to) is imperative via refs for smoothness; hover/select/focus
+ * drive React re-renders.
  */
 export function BrainMapPane() {
   const [graph, setGraph] = useState<BrainGraph | null>(null);
@@ -139,7 +211,7 @@ export function BrainMapPane() {
 
   useEffect(() => {
     let alive = true;
-    brainGraph(120)
+    brainGraph(160)
       .then((g) => alive && setGraph(g))
       .catch(() => alive && setGraph({ nodes: [], edges: [] }));
     return () => {
@@ -170,43 +242,38 @@ export function BrainMapPane() {
     [applyCam],
   );
 
-  // Auto-fit the whole graph into view once it's laid out. useLayoutEffect so the
-  // fitted transform is committed BEFORE first paint (no flash at identity scale).
+  const fitScale = useCallback(
+    () => Math.min(1.1, Math.max(0.25, ((Math.min(W, H) / 2) * 0.92) / Math.max(1, layout?.maxR ?? 1))),
+    [layout],
+  );
   useLayoutEffect(() => {
     if (!layout) return;
-    const fit = Math.min(1.1, Math.max(0.3, (Math.min(W, H) / 2) * 0.92 / Math.max(1, layout.maxR)));
-    cam.current = { x: 0, y: 0, s: fit };
+    cam.current = { x: 0, y: 0, s: fitScale() };
     applyCam(false);
-  }, [layout, applyCam]);
+  }, [layout, applyCam, fitScale]);
 
   const vbScale = useCallback(() => {
     const r = svgRef.current?.getBoundingClientRect();
     return r ? Math.min(r.width / W, r.height / H) : 1;
   }, []);
-  const clientToWorld = useCallback(
-    (cx: number, cy: number) => {
-      const r = svgRef.current?.getBoundingClientRect();
-      if (!r) return { x: 0, y: 0 };
-      const sc = Math.min(r.width / W, r.height / H);
-      const offX = r.left + (r.width - W * sc) / 2;
-      const offY = r.top + (r.height - H * sc) / 2;
-      const vbx = (cx - offX) / sc - W / 2;
-      const vby = (cy - offY) / sc - H / 2;
-      return { x: (vbx - cam.current.x) / cam.current.s, y: (vby - cam.current.y) / cam.current.s };
-    },
-    [],
-  );
+  const clientToWorld = useCallback((cx: number, cy: number) => {
+    const r = svgRef.current?.getBoundingClientRect();
+    if (!r) return { x: 0, y: 0 };
+    const sc = Math.min(r.width / W, r.height / H);
+    const offX = r.left + (r.width - W * sc) / 2;
+    const offY = r.top + (r.height - H * sc) / 2;
+    const vbx = (cx - offX) / sc - W / 2;
+    const vby = (cy - offY) / sc - H / 2;
+    return { x: (vbx - cam.current.x) / cam.current.s, y: (vby - cam.current.y) / cam.current.s };
+  }, []);
 
   const reset = useCallback(() => {
-    if (!layout) return;
-    const fit = Math.min(1.1, Math.max(0.3, (Math.min(W, H) / 2) * 0.92 / Math.max(1, layout.maxR)));
-    flyTo(0, 0, fit, true);
+    flyTo(0, 0, fitScale(), true);
     setFocusPid(null);
     setSelected(null);
     setHover(null);
-  }, [layout, flyTo]);
+  }, [flyTo, fitScale]);
 
-  // Native wheel listener (passive:false so we can preventDefault the page scroll).
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
@@ -214,7 +281,7 @@ export function BrainMapPane() {
       e.preventDefault();
       const before = clientToWorld(e.clientX, e.clientY);
       const factor = Math.exp(-e.deltaY * 0.0014);
-      const s2 = Math.max(0.25, Math.min(6, cam.current.s * factor));
+      const s2 = Math.max(0.2, Math.min(7, cam.current.s * factor));
       const r = svg.getBoundingClientRect();
       const sc = Math.min(r.width / W, r.height / H);
       const offX = r.left + (r.width - W * sc) / 2;
@@ -248,8 +315,7 @@ export function BrainMapPane() {
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
     // Capture only once a real DRAG starts (not on a click) — capturing on
-    // pointerdown would steal the click from nodes and break focus/select. Once
-    // captured, the pan keeps tracking even past the SVG edge.
+    // pointerdown would steal the click from nodes and break focus/select.
     if (!d.moved && Math.abs(dx) + Math.abs(dy) > 4) {
       d.moved = true;
       try {
@@ -278,16 +344,16 @@ export function BrainMapPane() {
   const focusProject = (pid: string, projNodeId: string) => {
     if (!layout) return;
     const p = layout.pos.get(projNodeId);
-    if (p) flyTo(p.x * 1.1, p.y * 1.1, 1.0, true);
+    if (p) flyTo(p.x * 1.15, p.y * 1.15, 1.0, true);
     setFocusPid(pid);
     setSelected(null);
   };
-  const selectNode = (n: GraphNode) => {
+  const selectNode = (n: RNode) => {
     if (!layout) return;
     const p = layout.pos.get(n.id);
-    if (p) flyTo(p.x, p.y, Math.max(1.6, cam.current.s), true);
+    if (p) flyTo(p.x, p.y, Math.max(1.7, cam.current.s), true);
     setSelected(n.id);
-    if (n.project_id) setFocusPid(n.project_id);
+    if (n.projectId) setFocusPid(n.projectId);
   };
 
   if (!graph || !layout) {
@@ -307,38 +373,27 @@ export function BrainMapPane() {
 
   const { pos, byId, adj } = layout;
   const focusName = focusPid
-    ? layout.projects.find((p) => p.node.project_id === focusPid)?.node.label
+    ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)?.label
     : null;
   const selNode = selected ? byId.get(selected) : null;
+  const active = selected ?? hover;
   const neighbors = selected ? (adj.get(selected) ?? new Set<string>()) : null;
+  const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
 
-  const nodeOpacity = (n: GraphNode): number => {
-    if (n.kind === "project" && focusPid && n.project_id !== focusPid) return 0.18;
-    if (focusPid && n.project_id !== focusPid && n.kind !== "project") return 0.07;
-    if (neighbors && selected) return n.id === selected || neighbors.has(n.id) ? 1 : 0.12;
+  const nodeOpacity = (n: RNode): number => {
+    if (n.kind === "project" && focusPid && n.projectId !== focusPid) return 0.2;
+    if (focusPid && n.projectId !== focusPid && n.kind !== "project") return 0.08;
+    if (neighbors && selected) return n.id === selected || neighbors.has(n.id) ? 1 : 0.14;
     return 1;
   };
-  const edgeOpacity = (a: string, b: string, kind: string): number => {
-    if (neighbors && selected) return a === selected || b === selected ? 0.8 : 0.04;
-    if (hover) return a === hover || b === hover ? 0.7 : 0.06;
-    if (focusPid) {
-      const an = byId.get(a);
-      return an && an.project_id === focusPid ? 0.4 : 0.03;
-    }
-    return kind === "import" ? 0.32 : kind === "anchor" ? 0.42 : 0.2;
-  };
-
-  const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-background">
-      {/* top stats */}
       <div className="pointer-events-none absolute top-2.5 right-3 z-10 flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
-        <span>{graph.nodes.length.toLocaleString()} nodes</span>
+        <span>{layout.nodes.length.toLocaleString()} nodes</span>
         <span className="opacity-40">/</span>
-        <span>{graph.edges.length.toLocaleString()} links</span>
+        <span>{layout.treeEdges.length.toLocaleString()} links</span>
       </div>
-      {/* hint / focus pill */}
       <div className="pointer-events-none absolute top-2.5 left-1/2 z-10 -translate-x-1/2">
         <span className="rounded-full border bg-background/70 px-3 py-1 font-mono text-[10.5px] text-muted-foreground backdrop-blur">
           {focusName
@@ -346,10 +401,10 @@ export function BrainMapPane() {
             : "Click a project to focus · scroll to zoom · drag to pan"}
         </span>
       </div>
-      {/* legend */}
       <div className="absolute bottom-3 left-3 z-10 flex flex-col gap-1.5 rounded-lg border bg-background/80 px-3 py-2 backdrop-blur">
         <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Layers</span>
         <Legend swatch="rounded-[3px] bg-foreground" label="Project" />
+        <Legend swatch="rounded-[3px] bg-muted-foreground" label="Folder / module" />
         <Legend swatch="rounded-full bg-muted-foreground" label="File / source" />
         <Legend swatch="rounded-full" label="Memory / context" style={{ background: MEMORY_COLOR }} />
       </div>
@@ -374,60 +429,65 @@ export function BrainMapPane() {
         </defs>
         <rect data-bg="1" x={-W} y={-H} width={W * 2} height={H * 2} fill="transparent" />
         <g ref={camG}>
-          {/* edges */}
-          <g>
-            {graph.edges.map((e) => {
-              const a = pos.get(e.a);
-              const b = pos.get(e.b);
+          {/* tree branches (project → folder → file/memory) */}
+          <g className="text-muted-foreground">
+            {layout.treeEdges.map(([aId, bId]) => {
+              const a = pos.get(aId);
+              const b = pos.get(bId);
               if (!a || !b) return null;
-              const an = byId.get(e.a);
+              const an = byId.get(aId);
+              const dimmed = !!focusPid && an?.projectId !== focusPid;
               const hot =
-                (!!hover && (e.a === hover || e.b === hover)) ||
-                (!!selected && (e.a === selected || e.b === selected));
-              const stroke = hot && an?.project_id ? projColorOf(an.project_id) : "currentColor";
+                (!!active && (aId === active || bId === active)) ||
+                (!!focusPid && an?.projectId === focusPid);
               return (
                 <line
-                  key={`${e.a}|${e.b}|${e.kind}`}
+                  key={`t${aId}>${bId}`}
                   x1={a.x}
                   y1={a.y}
                   x2={b.x}
                   y2={b.y}
-                  className={hot ? undefined : "text-muted-foreground"}
-                  stroke={stroke}
-                  strokeWidth={hot ? 1.4 : 0.8}
-                  strokeOpacity={edgeOpacity(e.a, e.b, e.kind)}
+                  stroke={hot && an?.projectId ? projColorOf(an.projectId) : "currentColor"}
+                  strokeWidth={hot ? 1.2 : 0.8}
+                  strokeOpacity={dimmed ? 0.05 : hot ? 0.55 : 0.32}
                 />
               );
             })}
           </g>
-          {/* spines: brain → hubs */}
-          <g className="text-muted-foreground">
-            {layout.projects.map((p) => {
-              const h = pos.get(p.node.id);
-              if (!h) return null;
-              return (
-                <line
-                  key={`s${p.node.id}`}
-                  x1={0}
-                  y1={0}
-                  x2={h.x}
-                  y2={h.y}
-                  stroke={focusPid === p.node.project_id ? p.color : "currentColor"}
-                  strokeWidth={focusPid === p.node.project_id ? 1.4 : 1}
-                  strokeOpacity={focusPid ? (focusPid === p.node.project_id ? 0.6 : 0.06) : 0.45}
-                />
-              );
-            })}
-          </g>
-          {/* file + memory nodes */}
+          {/* real import/anchor edges — only for the active (hovered/selected) node */}
+          {active ? (
+            <g>
+              {layout.realEdges
+                .filter((e) => e.a === active || e.b === active)
+                .map((e) => {
+                  const a = pos.get(e.a);
+                  const b = pos.get(e.b);
+                  if (!a || !b) return null;
+                  return (
+                    <line
+                      key={`r${e.a}>${e.b}`}
+                      x1={a.x}
+                      y1={a.y}
+                      x2={b.x}
+                      y2={b.y}
+                      stroke={e.kind === "anchor" ? MEMORY_COLOR : projColorOf(byId.get(e.a)?.projectId ?? "")}
+                      strokeWidth={1.4}
+                      strokeOpacity={0.85}
+                      strokeDasharray={e.kind === "anchor" ? "3 3" : undefined}
+                    />
+                  );
+                })}
+            </g>
+          ) : null}
+          {/* leaf nodes: files (grey) + memory (amber) */}
           <g>
-            {graph.nodes.map((n) => {
+            {layout.nodes.map((n) => {
               if (n.kind !== "file" && n.kind !== "memory") return null;
               const p = pos.get(n.id);
               if (!p) return null;
               const emph = n.id === hover || n.id === selected;
               const isMem = n.kind === "memory";
-              const r = (isMem ? 4.3 : 3.4 + Math.min(n.degree, 8) * 0.35) * (emph ? 1.8 : 1);
+              const r = (isMem ? 4.2 : 3.3) * (emph ? 1.9 : 1);
               return (
                 // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven graph node; keyboard access is via the Brain search list
                 <circle
@@ -451,46 +511,79 @@ export function BrainMapPane() {
               );
             })}
           </g>
+          {/* folder / module nodes: colored rounded squares with a letter badge */}
+          <g>
+            {layout.nodes.map((n) => {
+              if (n.kind !== "folder") return null;
+              const p = pos.get(n.id);
+              if (!p) return null;
+              const emph = n.id === hover || n.id === selected;
+              const s = Math.min(10, 4.5 + Math.log2(n.leaf + 1) * 1.3) * (emph ? 1.25 : 1);
+              return (
+                // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven folder node; keyboard access is via the Brain search list
+                <g
+                  key={n.id}
+                  opacity={nodeOpacity(n)}
+                  style={{ cursor: "pointer" }}
+                  onMouseEnter={() => setHover(n.id)}
+                  onMouseLeave={() => setHover((h) => (h === n.id ? null : h))}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    selectNode(n);
+                  }}
+                >
+                  <rect
+                    x={p.x - s}
+                    y={p.y - s}
+                    width={s * 2}
+                    height={s * 2}
+                    rx={s * 0.45}
+                    fill={n.color}
+                    className="stroke-background"
+                    strokeWidth={1.5}
+                  />
+                  <text
+                    x={p.x}
+                    y={p.y}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    className="pointer-events-none fill-white font-bold"
+                    fontSize={s * 1.05}
+                  >
+                    {(n.label[0] ?? "?").toUpperCase()}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
           {/* project hubs */}
           <g>
-            {layout.projects.map((p) => {
-              const h = pos.get(p.node.id);
+            {layout.nodes.map((n) => {
+              if (n.kind !== "project") return null;
+              const h = pos.get(n.id);
               if (!h) return null;
-              const emph = p.node.id === hover || focusPid === p.node.project_id;
-              const r = 17 * (emph ? 1.12 : 1);
+              const emph = n.id === hover || focusPid === n.projectId;
+              const r = 16 * (emph ? 1.12 : 1);
               return (
                 // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven project hub; keyboard access is via the Brain search list
                 <g
-                  key={p.node.id}
-                  opacity={nodeOpacity(p.node)}
+                  key={n.id}
+                  opacity={nodeOpacity(n)}
                   style={{ cursor: "pointer" }}
-                  onMouseEnter={() => setHover(p.node.id)}
-                  onMouseLeave={() => setHover((hv) => (hv === p.node.id ? null : hv))}
+                  onMouseEnter={() => setHover(n.id)}
+                  onMouseLeave={() => setHover((hv) => (hv === n.id ? null : hv))}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    focusProject(p.node.project_id, p.node.id);
+                    focusProject(n.projectId, n.id);
                   }}
                 >
-                  <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={p.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
-                  <circle cx={h.x} cy={h.y} r={r} fill={p.color} className="stroke-background" strokeWidth={2.4} />
-                  <text
-                    x={h.x}
-                    y={h.y}
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    className="pointer-events-none fill-white font-semibold"
-                    fontSize={11}
-                  >
-                    {(p.node.label.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
+                  <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={n.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
+                  <circle cx={h.x} cy={h.y} r={r} fill={n.color} className="stroke-background" strokeWidth={2.4} />
+                  <text x={h.x} y={h.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-semibold" fontSize={10.5}>
+                    {(n.label.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
                   </text>
-                  <text
-                    x={h.x}
-                    y={h.y + r + 13}
-                    textAnchor="middle"
-                    className="pointer-events-none fill-foreground font-semibold"
-                    fontSize={11}
-                  >
-                    {p.node.label}
+                  <text x={h.x} y={h.y + r + 13} textAnchor="middle" className="pointer-events-none fill-foreground font-semibold" fontSize={11}>
+                    {n.label}
                   </text>
                 </g>
               );
@@ -499,28 +592,26 @@ export function BrainMapPane() {
           {/* brain core */}
           {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven brain core (click = reset view) */}
           <g style={{ cursor: "pointer" }} onClick={(ev) => { ev.stopPropagation(); reset(); }}>
-            <circle cx={0} cy={0} r={105} fill="url(#brainGlow)" className="motion-safe:[animation:koden-breathe_4s_ease-in-out_infinite]" style={{ transformOrigin: "center" }} />
-            <circle cx={0} cy={0} r={42} fill="none" className="stroke-border" strokeWidth={1} strokeDasharray="2 5" />
-            <circle cx={0} cy={0} r={27} className="fill-foreground" />
-            <text x={0} y={0} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-background font-bold" fontSize={24}>
+            <circle cx={0} cy={0} r={100} fill="url(#brainGlow)" className="motion-safe:[animation:koden-breathe_4s_ease-in-out_infinite]" style={{ transformOrigin: "center" }} />
+            <circle cx={0} cy={0} r={40} fill="none" className="stroke-border" strokeWidth={1} strokeDasharray="2 5" />
+            <circle cx={0} cy={0} r={26} className="fill-foreground" />
+            <text x={0} y={0} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-background font-bold" fontSize={23}>
               K
             </text>
-            <text x={0} y={44} textAnchor="middle" className="pointer-events-none fill-muted-foreground font-mono" fontSize={8} letterSpacing={1}>
+            <text x={0} y={42} textAnchor="middle" className="pointer-events-none fill-muted-foreground font-mono" fontSize={8} letterSpacing={1}>
               BRAIN
             </text>
           </g>
         </g>
       </svg>
 
-      {/* tooltip */}
       {hover ? <Tooltip id={hover} layout={layout} cam={cam.current} svgRef={svgRef} /> : null}
 
-      {/* side panel */}
       {selNode ? (
         <SidePanel
           node={selNode}
-          color={selNode.project_id ? projColorOf(selNode.project_id) : PALETTE[9]}
-          projectName={layout.projects.find((p) => p.node.project_id === selNode.project_id)?.node.label ?? "—"}
+          color={projColorOf(selNode.projectId)}
+          projectName={layout.nodes.find((n) => n.kind === "project" && n.projectId === selNode.projectId)?.label ?? "—"}
           connections={adj.get(selNode.id)?.size ?? 0}
           onClose={reset}
         />
@@ -556,17 +647,15 @@ function Tooltip({
   const sc = Math.min(r.width / W, r.height / H);
   const offX = r.left + (r.width - W * sc) / 2;
   const offY = r.top + (r.height - H * sc) / 2;
-  const vbx = cam.x + cam.s * p.x;
-  const vby = cam.y + cam.s * p.y;
-  const sx = offX + (vbx + W / 2) * sc;
-  const sy = offY + (vby + H / 2) * sc;
-  const kind = n.kind === "project" ? "project" : n.kind === "memory" ? "memory" : "file";
+  const sx = offX + (cam.x + cam.s * p.x + W / 2) * sc;
+  const sy = offY + (cam.y + cam.s * p.y + H / 2) * sc;
+  const kind = n.kind === "project" ? "project" : n.kind === "memory" ? "memory" : n.kind === "folder" ? "folder" : "file";
   return (
     <div
       className="pointer-events-none fixed z-30 -translate-x-1/2 -translate-y-full rounded-md bg-popover px-2.5 py-1.5 text-popover-foreground shadow-lg"
       style={{ left: sx, top: sy - 14 }}
     >
-      <div className="max-w-[240px] truncate text-xs font-semibold">{n.label}</div>
+      <div className="max-w-[260px] truncate text-xs font-semibold">{n.label}</div>
       <div className="font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground">{kind}</div>
     </div>
   );
@@ -579,13 +668,20 @@ function SidePanel({
   connections,
   onClose,
 }: {
-  node: GraphNode;
+  node: RNode;
   color: string;
   projectName: string;
   connections: number;
   onClose: () => void;
 }) {
-  const kind = node.kind === "memory" ? "Memory node" : node.kind === "project" ? "Project" : "File";
+  const kind =
+    node.kind === "memory"
+      ? "Memory node"
+      : node.kind === "project"
+        ? "Project"
+        : node.kind === "folder"
+          ? "Folder / module"
+          : "File";
   return (
     <aside className="absolute top-14 right-3 bottom-3 z-20 flex w-72 flex-col overflow-hidden rounded-2xl border bg-background/95 shadow-2xl backdrop-blur">
       <div className="flex items-center justify-between border-b px-4 py-3">
