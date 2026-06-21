@@ -9,7 +9,9 @@
 /// v4: added the AST graph — `code_nodes` + `code_imports` + `code_edges` (P2).
 /// v5: `code_nodes.start_col` (getter/setter PK fix); upgrades rebuild derived
 ///     file tables so the AST-fed `symbols` column is backfilled.
-pub const SCHEMA_VERSION: i64 = 5;
+/// v6: added `brain_budget` (singleton spend ceiling/total) + `brain_budget_ledger`
+///     (P4 budgeted reflect). CANONICAL/preserved — NOT in the upgrade DROP batch.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -93,6 +95,34 @@ CREATE TABLE IF NOT EXISTS reject_signatures (
     reject_sig TEXT NOT NULL,
     PRIMARY KEY (project_id, reject_sig)
 );
+
+-- Budgeted-reflect spend state (P4). CANONICAL/preserved (human/spend state, NOT
+-- derivable from the file walk) — never listed in the upgrade DROP batch. Default-
+-- OFF: ceiling 0.0 disables reflect entirely. `brain_budget` is a GLOBAL singleton
+-- (one daemon-wide monthly ceiling), keyed by the CHECK (id=1) row.
+CREATE TABLE IF NOT EXISTS brain_budget (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    ceiling_usd     REAL NOT NULL DEFAULT 0.0,
+    spent_total_usd REAL NOT NULL DEFAULT 0.0,
+    updated_at      INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO brain_budget (id, ceiling_usd, spent_total_usd, updated_at)
+    VALUES (1, 0.0, 0.0, strftime('%s','now'));
+
+-- Append-only spend ledger (P4). A row is reserved BEFORE the network call and
+-- reconciled AFTER, so a crash mid-call leaves a 'reserved' row that the boot
+-- sweep charges at its estimate (over-counts a crash, never leaks free spend).
+CREATE TABLE IF NOT EXISTS brain_budget_ledger (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    status          TEXT NOT NULL CHECK (status IN ('reserved','spent')),
+    est_cost_usd    REAL NOT NULL,
+    actual_cost_usd REAL,            -- NULL until reconcile
+    model           TEXT NOT NULL,
+    reserved_at     INTEGER NOT NULL,
+    reconciled_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_reserved
+    ON brain_budget_ledger (status) WHERE status = 'reserved';
 
 -- AST graph (P2). `code_nodes` = tree-sitter definitions; `code_imports` = raw
 -- per-file import specifiers; `code_edges` = RESOLVED file→file import edges,

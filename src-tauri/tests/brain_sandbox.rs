@@ -14,6 +14,9 @@ use koden_lib::modules::brain::gist::synth::synthesize_intent;
 use koden_lib::modules::brain::gist::{build_gist, build_gist_auto, write_gist};
 use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
+use koden_lib::modules::brain::reflect::{
+    reflect_with_client, ReflectClient, ReflectConfig, ReflectReason, ReflectResponse,
+};
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, list_notes_readonly, list_proposals_readonly,
     SearchIndex, SqliteIndex,
@@ -582,4 +585,181 @@ fn fingerprint_is_deterministic() {
         i2.project_fingerprint(PID).unwrap(),
         "fingerprint must be identical for identical content"
     );
+}
+
+// ---------------------------------------------------------------------------
+// P4 — budgeted reflect, driven against the REAL index + a deterministic fake
+// LLM (§13.22 fake provider contract). Proves the whole pipeline (digest →
+// budget reserve → call → reconcile → map → enqueue) and every gate offline/$0.
+// ---------------------------------------------------------------------------
+
+/// Deterministic, contract-compatible fake of the Anthropic client. Counts calls
+/// so the "spends nothing → zero requests" gates are provable.
+struct FakeClient {
+    calls: std::sync::atomic::AtomicUsize,
+    resp: Result<ReflectResponse, String>,
+}
+
+impl FakeClient {
+    fn ok(json: &str, input_tokens: u64, output_tokens: u64) -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            resp: Ok(ReflectResponse { json_text: json.into(), input_tokens, output_tokens }),
+        }
+    }
+    fn failing(msg: &str) -> Self {
+        Self { calls: std::sync::atomic::AtomicUsize::new(0), resp: Err(msg.into()) }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl ReflectClient for FakeClient {
+    fn complete(&self, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<ReflectResponse, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.resp.clone()
+    }
+}
+
+/// Build a real index + project carrying one memory note (non-empty corpus).
+fn index_with_note(work: &Path, store: &Path) -> (std::path::PathBuf, SqliteIndex) {
+    write(work, ".koden-memory/auth.md", b"---\nid: auth\ntype: decision\ntitle: Auth approach\nstatus: active\n---\nbody\n");
+    write(work, "src/app.ts", b"export function startApp() {}");
+    let db = store.join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, work);
+    scan_project_memory(&idx, PID, work);
+    (db, idx)
+}
+
+const TWO_PROPOSALS: &str = r#"{"proposals":[
+  {"kind":"insight","title":"Consolidate auth notes","detail":"two notes overlap","scope":"project","confidence":"high","evidence":["a.rs"]},
+  {"kind":"stale","title":"Archive legacy decision","detail":"superseded","scope":"project","confidence":"medium"}
+]}"#;
+
+/// Gate 1: ceiling 0 (default) → Disabled, spends nothing, ZERO requests.
+#[test]
+fn reflect_disabled_makes_no_call() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    let fake = FakeClient::ok(TWO_PROPOSALS, 100, 100);
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::Disabled), "{:?}", out.reason);
+    assert_eq!(out.spent_usd, 0.0);
+    assert_eq!(fake.calls(), 0, "disabled → zero requests");
+    assert_eq!(idx.budget_state().1, 0.0, "spent unchanged");
+}
+
+/// Gate 2: ceiling below the conservative estimate → OverBudget, ZERO requests.
+#[test]
+fn reflect_overbudget_blocks_before_call() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(0.001, 1).unwrap(); // < est (~$0.01, output-dominated)
+    let fake = FakeClient::ok(TWO_PROPOSALS, 100, 100);
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::OverBudget), "{:?}", out.reason);
+    assert_eq!(fake.calls(), 0, "over-budget → zero requests");
+    assert_eq!(idx.budget_state().1, 0.0, "spent unchanged");
+}
+
+/// Gate 3 (happy path): proposals enqueued into the P1 queue; spent = ACTUAL cost;
+/// exactly one request; no orphaned reservation left behind.
+#[test]
+fn reflect_happy_path_enqueues_and_charges_actual() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    // Haiku: 1000*$1/Mtok + 200*$5/Mtok = $0.001 + $0.001 = $0.002.
+    let fake = FakeClient::ok(TWO_PROPOSALS, 1000, 200);
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::Ok), "{:?}", out.reason);
+    assert_eq!(out.proposals.len(), 2);
+    assert!((out.spent_usd - 0.002).abs() < 1e-9, "actual cost, got {}", out.spent_usd);
+    assert_eq!(fake.calls(), 1);
+    let (_, spent) = idx.budget_state();
+    assert!((spent - 0.002).abs() < 1e-9, "spent_total folds actual: {spent}");
+    let props = list_proposals_readonly(&db, Some(PID)).unwrap();
+    assert_eq!(props.iter().filter(|p| p.source == "reflect").count(), 2, "queued reflect proposals");
+    // No reservation was orphaned (clean reconcile).
+    assert_eq!(idx.sweep_orphaned_reservations(2000).unwrap(), 0, "no orphan after clean run");
+}
+
+/// Malformed model output → InvalidOutput, no proposals — but STILL charged actual
+/// (a 2xx-with-garbage may have billed tokens).
+#[test]
+fn reflect_invalid_json_fails_open_but_charges() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok("not json at all", 1000, 200);
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::InvalidOutput), "{:?}", out.reason);
+    assert_eq!(out.proposals.len(), 0);
+    assert!((out.spent_usd - 0.002).abs() < 1e-9, "still charged actual");
+    assert!((idx.budget_state().1 - 0.002).abs() < 1e-9);
+    assert_eq!(fake.calls(), 1);
+}
+
+/// A failed call charges the ESTIMATE (default-to-charging on uncertainty), and
+/// leaves no orphaned reservation.
+#[test]
+fn reflect_call_failure_charges_estimate() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::failing("connection reset");
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    match &out.reason {
+        ReflectReason::CallFailed(m) => assert!(m.contains("connection reset"), "{m}"),
+        other => panic!("expected CallFailed, got {other:?}"),
+    }
+    assert_eq!(out.proposals.len(), 0);
+    assert!(out.spent_usd > 0.0, "charged the estimate");
+    assert!((idx.budget_state().1 - out.spent_usd).abs() < 1e-9, "spent == estimate");
+    assert_eq!(fake.calls(), 1);
+    assert_eq!(idx.sweep_orphaned_reservations(2000).unwrap(), 0, "failure path reconciled the reservation");
+}
+
+/// Re-running reflect on the same corpus + same output enqueues NOTHING new
+/// (dedup by proposal signature) — but still makes the call + charges.
+#[test]
+fn reflect_dedups_on_rerun() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let json = r#"{"proposals":[{"kind":"insight","title":"Consolidate auth notes","detail":"d","scope":"project","confidence":"high"}]}"#;
+    let out1 = reflect_with_client(&idx, &FakeClient::ok(json, 100, 100), &ReflectConfig::default(), PID, None, 1000);
+    assert_eq!(out1.proposals.len(), 1);
+    let fake2 = FakeClient::ok(json, 100, 100);
+    let out2 = reflect_with_client(&idx, &fake2, &ReflectConfig::default(), PID, None, 2000);
+    assert_eq!(out2.proposals.len(), 0, "duplicate signature not re-enqueued");
+    assert!(matches!(out2.reason, ReflectReason::Ok));
+    assert_eq!(fake2.calls(), 1, "still calls the model");
+    let props = list_proposals_readonly(&db, Some(PID)).unwrap();
+    assert_eq!(props.iter().filter(|p| p.source == "reflect").count(), 1, "queue holds one");
+}
+
+/// No notes → EmptyCorpus, no call, no spend (don't burn a token on nothing).
+#[test]
+fn reflect_empty_corpus_is_noop() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/app.ts", b"export function f() {}");
+    let idx = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+    index_dir(&idx, PID, root); // code, but no .koden-memory notes
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(TWO_PROPOSALS, 100, 100);
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::EmptyCorpus), "{:?}", out.reason);
+    assert_eq!(fake.calls(), 0, "empty corpus → zero requests");
+    assert_eq!(idx.budget_state().1, 0.0);
 }

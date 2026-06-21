@@ -112,6 +112,22 @@ fn entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(service, account).map_err(|e| e.to_string())
 }
 
+/// Synchronous, app-side secret read for off-thread callers (e.g. the Brain
+/// reflect worker, which can't `await` the `secrets_get` command). Mirrors
+/// `secrets_get`'s platform split. Returns `None` on any miss/backend error —
+/// fail-open, and never logs the value or the error (secret-safety).
+pub(crate) fn read_secret(app: &AppHandle, service: &str, account: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        read_store(app).ok()?.get(&key(service, account)).cloned()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        entry(service, account).ok()?.get_password().ok()
+    }
+}
+
 #[tauri::command]
 pub async fn secrets_get(
     app: AppHandle,

@@ -14,6 +14,7 @@ pub mod freshness;
 pub mod gist;
 pub mod memory;
 pub mod rank;
+pub mod reflect;
 pub mod registry;
 pub mod secrets;
 pub mod store;

@@ -32,7 +32,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     // On any upgrade, drop the DERIVED (file-backed) tables so the DDL recreates
     // them at the current schema and the next warm pass rebuilds them — backfills
     // new columns + the AST-fed `symbols` column. Canonical data (notes,
-    // proposals, reject_signatures) is preserved (preserve-over-destroy).
+    // proposals, reject_signatures, brain_budget, brain_budget_ledger) is preserved
+    // (preserve-over-destroy) PURELY by being absent from this DROP batch — this is
+    // a drop-list, not a keep-list, so NEVER add a canonical table here.
     if matches!(current, Some(v) if v < SCHEMA_VERSION) {
         conn.execute_batch(
             "DROP TABLE IF EXISTS code_fts;
@@ -91,6 +93,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "upgrade clears derived file rows");
+    }
+
+    #[test]
+    fn upgrade_preserves_budget_state() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        migrate(&conn).unwrap();
+        // Simulate human-set spend state on an older store, then force an upgrade.
+        conn.execute("UPDATE brain_budget SET ceiling_usd=1.0, spent_total_usd=0.42 WHERE id=1", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO brain_budget_ledger(status,est_cost_usd,actual_cost_usd,model,reserved_at,reconciled_at)
+             VALUES('spent',0.002,0.002,'m',1,2)",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE brain_meta SET value='5' WHERE key='schema_version'", [])
+            .unwrap();
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+        // Budget tables are CANONICAL: the upgrade must NOT drop them.
+        let (ceiling, spent): (f64, f64) = conn
+            .query_row("SELECT ceiling_usd, spent_total_usd FROM brain_budget WHERE id=1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(ceiling, 1.0, "ceiling survives upgrade");
+        assert_eq!(spent, 0.42, "spent_total survives upgrade");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM brain_budget_ledger", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "ledger rows survive upgrade");
     }
 
     #[test]

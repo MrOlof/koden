@@ -49,6 +49,29 @@ impl SqliteIndex {
         Ok(Self { conn })
     }
 
+    /// The single writer connection, for same-crate writers that need raw access
+    /// (e.g. the P4 budget ledger runs its check/reserve/reconcile txns over it).
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Set the reflect spend ceiling (USD; 0.0 disables). Writer-side (P4).
+    pub fn set_budget_ceiling(&self, ceiling_usd: f64, now: i64) -> Result<(), String> {
+        crate::modules::brain::reflect::budget::set_ceiling(&self.conn, ceiling_usd, now)
+    }
+
+    /// Current reflect budget as `(ceiling_usd, spent_total_usd)` (P4).
+    pub fn budget_state(&self) -> (f64, f64) {
+        use crate::modules::brain::reflect::budget;
+        (budget::ceiling(&self.conn), budget::spent_total(&self.conn))
+    }
+
+    /// Boot sweep: charge any reservation orphaned by a mid-call crash at its
+    /// estimate, so a crashed reflect over-counts rather than leaking free spend (P4).
+    pub fn sweep_orphaned_reservations(&self, now: i64) -> Result<usize, String> {
+        crate::modules::brain::reflect::budget::sweep_orphaned_reservations(&self.conn, now)
+    }
+
     /// Index (insert or update) one file's pre-tokenized streams. No-ops when the
     /// content hash is unchanged. Atomic per file.
     pub fn index_file(
