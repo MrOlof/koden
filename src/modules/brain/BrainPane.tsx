@@ -419,7 +419,7 @@ function SearchView({
               }
             }}
             placeholder="Search code & notes…"
-            className="h-7 pr-7 pl-6.5 text-xs"
+            className="h-8 pr-7 pl-6.5 text-sm"
           />
           {query ? (
             <button
@@ -457,7 +457,7 @@ function SearchView({
                   }
                 }}
                 className={cn(
-                  "flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs transition-colors",
+                  "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm transition-colors",
                   index === selectedIndex
                     ? "bg-accent text-foreground"
                     : "text-foreground/80 hover:bg-accent/50",
@@ -465,7 +465,7 @@ function SearchView({
                 title={`${hit.path} — click to copy path`}
               >
                 <span className="truncate">{basename(hit.path)}</span>
-                <span className="ml-auto truncate text-[10px] text-muted-foreground">{hit.path}</span>
+                <span className="ml-auto truncate text-xs text-muted-foreground">{hit.path}</span>
               </button>
             ))
           )}
