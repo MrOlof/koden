@@ -894,3 +894,60 @@ the worker's Curate event (a second paid pass after stale-ADR curation). Tests: 
 sandbox (flags the stale note + charges; no-pairs noop with zero calls; false verdict →
 no proposal but still charged).
 Green: clippy `-D warnings` clean · contradiction unit 3 · brain_sandbox 38.
+
+### V2.5 — real semantic stack: HNSW store + fastembed embedder (default-OFF) ✅
+P5 shipped only the *shape* (Embedder/VectorStore traits + embedderId header). V2.5 makes
+the stack REAL behind the two default-off cargo features, so the seams stop rotting while
+the shipped binary stays byte-for-byte unchanged (proven ONNX-free below).
+- `search/hnsw_store.rs` (feature `semantic`, **pure Rust, offline-testable**): `HnswStore`
+  impl of `VectorStore` via `hnsw_rs` 0.3.4 `DistCosine`. Append-only insert (the brain
+  rebuilds the index from persisted embeddings, not in place); `query` over-fetches `k*2`
+  and de-dups by DocId keeping the nearest; cosine distance → `1 - distance` higher-better
+  score. 3 offline tests (nearest-first, dedup-reinsert, empty/mismatch).
+- `search/fastembed_embedder.rs` (feature `semantic-embed`): `FastembedEmbedder` impl of
+  `Embedder` via fastembed 5.17.2 = bge-small-en-v1.5 (384-dim). `embed` takes `&mut self`,
+  so the model is `Mutex`-wrapped to satisfy `Embedder: Send+Sync`. Real embed run needs a
+  model download (network) → its smoke test is `#[ignore]`d/online.
+- Cargo: fastembed `default-features=false` + `ort-load-dynamic` + drop `image-models`.
+  ONNX Runtime is dlopen'd from `onnxruntime.dll` at first use, NOT static-linked — keeps
+  ONNX + GPU EPs out of the binary, skips the image/ravif/exr subtree, and dodges static
+  DirectML linking (needs `dxcore.lib`, absent from this host's Windows SDK 10.0.18362).
+  Runtime cost: `onnxruntime.dll` must be discoverable (`ORT_DYLIB_PATH`) — the online/GUI
+  embed step. The vector leg is still NOT wired into RRF fusion
+  (`search_index_has_no_vector_leg_in_v1` stays green): this lands the ENGINE, not the leg.
+Green: `cargo build --features semantic-embed` links clean · clippy clean · semantic
+offline tests 8 · default brain lib 112 · sandbox 38 · bench 4 + 1 ignored.
+
+### V2.4 + V2.5 — adversarial verification fan-out + hardening ✅
+Four parallel verifiers (a DIFFERENT agent than the author per §13), one lens each: HNSW
+correctness, embedder + feature-gating, contradiction safety, and an independent build/test
+reproducer. Headline: the reproducer confirmed all six build/test claims reproduce exactly
+and the default binary is **provably ONNX-free** (`cargo tree -i ort|fastembed|hnsw_rs` →
+"did not match any packages" on default features; they enter only under `semantic-embed`).
+Real defects found + fixed (commit `9485884`):
+- **HIGH — embedder could crash the terminal**: under ort load-dynamic the first FFI call
+  in `try_new` PANICS via `.expect("Failed to load ONNX Runtime dylib")` on a missing
+  onnxruntime.dll — uncatchable by `?`/`catch_unwind`, and `panic="abort"` (release) makes
+  it a process abort. Violates fail-open. Fixed: probe the dylib first via `ort::init_from`
+  (Result-returning load that caches the handle so `try_new` reuses it). Added `ort` as a
+  direct exact-pinned optional dep only to reach `init_from`.
+- **MEDIUM — contradiction could flag the CORRECT note**: when the LLM omitted `stale_id`
+  the old code guessed the lexicographically-greater id (`NoteSummary` drops `created`, so
+  it can't pick the older note). Fixed: FAIL CLOSED — no valid in-pair `stale_id` ⇒ no
+  proposal. Never guesses which note to archive.
+- **LOW**: hoisted contradiction's O(n²) anchor-set rebuild; rank candidate pairs by
+  shared-anchor count (deprioritizes hub-anchor spurious pairs) before the MAX_PAIRS cap +
+  `log::warn` when the cap drops pairs (no-silent-caps rule); embedder boundary-checks
+  `embed()` width == DIMS; corrected a FALSE hnsw_store doc claim (hnsw_rs seeds its layer
+  RNG from OS entropy → NOT run-to-run deterministic → cannot back a cache-stable gist key
+  as-is); documented the real score range `[-1,1]` (cosine), not `[0,1]`.
+Verifiers CONFIRMED (no change): Send+Sync sound, no project-side `unsafe`; no secret-leak
+surface (contradiction digest is metadata-only + double-redacted; embedder errors don't echo
+text); budget hard-gated; parsing fail-closed; no auto-mutation (proposals are pending rows,
+apply never edits notes).
+Green after hardening: default build + 112 brain lib + clippy clean; semantic-embed build
+links clean + clippy clean; semantic search 8; contradiction 3; sandbox 38.
+
+**Autonomous scope complete (V2.4 contradiction + V2.5 HNSW/embedder, verified + hardened).**
+Remaining is GUI/online-only: the real embed run (model download), and folding the vector
+leg into RRF + a determinism-safe gist key — handed off for GUI testing + hardening.
