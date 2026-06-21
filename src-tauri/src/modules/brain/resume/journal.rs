@@ -67,7 +67,13 @@ fn compact_if_needed(path: &Path) -> Result<(), String> {
     let tmp = path.with_extension("jsonl.tmp");
     let mut body = tail.join("\n");
     body.push('\n');
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    {
+        // fsync the tmp before the atomic rename so a crash can't leave a renamed-
+        // but-empty journal (resume is best-effort, but cheap to make durable).
+        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         e.to_string()

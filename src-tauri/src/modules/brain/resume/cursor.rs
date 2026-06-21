@@ -78,6 +78,11 @@ fn fold_journal(path: &Path, content: &str) -> Option<RecoveredPane> {
 
 /// Boot GC: delete any journal older than `ttl_days` (by mtime). `now_ms` is passed
 /// in (no wall-clock) for determinism. Returns how many were removed.
+///
+/// TTL-only by design: the spec's "sessionKey no longer maps to a known project"
+/// clause is descoped — the key is a one-way blake3 hash (no reverse map), and the
+/// recovered card already carries `project` so the UI can suppress orphans. Adding a
+/// project sidecar for filename-level orphan GC is a documented refinement.
 pub fn gc_resume_dir(resume_dir: &Path, now_ms: i64, ttl_days: i64) -> usize {
     let Ok(entries) = std::fs::read_dir(resume_dir) else {
         return 0;

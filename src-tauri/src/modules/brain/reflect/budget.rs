@@ -58,10 +58,26 @@ pub fn check_and_reserve(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| ReflectReason::CallFailed(e.to_string()))?;
+    // Outstanding committed reservations (a failed/in-flight reconcile leaves a
+    // 'reserved' row) count against the ceiling, so a write fault that strands a
+    // reconcile can't let a LATER reflect in the same session spend past the cap —
+    // the over-count is reconciled away on the next boot sweep.
+    let reserved: f64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(est_cost_usd),0.0) FROM brain_budget_ledger WHERE status='reserved'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+    // Fail SAFE (toward NOT spending) on any non-finite value — a NaN comparison is
+    // always false, which would otherwise defeat both gates below.
+    if !ceiling_usd.is_finite() || !spent.is_finite() || !reserved.is_finite() || !est_cost_usd.is_finite() {
+        return Err(ReflectReason::Disabled);
+    }
     if ceiling_usd <= 0.0 {
         return Err(ReflectReason::Disabled);
     }
-    if spent + est_cost_usd > ceiling_usd {
+    if spent + reserved + est_cost_usd > ceiling_usd {
         return Err(ReflectReason::OverBudget);
     }
     tx.execute(
@@ -169,6 +185,32 @@ mod tests {
         // a second reconcile is a no-op (row no longer 'reserved').
         reconcile(&conn, rid, 0.004, 4).unwrap();
         assert!((spent_total(&conn) - 0.004).abs() < 1e-9, "no double-count");
+    }
+
+    #[test]
+    fn outstanding_reservation_counts_against_ceiling() {
+        // A stranded reservation (failed reconcile) must block a later reflect from
+        // spending past the ceiling until the boot sweep folds it.
+        let conn = db();
+        set_ceiling(&conn, 0.03, 1).unwrap();
+        let _r1 = check_and_reserve(&conn, "m", 0.02, 2).unwrap(); // reserved, NOT reconciled
+        // spent_total is still 0, but 0.02 is outstanding → only 0.01 headroom left.
+        let r2 = check_and_reserve(&conn, "m", 0.02, 3);
+        assert!(matches!(r2, Err(ReflectReason::OverBudget)), "outstanding reservation enforced");
+        // a small one that fits the remaining headroom still succeeds.
+        assert!(check_and_reserve(&conn, "m", 0.005, 4).is_ok());
+    }
+
+    #[test]
+    fn non_finite_ceiling_fails_safe_no_spend() {
+        let conn = db();
+        // A non-finite ceiling (corruption / out-of-band write) would defeat ordered
+        // comparisons (every compare with NaN/Inf is false). SQLite nullifies NaN,
+        // so use +Inf; either way the invariant is: NO reservation is created.
+        conn.execute("UPDATE brain_budget SET ceiling_usd=?1 WHERE id=1", [f64::INFINITY]).unwrap();
+        assert!(check_and_reserve(&conn, "m", 0.001, 1).is_err(), "corrupt ceiling must not reserve");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM brain_budget_ledger", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "no spend on a corrupt ceiling");
     }
 
     #[test]

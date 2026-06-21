@@ -469,3 +469,93 @@ agent launch picks up the gist (the one piece that needs a GUI, not a test harne
 
 **P3 closed (backend + gate + launcher wiring + adversarial pass + hardening).**
 Next: P4 (budgeted reflect + crash-resume).
+
+## Phase 4 — Budgeted LLM reflect + crash-resume
+
+Recon first: a 6-agent read-only fan-out grounded the build in exact source facts
+(the Conductr reflect port — verbatim constants/prompt/schema; the brain store
+migration-safety; the secrets+reqwest pattern; the resume signal substrate; the
+P4-a pane-uuid plan; a Tier-2 capture-feasibility verdict). Then built the
+deterministic, $0-testable core in three green milestones, ran an 8-reviewer
+adversarial pass, and hardened.
+
+### P4.1 — budgeted reflect (the only token-spending path) ✅
+schema v6: `brain_budget` (global singleton) + `brain_budget_ledger`, CANONICAL/
+preserved (absent from the upgrade DROP batch; + `upgrade_preserves_budget_state`).
+`reflect/budget.rs` — crash-safe `check_and_reserve → (call) → reconcile`: a crash
+between reserve and reconcile leaves a committed `reserved` row that the boot sweep
+charges at its estimate (over-counts a crash, never leaks free spend); `spent_total`
+monotonic, never recomputed. `reflect/schema.rs` — faithful Conductr port (verbatim
+60/200/8 + SYSTEM_PROMPT with `(cap: 8)` + U+2014; loose-object tolerance; over-cap →
+InvalidOutput as a Koden hardening). `reflect/digest.rs` — bounded, **metadata-only**
+digest (index fields, never raw bodies). `reflect/llm.rs` — real Anthropic
+`/v1/messages` client behind the `ReflectClient` seam (reqwest+rustls, block_on,
+x-api-key, thinking:adaptive, output_config json_schema; status-only errors).
+`reflect/proposal.rs` + `mod.rs` — kind→action map + `reflect_with_client` (offline/$0
+fake-LLM testable core) + `reflect_once` (real wrapper). 7 sandbox tests drive the
+full pipeline against the real index + a fake LLM (disabled/over-budget → zero
+requests; happy path enqueues + charges actual; invalid JSON fails open but charges;
+call-failure charges the estimate; dedup; empty-corpus noop).
+
+### P4.1b — worker wiring + command surface + boot sweep ✅
+`BrainEvent::Reflect`/`SetBudget` on the single-writer worker; boot
+`sweep_orphaned_reservations`; commands `brain_reflect`/`brain_set_budget`/
+`brain_budget_status` + bindings.
+
+### P4.2 — crash-resume (Tier-1 + Tier-2 plan) ✅
+`resume/`: `SessionKey = blake3(cwd ‖ agent ‖ pane_uuid)` (excludes the ephemeral
+pty id); append-only per-pane JSONL journal (fail-open, size-gated tail compaction);
+tolerant boot `recover_all` (drop trailing partial, guarded parse, skip cleanly-
+exited) + TTL GC; `resume_command` → Tier-2 `--resume <id>` ONLY for `claude` with a
+captured id, else Tier-1. Worker journals every signal on the writer thread; boot
+recovery before the agent listener. 11 unit + 1 chain test.
+
+### P4.3 — adversarial verification + hardening ✅
+8 reviewers (waved 4-at-a-time) + synthesis, ~1.28M tokens, across the money path,
+fail-open, secret-safety, faithfulness, resume correctness, schema/migration,
+concurrency, and provider facts. Verdict: core sound; 4 genuine must-fixes (the
+panel over-counted HIGHs via duplication, which synthesis corrected). All fixed:
+- **SECRET LEAK (HIGH ×2)**: note `anchors` reached the cloud unredacted, and doctor
+  finding `detail` strings interpolated raw frontmatter (`superseded_by` etc.). Fix:
+  redact anchors at scan (the table is indexing, like titles) AND a belt-and-suspenders
+  `secrets::redact` over the ENTIRE assembled message immediately before the cloud
+  send — so no single un-redacted field can leak. + `reflect_redacts_secrets_before_cloud`
+  (plants secrets in an anchor + superseded_by, asserts neither reaches the fake client).
+- **MONEY UNDER-CHARGE (HIGH)**: a 2xx with 0/0 reported usage charged $0 (Anthropic
+  still bills input). Fix: floor an implausible 0/0 success to the conservative
+  estimate. + `reflect_zero_usage_charges_estimate`.
+- **CEILING NOT ENFORCED ACROSS A FAILED RECONCILE (HIGH)**: the pre-flight gate read
+  only `spent_total`. Fix: `check_and_reserve` now also counts outstanding committed
+  `reserved` rows against the ceiling, and reconcile failures are logged (not
+  swallowed); a stranded reservation can't let a later reflect overspend, and the
+  boot sweep folds it. + `outstanding_reservation_counts_against_ceiling`.
+- **OUTPUT SCHEMA (MEDIUM)**: `additionalProperties: true` would 400 structured
+  outputs. Fix: strict `false` + enumerated props (+ a schema-strictness assertion).
+- **TIMESTAMP UNIT (MEDIUM)**: the budget DDL seeded `updated_at` in seconds while all
+  Rust writes use ms. Fix: seed in ms; documented the columns as epoch-ms.
+- **RESUME SESSIONKEY SPLIT (was filed HIGH)**: `agent` rides only the `started`
+  signal, so non-started signals hashed a different key (exited never reached the
+  started journal → stale card forever; Tier-2 never fired). Fix: remember the agent
+  on the session and reuse it for every signal (like `remembered_cwd`).
+- Cheap hardening: NaN/Inf-safe budget gate (fail-safe to no-spend); migration wrapped
+  in ONE transaction (atomic "advanced to v6"); `let-else` over a latent `expect()` in
+  reflect_once; fsync-before-rename on journal compaction; honest docs (metadata-only
+  digest, kind→action divergence rationale, gist-key rotation on schema bump,
+  TTL-only GC).
+Green: clippy `-D warnings` clean · `cargo test` 277 passed / 1 pre-existing
+(`authorize_spawn_cwd_blocks_symlink_escape`, untouched) · brain_sandbox 26 · tsc +
+biome lint clean.
+
+⏭ P4 deferred — the GUI/external-integration half (explicitly backend-only; needs the
+running app, not a test harness): **P4-a** the persisted frontend pane-uuid +
+`KODEN_PANE_UUID` env (must live on the serialized leaf node; restart-survival is a
+live-verify item — until it lands, resume keys on the spec-sanctioned `cwd+agent`
+fallback); the **recovery-card UI** + `[Resume]`/`[Dismiss]` + journal-delete-on-
+dismiss (`brain_recovered_panes`/`resume_command` are built + tested but not yet
+rendered/wrapped); **Tier-2 live session-id capture** (recon verdict: achievable via a
+Claude status-hook field on the agent bus + bus unification B5); the **wizard budget
+step**; and the **one real-key smoke test**. Resume acceptance gates 4–5 are therefore
+backend-only for now.
+
+**P4 deterministic core closed (budget + reflect + resume + adversarial pass +
+hardening).** Next: P5 (deferred semantic seams) / the V2 advanced track.

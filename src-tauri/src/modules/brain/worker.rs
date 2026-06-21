@@ -501,25 +501,30 @@ fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>)
     let Some(brain) = app.try_state::<BrainState>() else {
         return;
     };
-    // Live cwd (started/working/attention/finished), falling back to the cwd we
-    // remembered at 'started' (needed for 'exited', when the pty session is gone).
-    let live_cwd = app.try_state::<PtyState>().and_then(|pty| pty.session_cwd(pty_id));
-    let remembered_cwd = brain
+    // The agent name + cwd arrive only on the 'started' signal (agent_detect sets
+    // agent=None on working/attention/finished/exited), so remember both on the
+    // session and reuse them for every later signal — otherwise each kind would
+    // hash a DIFFERENT SessionKey and 'exited' would never reach the 'started'
+    // journal (stale recovery card forever; Tier-2 never fires).
+    let (remembered_cwd, remembered_agent) = brain
         .sessions
         .read()
         .ok()
-        .and_then(|s| s.get(&pty_id).and_then(|x| x.cwd.clone()));
+        .and_then(|s| s.get(&pty_id).map(|x| (x.cwd.clone(), x.agent.clone())))
+        .unwrap_or((None, None));
+    let live_cwd = app.try_state::<PtyState>().and_then(|pty| pty.session_cwd(pty_id));
     let cwd = live_cwd.or(remembered_cwd);
+    let effective_agent = agent.clone().or(remembered_agent);
     let project = cwd.as_deref().and_then(|c| brain.registry.resolve(c)).map(|p| p.id);
 
     // Journal the lifecycle event (fail-open). pane_uuid is None until P4-a wires a
     // restart-stable uuid; the key falls back to cwd+agent (spec-sanctioned).
     if let (Some(cwd_s), Some(rdir)) = (cwd.as_ref(), resume_dir(app)) {
-        let key = resume::SessionKey::derive(cwd_s, agent.as_deref().unwrap_or(""), None);
+        let key = resume::SessionKey::derive(cwd_s, effective_agent.as_deref().unwrap_or(""), None);
         let rec = resume::ResumeRecord {
             ts: now_epoch_ms(),
             kind: kind.to_string(),
-            agent: agent.clone(),
+            agent: effective_agent.clone(),
             cwd: cwd_s.clone(),
             project: project.clone(),
             claude_session_id: None,
@@ -532,7 +537,7 @@ fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>)
     match kind {
         "started" => {
             if let Ok(mut sessions) = brain.sessions.write() {
-                sessions.insert(pty_id, LiveSession { project, agent, cwd });
+                sessions.insert(pty_id, LiveSession { project, agent: effective_agent, cwd });
             }
         }
         "exited" => {

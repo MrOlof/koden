@@ -29,6 +29,17 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
         .ok()
         .and_then(|s| s.parse().ok());
 
+    if matches!(current, Some(v) if v == SCHEMA_VERSION) {
+        // Already current: just ensure the (idempotent) DDL is present and return.
+        conn.execute_batch(DDL)?;
+        return Ok(SCHEMA_VERSION);
+    }
+
+    // Fresh or upgrade: do the whole migration in ONE transaction so "advanced to
+    // vN" is a single atomic, durable fact — a crash mid-migration rolls back
+    // cleanly and re-runs, never leaving a half-dropped schema or an out-of-step
+    // version row. (PRAGMAs above must stay OUTSIDE the txn.)
+    let tx = conn.unchecked_transaction()?;
     // On any upgrade, drop the DERIVED (file-backed) tables so the DDL recreates
     // them at the current schema and the next warm pass rebuilds them — backfills
     // new columns + the AST-fed `symbols` column. Canonical data (notes,
@@ -36,7 +47,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     // (preserve-over-destroy) PURELY by being absent from this DROP batch — this is
     // a drop-list, not a keep-list, so NEVER add a canonical table here.
     if matches!(current, Some(v) if v < SCHEMA_VERSION) {
-        conn.execute_batch(
+        tx.execute_batch(
             "DROP TABLE IF EXISTS code_fts;
              DROP TABLE IF EXISTS code_nodes;
              DROP TABLE IF EXISTS code_imports;
@@ -44,22 +55,14 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
              DELETE FROM files;",
         )?;
     }
-
-    conn.execute_batch(DDL)?;
-
-    match current {
-        Some(v) if v == SCHEMA_VERSION => Ok(v),
-        // None (fresh) or older: set/advance to current. Future versioned
-        // migration steps slot in here, each guarded by `v < N`.
-        _ => {
-            conn.execute(
-                "INSERT INTO brain_meta(key,value) VALUES('schema_version', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [SCHEMA_VERSION.to_string()],
-            )?;
-            Ok(SCHEMA_VERSION)
-        }
-    }
+    tx.execute_batch(DDL)?;
+    tx.execute(
+        "INSERT INTO brain_meta(key,value) VALUES('schema_version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(SCHEMA_VERSION)
 }
 
 #[cfg(test)]

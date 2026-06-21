@@ -7,8 +7,12 @@ use crate::modules::brain::memory::proposal::{proposal_signature, MemoryProposal
 
 use super::schema::{Level, ProposalItem, ProposalKind, Scope};
 
-/// Reflect's kind → the proposal apply-op. `stale` archives (preserve-biased),
-/// `conflict` updates, `insight`/`should_remember` create.
+/// Reflect's kind → the proposal apply-op. DELIBERATE divergence from Conductr's
+/// mapToProposals (`reflect-llm.ts:148-156`, which maps conflict→supersede,
+/// stale→update): Koden has no `manual` apply-op and is preserve-biased, so `stale`
+/// → Archive (the preserve-biased op, not a content rewrite) and `conflict` →
+/// Update (flag the conflict for human edit, not an automatic supersede). All
+/// reflect proposals are human-gated regardless, so the apply-op only labels intent.
 fn action_for(kind: ProposalKind) -> ProposalAction {
     match kind {
         ProposalKind::Insight | ProposalKind::ShouldRemember => ProposalAction::Create,

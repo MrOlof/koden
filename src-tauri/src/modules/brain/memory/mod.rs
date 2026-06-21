@@ -177,8 +177,12 @@ pub fn scan_project_memory(index: &SqliteIndex, project_id: &str, root: &Path) -
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
             let mut note = parse(&raw, stem);
             // Secrets gate: the notes table is a form of indexing — redact the
-            // user-controlled title before it is stored/shown (CONCEPT §7.1).
+            // user-controlled free-text (title + anchors) before it is stored/shown
+            // or fed to the reflect digest (CONCEPT §7.1). Redacting a normal path
+            // anchor is a no-op; only a secret-shaped anchor changes (and is then
+            // correctly flagged broken by the doctor).
             note.title = secrets::redact(&note.title).0;
+            note.anchors = note.anchors.iter().map(|a| secrets::redact(a).0).collect();
             let hash = crate::modules::brain::freshness::hash::hash_bytes(raw.as_bytes());
             let rel = format!(
                 "{MEMORY_DIR}/{}",

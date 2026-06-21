@@ -45,33 +45,69 @@ fn build_client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Minimal JSON Schema for `output_config.format` — `{proposals:[{...}]}`. Extra
-/// keys are tolerated (loose), matching the serde parse side.
+/// JSON Schema for `output_config.format` — `{proposals:[{...}]}`. Structured
+/// outputs REQUIRE `additionalProperties: false` on every object (a non-false
+/// value 400s at schema-compile), so the wire schema is strict and enumerates
+/// every property the model may emit. Forward-compat tolerance lives on the serde
+/// PARSE side (it ignores unknown keys), not here.
 fn output_schema() -> serde_json::Value {
+    let level = json!({"type": "string", "enum": ["low", "medium", "high"]});
     json!({
         "type": "object",
-        "additionalProperties": true,
+        "additionalProperties": false,
         "required": ["proposals"],
         "properties": {
             "proposals": {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "additionalProperties": true,
+                    "additionalProperties": false,
                     "required": ["kind", "title", "detail", "scope", "confidence"],
                     "properties": {
                         "kind": {"type": "string", "enum": ["insight", "should_remember", "stale", "conflict"]},
                         "title": {"type": "string"},
                         "detail": {"type": "string"},
                         "scope": {"type": "string", "enum": ["global", "project"]},
-                        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                        "confidence": level,
                         "project": {"type": "string"},
-                        "evidence": {"type": "array", "items": {"type": "string"}}
+                        "evidence": {"type": "array", "items": {"type": "string"}},
+                        "usefulness": level,
+                        "risk": level,
+                        "evidenceQuality": level
                     }
                 }
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Structured outputs reject any object whose additionalProperties != false.
+    #[test]
+    fn output_schema_objects_are_strict() {
+        fn assert_strict(v: &serde_json::Value) {
+            if let Some(obj) = v.as_object() {
+                if obj.get("type").and_then(|t| t.as_str()) == Some("object") {
+                    assert_eq!(
+                        obj.get("additionalProperties"),
+                        Some(&json!(false)),
+                        "every schema object must set additionalProperties:false"
+                    );
+                }
+                for child in obj.values() {
+                    assert_strict(child);
+                }
+            } else if let Some(arr) = v.as_array() {
+                for child in arr {
+                    assert_strict(child);
+                }
+            }
+        }
+        assert_strict(&output_schema());
+    }
 }
 
 #[derive(serde::Deserialize)]

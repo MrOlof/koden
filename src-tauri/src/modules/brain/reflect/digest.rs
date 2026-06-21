@@ -2,10 +2,17 @@
 //! `buildFindingsSummary` + `truncate` (`reflect-llm.ts:194-236,284-287`), adapted
 //! to Koden's `NoteSummary` + doctor `Finding` types.
 //!
-//! Secret-safety ([§7.1] hard gate): the digest draws ONLY from the index —
-//! note titles are redacted at scan, types/status/anchors are metadata. It NEVER
-//! re-reads raw note bodies, which would bypass the redaction gate before a cloud
-//! send. (A redacted-body digest is a documented refinement.)
+//! Koden DEVIATION (by design): the per-note body proxy is index METADATA
+//! (type/status/anchors), not the raw note text, so the model never sees raw note
+//! bodies and the `MAX_NOTE_CHARS` truncate bounds that metadata line (not note
+//! content). Digesting a *redacted* body excerpt — making the 200-char cap
+//! load-bearing — is a documented refinement.
+//!
+//! Secret-safety ([§7.1] hard gate) — defense in depth, NOT relied on here alone:
+//! note titles + anchors are redacted at scan, and `reflect_with_client` runs the
+//! ENTIRE assembled message through `secrets::redact` immediately before the cloud
+//! send (so even a finding `detail` interpolating raw frontmatter can't leak). Raw
+//! note bodies are never sourced.
 
 use crate::modules::brain::memory::doctor::Finding;
 use crate::modules::brain::memory::NoteSummary;

@@ -601,6 +601,7 @@ fn fingerprint_is_deterministic() {
 struct FakeClient {
     calls: std::sync::atomic::AtomicUsize,
     resp: Result<ReflectResponse, String>,
+    seen_user: std::sync::Mutex<String>,
 }
 
 impl FakeClient {
@@ -608,19 +609,29 @@ impl FakeClient {
         Self {
             calls: std::sync::atomic::AtomicUsize::new(0),
             resp: Ok(ReflectResponse { json_text: json.into(), input_tokens, output_tokens }),
+            seen_user: std::sync::Mutex::new(String::new()),
         }
     }
     fn failing(msg: &str) -> Self {
-        Self { calls: std::sync::atomic::AtomicUsize::new(0), resp: Err(msg.into()) }
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            resp: Err(msg.into()),
+            seen_user: std::sync::Mutex::new(String::new()),
+        }
     }
     fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
+    /// The exact user message that reached the client (post redact-before-send).
+    fn last_user(&self) -> String {
+        self.seen_user.lock().unwrap().clone()
+    }
 }
 
 impl ReflectClient for FakeClient {
-    fn complete(&self, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<ReflectResponse, String> {
+    fn complete(&self, _m: &str, _s: &str, user: &str, _t: u32) -> Result<ReflectResponse, String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *self.seen_user.lock().unwrap() = user.to_string();
         self.resp.clone()
     }
 }
@@ -787,6 +798,57 @@ fn resume_journal_recovers_and_plans_tier2() {
     }
     // A fresh journal is not GC'd.
     assert_eq!(gc_resume_dir(rdir, 0, 7), 0);
+}
+
+/// A 2xx with implausible 0/0 reported usage must NOT charge $0 (Anthropic still
+/// bills input) — it floors to the conservative estimate (M3 hardening).
+#[test]
+fn reflect_zero_usage_charges_estimate() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::ok(r#"{"proposals":[]}"#, 0, 0); // garbled usage
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::Ok), "{:?}", out.reason);
+    assert!(out.spent_usd > 0.0, "0/0 usage must charge the estimate, not $0");
+    let (_, spent) = idx.budget_state();
+    assert!((spent - out.spent_usd).abs() < 1e-9 && spent > 0.0, "spent folds the floored estimate: {spent}");
+}
+
+/// SECRET GATE (M1+M2): a secret planted in a note anchor (redacted at scan) AND in
+/// superseded_by (which the doctor interpolates into a finding detail) must NOT
+/// reach the cloud — the assembled message is redacted before the client sees it.
+#[test]
+fn reflect_redacts_secrets_before_cloud() {
+    const SECRET: &str = "sk-proj-ABCD1234EFGH5678IJKL9012MNOP3456QRST";
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    // anchor secret (→ digest line) + superseded_by secret (→ doctor finding detail).
+    write(
+        root,
+        ".koden-memory/leaky.md",
+        format!(
+            "---\nid: leaky\ntype: decision\ntitle: clean title\nsuperseded_by: {SECRET}\nanchors:\n  - src/{SECRET}.rs\n---\nbody\n"
+        )
+        .as_bytes(),
+    );
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+
+    let fake = FakeClient::ok(r#"{"proposals":[]}"#, 100, 100);
+    let _ = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    let sent = fake.last_user();
+    assert_eq!(fake.calls(), 1);
+    assert!(!sent.contains(SECRET), "secret reached the cloud-bound message: {sent}");
+    assert!(sent.contains("REDACTED"), "expected a redaction marker in: {sent}");
+    // and the stored note (UI/table surface) also has the anchor redacted at scan.
+    let notes = list_notes_readonly(&db, Some(PID)).unwrap();
+    assert!(notes[0].anchors.iter().all(|a| !a.contains(SECRET)), "anchor secret in table: {:?}", notes[0].anchors);
 }
 
 /// No notes → EmptyCorpus, no call, no spend (don't burn a token on nothing).

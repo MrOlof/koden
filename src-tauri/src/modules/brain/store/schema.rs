@@ -11,6 +11,10 @@
 ///     file tables so the AST-fed `symbols` column is backfilled.
 /// v6: added `brain_budget` (singleton spend ceiling/total) + `brain_budget_ledger`
 ///     (P4 budgeted reflect). CANONICAL/preserved — NOT in the upgrade DROP batch.
+///     NOTE: bumping SCHEMA_VERSION intentionally rotates every gist cache KEY
+///     (it is folded into the blake3 key in `gist/mod.rs`), so already-indexed
+///     projects take a one-time agent-prompt-cache miss on the first post-upgrade
+///     relaunch — correct and expected, no stored cache to invalidate.
 pub const SCHEMA_VERSION: i64 = 6;
 
 /// Idempotent base DDL (safe to run on every open).
@@ -100,6 +104,8 @@ CREATE TABLE IF NOT EXISTS reject_signatures (
 -- derivable from the file walk) — never listed in the upgrade DROP batch. Default-
 -- OFF: ceiling 0.0 disables reflect entirely. `brain_budget` is a GLOBAL singleton
 -- (one daemon-wide monthly ceiling), keyed by the CHECK (id=1) row.
+-- All `*_at` columns here are epoch MILLISECONDS (every Rust write uses
+-- now_epoch_ms()); the seed below matches that unit.
 CREATE TABLE IF NOT EXISTS brain_budget (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     ceiling_usd     REAL NOT NULL DEFAULT 0.0,
@@ -107,7 +113,7 @@ CREATE TABLE IF NOT EXISTS brain_budget (
     updated_at      INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO brain_budget (id, ceiling_usd, spent_total_usd, updated_at)
-    VALUES (1, 0.0, 0.0, strftime('%s','now'));
+    VALUES (1, 0.0, 0.0, CAST(strftime('%s','now') AS INTEGER) * 1000);
 
 -- Append-only spend ledger (P4). A row is reserved BEFORE the network call and
 -- reconciled AFTER, so a crash mid-call leaves a 'reserved' row that the boot

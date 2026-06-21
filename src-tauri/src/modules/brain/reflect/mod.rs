@@ -158,7 +158,11 @@ pub fn reflect_with_client(
     let findings = doctor::check(&records, &indexed, now_date);
 
     let system = schema::system_prompt();
-    let user = digest::build_user_message(&notes, &findings);
+    // Belt-and-suspenders secret gate (§7.1): redact the ENTIRE assembled message
+    // immediately before it can reach the cloud, so no single un-redacted field
+    // (anchors, a finding detail interpolating raw frontmatter, etc.) can leak —
+    // even though anchors/titles are already redacted at scan.
+    let user = crate::modules::brain::secrets::redact(&digest::build_user_message(&notes, &findings)).0;
     let est = estimate_cost(cfg, &system, &user);
 
     // Pre-flight reserve — the durable, atomic ceiling gate (no call if it fails).
@@ -172,21 +176,26 @@ pub fn reflect_with_client(
     let resp = match client.complete(&cfg.model, &system, &user, cfg.max_output_tokens) {
         Ok(r) => r,
         Err(e) => {
-            let _ = budget::reconcile(index.conn(), rid, est, now_ms);
+            reconcile_or_log(index, rid, est, now_ms);
             return ReflectOutcome { proposals: Vec::new(), spent_usd: est, reason: ReflectReason::CallFailed(e) };
         }
     };
 
-    // Reconcile at the ACTUAL reported cost.
+    // Charge the ACTUAL reported cost — but a 2xx with missing/garbled usage
+    // deserializes to 0/0 tokens, and Anthropic still bills the input. Floor an
+    // implausible 0/0 to the conservative estimate so a success never under-charges.
     let actual = actual_cost(&cfg.model, resp.input_tokens, resp.output_tokens);
-    let _ = budget::reconcile(index.conn(), rid, actual, now_ms);
+    let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { est } else { actual };
+    reconcile_or_log(index, rid, charge, now_ms);
 
     let items = match schema::parse_and_validate(&resp.json_text) {
         Ok(v) => v,
-        Err(_) => return ReflectOutcome { proposals: Vec::new(), spent_usd: actual, reason: ReflectReason::InvalidOutput },
+        Err(_) => return ReflectOutcome { proposals: Vec::new(), spent_usd: charge, reason: ReflectReason::InvalidOutput },
     };
 
     // Map → enqueue into the SAME P1 queue (dedup by signature; skip rejected).
+    // parse_and_validate already hard-rejects > MAX_PROPOSALS; the take is a
+    // defensive belt against a future config raising the cap above the parse limit.
     let mut enqueued = Vec::new();
     for item in items.iter().take(cfg.max_proposals) {
         let p = proposal::to_proposal(project_id, item);
@@ -198,7 +207,17 @@ pub fn reflect_with_client(
             enqueued.push(p);
         }
     }
-    ReflectOutcome { proposals: enqueued, spent_usd: actual, reason: ReflectReason::Ok }
+    ReflectOutcome { proposals: enqueued, spent_usd: charge, reason: ReflectReason::Ok }
+}
+
+/// Reconcile a reservation, logging (not swallowing) a failure. A stranded
+/// 'reserved' row is still counted against the ceiling by the next
+/// [budget::check_and_reserve] and folded by the boot sweep, so a failed reconcile
+/// can never under-enforce the ceiling — but it must be visible in the log.
+fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_usd: f64, now_ms: i64) {
+    if let Err(e) = budget::reconcile(index.conn(), reservation_id, charge_usd, now_ms) {
+        log::warn!("brain: reflect budget reconcile failed ({e}); reservation {reservation_id} left for the boot sweep");
+    }
 }
 
 /// Manual-trigger reflect (the real path). Resolves the ceiling + key, builds the
@@ -216,7 +235,12 @@ pub fn reflect_once(
     if let Some(reason) = pre_flight(ceiling_usd, key.is_some()) {
         return ReflectOutcome::noop(reason);
     }
-    let client = llm::AnthropicClient::new(key.expect("key present per pre_flight"));
+    // pre_flight returned None ⇒ key is Some; let-else over expect() so a future
+    // reorder can never panic the worker here.
+    let Some(api_key) = key else {
+        return ReflectOutcome::noop(ReflectReason::NoKey);
+    };
+    let client = llm::AnthropicClient::new(api_key);
     reflect_with_client(index, &client, &cfg, project_id, now_date, now_ms)
 }
 
