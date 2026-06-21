@@ -537,6 +537,11 @@ html *::-webkit-scrollbar {
 .koden-breathe {
   animation: koden-breathe 1.6s ease-in-out infinite;
 }
+@keyframes koden-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   :root {

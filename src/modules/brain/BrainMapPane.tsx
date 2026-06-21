@@ -23,6 +23,92 @@ const PALETTE = [
 ];
 const MEMORY_COLOR = "#f2b417";
 
+// ── language + layer classification (from file paths) ───────────────────────
+const EXT_LANG: Record<string, string> = {
+  ts: "TypeScript", tsx: "TypeScript", mts: "TypeScript", cts: "TypeScript",
+  js: "JavaScript", jsx: "JavaScript", mjs: "JavaScript", cjs: "JavaScript",
+  rs: "Rust", py: "Python", go: "Go", rb: "Ruby", java: "Java", kt: "Kotlin",
+  c: "C", h: "C", cpp: "C++", cc: "C++", hpp: "C++", cs: "C#", swift: "Swift",
+  php: "PHP", css: "CSS", scss: "CSS", sass: "CSS", html: "HTML", svelte: "Svelte",
+  vue: "Vue", json: "JSON", toml: "TOML", yaml: "YAML", yml: "YAML", md: "Markdown",
+  mdx: "Markdown", sql: "SQL", sh: "Shell", bash: "Shell", ps1: "PowerShell",
+};
+const LANG_COLOR: Record<string, string> = {
+  TypeScript: "#3178c6", JavaScript: "#f1e05a", Rust: "#dea584", Python: "#3572A5",
+  Go: "#00ADD8", Ruby: "#701516", Java: "#b07219", "C++": "#f34b7d", C: "#6b7280",
+  "C#": "#178600", Swift: "#F05138", PHP: "#4F5D95", CSS: "#563d7c", HTML: "#e34c26",
+  Svelte: "#ff3e00", Vue: "#41b883", JSON: "#8b949e", TOML: "#9c4221", YAML: "#cb171e",
+  Markdown: "#6b7280", SQL: "#e38c00", Shell: "#89e051", PowerShell: "#2b6cb0",
+  Kotlin: "#A97BFF", Other: "#9aa3b0",
+};
+const CONFIG_RE =
+  /(^|\/)(package\.json|tsconfig.*\.json|[^/]*\.config\.[mc]?[jt]s|biome\.json|[^/]*\.toml|[^/]*\.ya?ml|[^/]*\.lock|\.gitignore|\.npmrc|\.env[^/]*|dockerfile)$/i;
+
+function extOf(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? "";
+  const i = base.lastIndexOf(".");
+  return i > 0 ? base.slice(i + 1).toLowerCase() : "";
+}
+function langOf(path: string): string {
+  return EXT_LANG[extOf(path)] ?? "Other";
+}
+function isConfigPath(path: string): boolean {
+  return CONFIG_RE.test(path) || ["ini", "cfg"].includes(extOf(path));
+}
+
+type Lang = { name: string; count: number };
+type ProjectStats = {
+  projectId: string;
+  name: string;
+  color: string;
+  modules: number; // top-level directories
+  source: number;
+  config: number;
+  memory: number;
+  files: number;
+  topModules: string[];
+  languages: Lang[]; // sorted desc by count
+};
+
+function computeProjectStats(graph: BrainGraph): Map<string, ProjectStats> {
+  const out = new Map<string, ProjectStats>();
+  graph.nodes
+    .filter((n) => n.kind === "project")
+    .forEach((proj, i) => {
+      const color = PALETTE[i % PALETTE.length];
+      const files = graph.nodes.filter((n) => n.kind === "file" && n.project_id === proj.project_id);
+      const memory = graph.nodes.filter((n) => n.kind === "memory" && n.project_id === proj.project_id).length;
+      let source = 0;
+      let config = 0;
+      const langCount = new Map<string, number>();
+      const topDir = new Map<string, number>();
+      for (const f of files) {
+        const path = f.path ?? f.label;
+        if (isConfigPath(path)) config++;
+        else source++;
+        const lang = langOf(path);
+        langCount.set(lang, (langCount.get(lang) ?? 0) + 1);
+        const segs = path.split(/[\\/]/).filter(Boolean);
+        if (segs.length > 1) topDir.set(segs[0], (topDir.get(segs[0]) ?? 0) + 1);
+      }
+      const languages = [...langCount.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+      const topModules = [...topDir.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([d]) => d);
+      out.set(proj.project_id, {
+        projectId: proj.project_id,
+        name: proj.label,
+        color,
+        modules: topDir.size,
+        source,
+        config,
+        memory,
+        files: files.length,
+        topModules,
+        languages,
+      });
+    });
+  return out;
+}
+
 type Pos = { x: number; y: number };
 type Kind = "project" | "folder" | "file" | "memory";
 
@@ -48,6 +134,7 @@ type Layout = {
   byId: Map<string, RNode>;
   adj: Map<string, Set<string>>;
   colorByProject: Map<string, string>;
+  stats: Map<string, ProjectStats>;
   maxR: number;
   projectCount: number;
 };
@@ -203,7 +290,17 @@ function computeLayout(graph: BrainGraph): Layout {
   for (const [x, y] of treeEdges) link(x, y);
   for (const e of realEdges) link(e.a, e.b);
 
-  return { nodes, treeEdges, realEdges, byId, adj, colorByProject, maxR, projectCount: projectNodes.length };
+  return {
+    nodes,
+    treeEdges,
+    realEdges,
+    byId,
+    adj,
+    colorByProject,
+    stats: computeProjectStats(graph),
+    maxR,
+    projectCount: projectNodes.length,
+  };
 }
 
 /**
@@ -254,6 +351,16 @@ export function BrainMapPane() {
     (x: number, y: number, s: number, animate: boolean) => {
       cam.current = { x: -s * x, y: -s * y, s };
       applyCam(animate);
+    },
+    [applyCam],
+  );
+
+  const zoomBy = useCallback(
+    (factor: number) => {
+      const s = cam.current.s;
+      const s2 = Math.max(0.2, Math.min(7, s * factor));
+      cam.current = { s: s2, x: (cam.current.x * s2) / s, y: (cam.current.y * s2) / s };
+      applyCam(true);
     },
     [applyCam],
   );
@@ -412,6 +519,7 @@ export function BrainMapPane() {
   const { byId, adj } = layout;
   const focusName = focusPid ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)?.label : null;
   const selNode = selected ? byId.get(selected) : null;
+  const focusStats = focusPid && !selNode ? (layout.stats.get(focusPid) ?? null) : null;
   const activeId = selected ?? hover;
   const neighbors = selected ? (adj.get(selected) ?? new Set<string>()) : null;
   const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
@@ -629,14 +737,15 @@ export function BrainMapPane() {
           {/* brain core */}
           {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven brain core (click = reset view) */}
           <g style={{ cursor: "pointer" }} onClick={(ev) => { ev.stopPropagation(); reset(); }}>
-            <circle cx={0} cy={0} r={100} fill="url(#brainGlow)" className="motion-safe:[animation:koden-breathe_4s_ease-in-out_infinite]" style={{ transformOrigin: "center" }} />
-            <circle cx={0} cy={0} r={40} fill="none" className="stroke-border" strokeWidth={1} strokeDasharray="2 5" />
-            <circle cx={0} cy={0} r={26} className="fill-foreground" />
+            <circle cx={0} cy={0} r={110} fill="url(#brainGlow)" className="motion-safe:[animation:koden-breathe_4s_ease-in-out_infinite]" style={{ transformOrigin: "center" }} />
+            <circle cx={0} cy={0} r={62} fill="none" className="stroke-border motion-safe:[animation:koden-spin_34s_linear_infinite]" style={{ transformOrigin: "center" }} strokeWidth={1} strokeDasharray="2 11" strokeOpacity={0.5} />
+            <circle cx={0} cy={0} r={46} fill="none" className="stroke-border motion-safe:[animation:koden-spin_20s_linear_infinite_reverse]" style={{ transformOrigin: "center" }} strokeWidth={1} strokeDasharray="3 7" strokeOpacity={0.75} />
+            <circle cx={0} cy={0} r={27} className="fill-foreground" />
             <text x={0} y={0} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-background font-bold" fontSize={23}>
               K
             </text>
-            <text x={0} y={42} textAnchor="middle" className="pointer-events-none fill-muted-foreground font-mono" fontSize={8} letterSpacing={1}>
-              BRAIN
+            <text x={0} y={44} textAnchor="middle" className="pointer-events-none fill-muted-foreground font-mono" fontSize={8} letterSpacing={1.5}>
+              BRAIN CORE
             </text>
           </g>
         </g>
@@ -652,7 +761,29 @@ export function BrainMapPane() {
           connections={adj.get(selNode.id)?.size ?? 0}
           onClose={reset}
         />
+      ) : focusStats ? (
+        <ProjectSummaryPanel stats={focusStats} onClose={reset} />
       ) : null}
+
+      {/* zoom controls */}
+      <div className={cn("absolute bottom-3 z-10 flex flex-col gap-1", selNode || focusStats ? "right-[20rem]" : "right-3")}>
+        <button
+          type="button"
+          onClick={() => zoomBy(1.3)}
+          className="flex size-7 items-center justify-center rounded-md border bg-background/80 text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-foreground"
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={() => zoomBy(1 / 1.3)}
+          className="flex size-7 items-center justify-center rounded-md border bg-background/80 text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-foreground"
+          aria-label="Zoom out"
+        >
+          −
+        </button>
+      </div>
     </div>
   );
 }
@@ -742,6 +873,112 @@ function SidePanel({
         </Field>
       </div>
       <div className="mt-auto border-t px-4 py-3">
+        <button
+          type="button"
+          onClick={onClose}
+          className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold hover:bg-accent"
+        >
+          ← Back to brain
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose: () => void }) {
+  const totalLang = stats.languages.reduce((s, l) => s + l.count, 0) || 1;
+  const topLangs = stats.languages.slice(0, 6);
+  const layers = [
+    { label: "Modules", color: stats.color, count: stats.modules },
+    { label: "Source", color: "#6b7280", count: stats.source },
+    { label: "Config", color: "#41464f", count: stats.config },
+    { label: "Memory", color: MEMORY_COLOR, count: stats.memory },
+  ];
+  return (
+    <aside className="absolute top-14 right-3 bottom-3 z-20 flex w-72 flex-col overflow-hidden rounded-2xl border bg-background/95 shadow-2xl backdrop-blur">
+      <div className="flex items-center justify-between border-b px-4 py-3">
+        <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Project branch</span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex size-6 items-center justify-center rounded-md bg-muted text-muted-foreground hover:bg-accent hover:text-foreground"
+          aria-label="Close"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        <div className="flex items-center gap-3 px-4 pt-4">
+          <span
+            className="flex size-9 items-center justify-center rounded-xl text-sm font-bold text-white"
+            style={{ background: stats.color }}
+          >
+            {(stats.name.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
+          </span>
+          <span className="truncate text-base font-bold">{stats.name}</span>
+        </div>
+        <div className="flex gap-2 px-4 pt-3">
+          <div className="flex-1 rounded-lg bg-muted/40 px-3 py-2">
+            <div className="text-lg font-bold tabular-nums">{stats.files.toLocaleString()}</div>
+            <div className="font-mono text-[9.5px] text-muted-foreground">files</div>
+          </div>
+          <div className="flex-1 rounded-lg bg-muted/40 px-3 py-2">
+            <div className="text-lg font-bold tabular-nums">{stats.modules}</div>
+            <div className="font-mono text-[9.5px] text-muted-foreground">modules</div>
+          </div>
+        </div>
+
+        <div className="px-4 pt-4">
+          <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Layer breakdown</span>
+          <div className="mt-2 flex flex-col">
+            {layers.map((l) => (
+              <div key={l.label} className="flex items-center gap-2.5 border-b py-1.5 last:border-b-0">
+                <span className="inline-block size-2.5 rounded-[3px]" style={{ background: l.color }} />
+                <span className="flex-1 text-[12.5px] font-medium text-foreground/85">{l.label}</span>
+                <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{l.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {topLangs.length ? (
+          <div className="px-4 pt-4">
+            <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Languages</span>
+            <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-muted">
+              {topLangs.map((l) => (
+                <span
+                  key={l.name}
+                  style={{ width: `${(l.count / totalLang) * 100}%`, background: LANG_COLOR[l.name] ?? LANG_COLOR.Other }}
+                  title={`${l.name} ${Math.round((l.count / totalLang) * 100)}%`}
+                />
+              ))}
+            </div>
+            <div className="mt-2 flex flex-col gap-1">
+              {topLangs.map((l) => (
+                <div key={l.name} className="flex items-center gap-2 text-[11px]">
+                  <span className="inline-block size-2 rounded-full" style={{ background: LANG_COLOR[l.name] ?? LANG_COLOR.Other }} />
+                  <span className="flex-1 text-foreground/80">{l.name}</span>
+                  <span className="font-mono text-muted-foreground tabular-nums">{Math.round((l.count / totalLang) * 100)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {stats.topModules.length ? (
+          <div className="px-4 pt-4 pb-4">
+            <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Top modules</span>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {stats.topModules.map((m) => (
+                <span key={m} className="rounded-md border bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground/80">
+                  {m}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      <div className="border-t px-4 py-3">
         <button
           type="button"
           onClick={onClose}
