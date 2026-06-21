@@ -1,6 +1,7 @@
 export { BrainHeaderMenu } from "./BrainHeaderMenu";
 export { BrainMapPane } from "./BrainMapPane";
 export { BrainPane } from "./BrainPane";
+export { BrainSetupWizard } from "./BrainSetupWizard";
 export { BrainTabIcon } from "./BrainTabIcon";
 export {
   brainBudgetStatus,

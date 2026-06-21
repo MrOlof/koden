@@ -71,7 +71,9 @@ pub struct WorkspaceStatus {
 pub fn brain_workspace_status(state: State<BrainState>) -> WorkspaceStatus {
     let root = state.registry.workspace_root();
     let projects = state.registry.projects().len();
-    WorkspaceStatus { configured: root.is_some() || projects > 0, root, projects }
+    // `configured` = the user has explicitly chosen a workspace root. An auto-seeded
+    // launch-dir project does NOT count, so the first-run wizard still appears.
+    WorkspaceStatus { configured: root.is_some(), root, projects }
 }
 
 /// Set the workspace root (source of truth) and auto-register each immediate child

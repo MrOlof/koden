@@ -28,7 +28,7 @@ import {
   CommandPalette,
   createCommandItems,
 } from "@/modules/command-palette";
-import { brainBuildGist, resolveProjectForCwd } from "@/modules/brain";
+import { BrainSetupWizard, brainBuildGist, resolveProjectForCwd } from "@/modules/brain";
 import {
   NewEditorDialog,
   useEditorFileSync,
@@ -2035,6 +2035,8 @@ export default function App() {
               hideTabs={layoutMode === "sidebar"}
             />
           )}
+
+          <BrainSetupWizard />
 
           <main className="zoom-content flex min-h-0 flex-1 flex-row">
             {/* Sidebar mode: a slim always-visible activity rail (Files |
