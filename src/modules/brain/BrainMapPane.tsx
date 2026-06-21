@@ -68,6 +68,11 @@ type ProjectStats = {
   files: number;
   topModules: string[];
   languages: Lang[]; // sorted desc by count
+  // Item lists for the expandable layer rows.
+  moduleList: { name: string; count: number }[];
+  sourceList: string[];
+  configList: string[];
+  memoryList: string[];
 };
 
 function computeProjectStats(graph: BrainGraph): Map<string, ProjectStats> {
@@ -82,17 +87,30 @@ function computeProjectStats(graph: BrainGraph): Map<string, ProjectStats> {
       let config = 0;
       const langCount = new Map<string, number>();
       const topDir = new Map<string, number>();
+      const sourceList: string[] = [];
+      const configList: string[] = [];
       for (const f of files) {
         const path = f.path ?? f.label;
-        if (isConfigPath(path)) config++;
-        else source++;
+        if (isConfigPath(path)) {
+          config++;
+          configList.push(path);
+        } else {
+          source++;
+          sourceList.push(path);
+        }
         const lang = langOf(path);
         langCount.set(lang, (langCount.get(lang) ?? 0) + 1);
         const segs = path.split(/[\\/]/).filter(Boolean);
         if (segs.length > 1) topDir.set(segs[0], (topDir.get(segs[0]) ?? 0) + 1);
       }
+      sourceList.sort();
+      configList.sort();
       const languages = [...langCount.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
-      const topModules = [...topDir.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([d]) => d);
+      const moduleList = [...topDir.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+      const memoryList = graph.nodes
+        .filter((n) => n.kind === "memory" && n.project_id === proj.project_id)
+        .map((n) => n.label)
+        .sort();
       out.set(proj.project_id, {
         projectId: proj.project_id,
         name: proj.label,
@@ -102,8 +120,12 @@ function computeProjectStats(graph: BrainGraph): Map<string, ProjectStats> {
         config,
         memory,
         files: files.length,
-        topModules,
+        topModules: moduleList.slice(0, 6).map((m) => m.name),
         languages,
+        moduleList,
+        sourceList,
+        configList,
+        memoryList,
       });
     });
   return out;
@@ -886,13 +908,14 @@ function SidePanel({
 }
 
 function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose: () => void }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   const totalLang = stats.languages.reduce((s, l) => s + l.count, 0) || 1;
   const topLangs = stats.languages.slice(0, 6);
   const layers = [
-    { label: "Modules", color: stats.color, count: stats.modules },
-    { label: "Source", color: "#6b7280", count: stats.source },
-    { label: "Config", color: "#41464f", count: stats.config },
-    { label: "Memory", color: MEMORY_COLOR, count: stats.memory },
+    { key: "modules", label: "Modules", color: stats.color, count: stats.modules, items: stats.moduleList.map((m) => `${m.name}  ·  ${m.count}`) },
+    { key: "source", label: "Source", color: "#6b7280", count: stats.source, items: stats.sourceList },
+    { key: "config", label: "Config", color: "#41464f", count: stats.config, items: stats.configList },
+    { key: "memory", label: "Memory", color: MEMORY_COLOR, count: stats.memory, items: stats.memoryList },
   ];
   return (
     <aside className="absolute top-14 right-3 bottom-3 z-20 flex w-72 flex-col overflow-hidden rounded-2xl border bg-background/95 shadow-2xl backdrop-blur">
@@ -931,13 +954,44 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
         <div className="px-4 pt-4">
           <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Layer breakdown</span>
           <div className="mt-2 flex flex-col">
-            {layers.map((l) => (
-              <div key={l.label} className="flex items-center gap-2.5 border-b py-1.5 last:border-b-0">
-                <span className="inline-block size-2.5 rounded-[3px]" style={{ background: l.color }} />
-                <span className="flex-1 text-[12.5px] font-medium text-foreground/85">{l.label}</span>
-                <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{l.count}</span>
-              </div>
-            ))}
+            {layers.map((l) => {
+              const open = expanded === l.key;
+              return (
+                <div key={l.key} className="border-b last:border-b-0">
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(open ? null : l.key)}
+                    disabled={l.count === 0}
+                    className="flex w-full items-center gap-2.5 py-1.5 text-left disabled:opacity-50"
+                  >
+                    <span className="inline-block size-2.5 rounded-[3px]" style={{ background: l.color }} />
+                    <span className="flex-1 text-[12.5px] font-medium text-foreground/85">{l.label}</span>
+                    <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{l.count}</span>
+                    {l.count > 0 ? (
+                      <span className={cn("text-[10px] text-muted-foreground transition-transform", open && "rotate-90")}>›</span>
+                    ) : (
+                      <span className="w-[10px]" />
+                    )}
+                  </button>
+                  {open ? (
+                    <div className="mb-1.5 max-h-44 overflow-y-auto rounded-md bg-muted/30 px-2 py-1">
+                      {l.items.slice(0, 80).map((it) => (
+                        <div
+                          key={`${l.key}:${it}`}
+                          className="truncate py-0.5 font-mono text-[10.5px] text-foreground/70"
+                          title={it}
+                        >
+                          {it}
+                        </div>
+                      ))}
+                      {l.items.length > 80 ? (
+                        <div className="py-0.5 font-mono text-[10px] text-muted-foreground">+{l.items.length - 80} more</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         </div>
 
