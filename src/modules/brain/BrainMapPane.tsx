@@ -1,6 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { brainGraph, type BrainGraph, type GraphEdge, type GraphNode } from "./lib/bindings";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  type BrainGraph,
+  brainGraph,
+  type GraphEdge,
+  type GraphNode,
+} from "./lib/bindings";
 
 // Viewport coordinate space (the radial tree is laid out centered on 0,0).
 const W = 1600;
@@ -25,21 +37,71 @@ const MEMORY_COLOR = "#f2b417";
 
 // ── language + layer classification (from file paths) ───────────────────────
 const EXT_LANG: Record<string, string> = {
-  ts: "TypeScript", tsx: "TypeScript", mts: "TypeScript", cts: "TypeScript",
-  js: "JavaScript", jsx: "JavaScript", mjs: "JavaScript", cjs: "JavaScript",
-  rs: "Rust", py: "Python", go: "Go", rb: "Ruby", java: "Java", kt: "Kotlin",
-  c: "C", h: "C", cpp: "C++", cc: "C++", hpp: "C++", cs: "C#", swift: "Swift",
-  php: "PHP", css: "CSS", scss: "CSS", sass: "CSS", html: "HTML", svelte: "Svelte",
-  vue: "Vue", json: "JSON", toml: "TOML", yaml: "YAML", yml: "YAML", md: "Markdown",
-  mdx: "Markdown", sql: "SQL", sh: "Shell", bash: "Shell", ps1: "PowerShell",
+  ts: "TypeScript",
+  tsx: "TypeScript",
+  mts: "TypeScript",
+  cts: "TypeScript",
+  js: "JavaScript",
+  jsx: "JavaScript",
+  mjs: "JavaScript",
+  cjs: "JavaScript",
+  rs: "Rust",
+  py: "Python",
+  go: "Go",
+  rb: "Ruby",
+  java: "Java",
+  kt: "Kotlin",
+  c: "C",
+  h: "C",
+  cpp: "C++",
+  cc: "C++",
+  hpp: "C++",
+  cs: "C#",
+  swift: "Swift",
+  php: "PHP",
+  css: "CSS",
+  scss: "CSS",
+  sass: "CSS",
+  html: "HTML",
+  svelte: "Svelte",
+  vue: "Vue",
+  json: "JSON",
+  toml: "TOML",
+  yaml: "YAML",
+  yml: "YAML",
+  md: "Markdown",
+  mdx: "Markdown",
+  sql: "SQL",
+  sh: "Shell",
+  bash: "Shell",
+  ps1: "PowerShell",
 };
 const LANG_COLOR: Record<string, string> = {
-  TypeScript: "#3178c6", JavaScript: "#f1e05a", Rust: "#dea584", Python: "#3572A5",
-  Go: "#00ADD8", Ruby: "#701516", Java: "#b07219", "C++": "#f34b7d", C: "#6b7280",
-  "C#": "#178600", Swift: "#F05138", PHP: "#4F5D95", CSS: "#563d7c", HTML: "#e34c26",
-  Svelte: "#ff3e00", Vue: "#41b883", JSON: "#8b949e", TOML: "#9c4221", YAML: "#cb171e",
-  Markdown: "#6b7280", SQL: "#e38c00", Shell: "#89e051", PowerShell: "#2b6cb0",
-  Kotlin: "#A97BFF", Other: "#9aa3b0",
+  TypeScript: "#3178c6",
+  JavaScript: "#f1e05a",
+  Rust: "#dea584",
+  Python: "#3572A5",
+  Go: "#00ADD8",
+  Ruby: "#701516",
+  Java: "#b07219",
+  "C++": "#f34b7d",
+  C: "#6b7280",
+  "C#": "#178600",
+  Swift: "#F05138",
+  PHP: "#4F5D95",
+  CSS: "#563d7c",
+  HTML: "#e34c26",
+  Svelte: "#ff3e00",
+  Vue: "#41b883",
+  JSON: "#8b949e",
+  TOML: "#9c4221",
+  YAML: "#cb171e",
+  Markdown: "#6b7280",
+  SQL: "#e38c00",
+  Shell: "#89e051",
+  PowerShell: "#2b6cb0",
+  Kotlin: "#A97BFF",
+  Other: "#9aa3b0",
 };
 const CONFIG_RE =
   /(^|\/)(package\.json|tsconfig.*\.json|[^/]*\.config\.[mc]?[jt]s|biome\.json|[^/]*\.toml|[^/]*\.ya?ml|[^/]*\.lock|\.gitignore|\.npmrc|\.env[^/]*|dockerfile)$/i;
@@ -81,8 +143,12 @@ function computeProjectStats(graph: BrainGraph): Map<string, ProjectStats> {
     .filter((n) => n.kind === "project")
     .forEach((proj, i) => {
       const color = PALETTE[i % PALETTE.length];
-      const files = graph.nodes.filter((n) => n.kind === "file" && n.project_id === proj.project_id);
-      const memory = graph.nodes.filter((n) => n.kind === "memory" && n.project_id === proj.project_id).length;
+      const files = graph.nodes.filter(
+        (n) => n.kind === "file" && n.project_id === proj.project_id,
+      );
+      const memory = graph.nodes.filter(
+        (n) => n.kind === "memory" && n.project_id === proj.project_id,
+      ).length;
       let source = 0;
       let config = 0;
       const langCount = new Map<string, number>();
@@ -101,12 +167,17 @@ function computeProjectStats(graph: BrainGraph): Map<string, ProjectStats> {
         const lang = langOf(path);
         langCount.set(lang, (langCount.get(lang) ?? 0) + 1);
         const segs = path.split(/[\\/]/).filter(Boolean);
-        if (segs.length > 1) topDir.set(segs[0], (topDir.get(segs[0]) ?? 0) + 1);
+        if (segs.length > 1)
+          topDir.set(segs[0], (topDir.get(segs[0]) ?? 0) + 1);
       }
       sourceList.sort();
       configList.sort();
-      const languages = [...langCount.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
-      const moduleList = [...topDir.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+      const languages = [...langCount.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count);
+      const moduleList = [...topDir.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => ({ name, count }));
       const memoryList = graph.nodes
         .filter((n) => n.kind === "memory" && n.project_id === proj.project_id)
         .map((n) => n.label)
@@ -178,7 +249,13 @@ function buildTree(
   files: GraphNode[],
   memory: GraphNode[],
 ): Tree {
-  const root: Tree = { id: projNodeId, kind: "project", label: projLabel, children: new Map(), leaf: 0 };
+  const root: Tree = {
+    id: projNodeId,
+    kind: "project",
+    label: projLabel,
+    children: new Map(),
+    leaf: 0,
+  };
   for (const f of files) {
     const path = f.path ?? f.label;
     const segs = path.split(/[\\/]/).filter(Boolean);
@@ -187,14 +264,28 @@ function buildTree(
     segs.forEach((seg, i) => {
       if (i === segs.length - 1) {
         if (!cur.children.has(f.id)) {
-          cur.children.set(f.id, { id: f.id, kind: "file", label: seg, path, children: new Map(), leaf: 1 });
+          cur.children.set(f.id, {
+            id: f.id,
+            kind: "file",
+            label: seg,
+            path,
+            children: new Map(),
+            leaf: 1,
+          });
         }
       } else {
         prefix = prefix ? `${prefix}/${seg}` : seg;
         const fid = `fold:${projId}:${prefix}`;
         let next = cur.children.get(fid);
         if (!next) {
-          next = { id: fid, kind: "folder", label: seg, path: prefix, children: new Map(), leaf: 0 };
+          next = {
+            id: fid,
+            kind: "folder",
+            label: seg,
+            path: prefix,
+            children: new Map(),
+            leaf: 0,
+          };
           cur.children.set(fid, next);
         }
         cur = next;
@@ -245,18 +336,44 @@ function computeLayout(graph: BrainGraph): Layout {
   const nodes: RNode[] = [];
   const treeEdges: [string, string][] = [];
   const colorByProject = new Map<string, string>();
-  let maxR = R_HUB;
 
   const projectNodes = graph.nodes.filter((n) => n.kind === "project");
   const P = Math.max(1, projectNodes.length);
 
-  // depth d sits at radius R_HUB + d*RING; `pang` is the project's spine angle, and we
+  // Scale the hub ring + bloom length with project count so a crowded workspace
+  // spreads out and uses the canvas instead of clogging near the core (the ring
+  // is capped so the fit-to-view zoom stays readable). `ringStep` pushes each
+  // directory depth further out, so blooms reach into the empty real estate.
+  const hubR = Math.max(R_HUB, Math.min(280, Math.round(P * 13)));
+  const ringStep = RING + 4;
+  let maxR = hubR;
+
+  // depth d sits at radius hubR + d*ringStep; `pang` is the project's spine angle, and we
   // store each node's angular OFFSET from pang so focus can multiply it (spread).
-  const place = (t: Tree, depth: number, angStart: number, angEnd: number, color: string, pid: string, pang: number) => {
+  const place = (
+    t: Tree,
+    depth: number,
+    angStart: number,
+    angEnd: number,
+    color: string,
+    pid: string,
+    pang: number,
+  ) => {
     const ang = (angStart + angEnd) / 2;
-    const rad = R_HUB + depth * RING;
+    const rad = hubR + depth * ringStep;
     if (rad > maxR) maxR = rad;
-    nodes.push({ id: t.id, kind: t.kind, label: t.label, projectId: pid, path: t.path, leaf: t.leaf, color, aoff: ang - pang, rad, pang });
+    nodes.push({
+      id: t.id,
+      kind: t.kind,
+      label: t.label,
+      projectId: pid,
+      path: t.path,
+      leaf: t.leaf,
+      color,
+      aoff: ang - pang,
+      rad,
+      pang,
+    });
     const kids = [...t.children.values()];
     if (!kids.length) return;
     const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
@@ -273,15 +390,29 @@ function computeLayout(graph: BrainGraph): Layout {
     const color = PALETTE[i % PALETTE.length];
     colorByProject.set(proj.project_id, color);
     const a = -Math.PI / 2 + (i * 2 * Math.PI) / P;
-    nodes.push({ id: proj.id, kind: "project", label: proj.label, projectId: proj.project_id, leaf: 1, color, aoff: 0, rad: R_HUB, pang: a });
+    nodes.push({
+      id: proj.id,
+      kind: "project",
+      label: proj.label,
+      projectId: proj.project_id,
+      leaf: 1,
+      color,
+      aoff: 0,
+      rad: hubR,
+      pang: a,
+    });
 
-    const files = graph.nodes.filter((n) => n.kind === "file" && n.project_id === proj.project_id);
-    const memory = graph.nodes.filter((n) => n.kind === "memory" && n.project_id === proj.project_id);
+    const files = graph.nodes.filter(
+      (n) => n.kind === "file" && n.project_id === proj.project_id,
+    );
+    const memory = graph.nodes.filter(
+      (n) => n.kind === "memory" && n.project_id === proj.project_id,
+    );
     const root = buildTree(proj.project_id, proj.id, proj.label, files, memory);
 
     // COMPACT base cone (capped) so the overview reads as tidy blooms with gaps —
     // focus then spreads the cone to SPREAD_TO× for the readable tree.
-    const sector = Math.min(0.82, ((2 * Math.PI) / P) * 0.7);
+    const sector = Math.min(1.05, ((2 * Math.PI) / P) * 0.85);
     const kids = [...root.children.values()];
     const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
     let cursor = a - sector / 2;
@@ -319,7 +450,10 @@ function computeLayout(graph: BrainGraph): Layout {
   const recent = new Set<string>();
   for (const proj of projectNodes) {
     graph.nodes
-      .filter((n) => n.kind === "file" && n.project_id === proj.project_id && n.mtime > 0)
+      .filter(
+        (n) =>
+          n.kind === "file" && n.project_id === proj.project_id && n.mtime > 0,
+      )
       .sort((a, b) => b.mtime - a.mtime)
       .slice(0, 8)
       .forEach((f) => {
@@ -357,7 +491,14 @@ export function BrainMapPane() {
   const svgRef = useRef<SVGSVGElement>(null);
   const camG = useRef<SVGGElement>(null);
   const cam = useRef({ x: 0, y: 0, s: 0.85 });
-  const drag = useRef<{ x: number; y: number; cx: number; cy: number; moved: boolean; bg: boolean } | null>(null);
+  const drag = useRef<{
+    x: number;
+    y: number;
+    cx: number;
+    cy: number;
+    moved: boolean;
+    bg: boolean;
+  } | null>(null);
   const spread = useRef(1); // current spread factor of the focused project
   const spreadPid = useRef<string | null>(null);
   const raf = useRef<number | null>(null);
@@ -375,12 +516,18 @@ export function BrainMapPane() {
 
   const layout = useMemo(() => (graph ? computeLayout(graph) : null), [graph]);
 
-  const camTransform = useCallback(() => `translate(${cam.current.x} ${cam.current.y}) scale(${cam.current.s})`, []);
+  const camTransform = useCallback(
+    () =>
+      `translate(${cam.current.x} ${cam.current.y}) scale(${cam.current.s})`,
+    [],
+  );
   const applyCam = useCallback(
     (animate: boolean) => {
       const g = camG.current;
       if (!g) return;
-      g.style.transition = animate ? "transform .7s cubic-bezier(.22,.61,.36,1)" : "none";
+      g.style.transition = animate
+        ? "transform .7s cubic-bezier(.22,.61,.36,1)"
+        : "none";
       g.setAttribute("transform", camTransform());
     },
     [camTransform],
@@ -397,14 +544,25 @@ export function BrainMapPane() {
     (factor: number) => {
       const s = cam.current.s;
       const s2 = Math.max(0.2, Math.min(7, s * factor));
-      cam.current = { s: s2, x: (cam.current.x * s2) / s, y: (cam.current.y * s2) / s };
+      cam.current = {
+        s: s2,
+        x: (cam.current.x * s2) / s,
+        y: (cam.current.y * s2) / s,
+      };
       applyCam(true);
     },
     [applyCam],
   );
 
   const fitScale = useCallback(
-    () => Math.min(1.1, Math.max(0.22, ((Math.min(W, H) / 2) * 0.9) / Math.max(1, layout?.maxR ?? 1))),
+    () =>
+      Math.min(
+        1.1,
+        Math.max(
+          0.22,
+          ((Math.min(W, H) / 2) * 0.9) / Math.max(1, layout?.maxR ?? 1),
+        ),
+      ),
     [layout],
   );
   useLayoutEffect(() => {
@@ -453,7 +611,10 @@ export function BrainMapPane() {
     const offY = r.top + (r.height - H * sc) / 2;
     const vbx = (cx - offX) / sc - W / 2;
     const vby = (cy - offY) / sc - H / 2;
-    return { x: (vbx - cam.current.x) / cam.current.s, y: (vby - cam.current.y) / cam.current.s };
+    return {
+      x: (vbx - cam.current.x) / cam.current.s,
+      y: (vby - cam.current.y) / cam.current.s,
+    };
   }, []);
 
   const reset = useCallback(() => {
@@ -491,7 +652,14 @@ export function BrainMapPane() {
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     const target = e.target as Element;
-    drag.current = { x: e.clientX, y: e.clientY, cx: cam.current.x, cy: cam.current.y, moved: false, bg: target.getAttribute("data-bg") === "1" };
+    drag.current = {
+      x: e.clientX,
+      y: e.clientY,
+      cx: cam.current.x,
+      cy: cam.current.y,
+      moved: false,
+      bg: target.getAttribute("data-bg") === "1",
+    };
     applyCam(false);
     if (svgRef.current) svgRef.current.style.cursor = "grabbing";
   };
@@ -559,7 +727,8 @@ export function BrainMapPane() {
   );
   const selectNode = useCallback(
     (n: RNode) => {
-      if (n.projectId !== spreadPid.current) animateSpread(n.projectId, SPREAD_TO);
+      if (n.projectId !== spreadPid.current)
+        animateSpread(n.projectId, SPREAD_TO);
       const p = livePos(n);
       flyTo(p.x, p.y, Math.max(1.7, cam.current.s), true);
       setSelected(n.id);
@@ -574,19 +743,27 @@ export function BrainMapPane() {
   // by contents), files grey, memory amber; only project hubs carry letter badges.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` isn't read; it forces a recompute each spread-animation frame so positions follow the animation.
   const posMap = useMemo(
-    () => (layout ? new Map<string, Pos>(layout.nodes.map((n) => [n.id, livePos(n)])) : null),
+    () =>
+      layout
+        ? new Map<string, Pos>(layout.nodes.map((n) => [n.id, livePos(n)]))
+        : null,
     [layout, tick, livePos],
   );
   const sceneEls = useMemo(() => {
     if (!layout || !posMap) return null;
     const pos = posMap;
     const { byId, adj } = layout;
-    const neighbors = selected ? (adj.get(selected) ?? new Set<string>()) : null;
+    const neighbors = selected
+      ? (adj.get(selected) ?? new Set<string>())
+      : null;
     const color = (pid: string) => layout.colorByProject.get(pid) ?? PALETTE[9];
     const opacityOf = (n: RNode): number => {
-      if (n.kind === "project" && focusPid && n.projectId !== focusPid) return 0.2;
-      if (focusPid && n.projectId !== focusPid && n.kind !== "project") return 0.07;
-      if (neighbors && selected) return n.id === selected || neighbors.has(n.id) ? 1 : 0.14;
+      if (n.kind === "project" && focusPid && n.projectId !== focusPid)
+        return 0.2;
+      if (focusPid && n.projectId !== focusPid && n.kind !== "project")
+        return 0.07;
+      if (neighbors && selected)
+        return n.id === selected || neighbors.has(n.id) ? 1 : 0.14;
       return 1;
     };
     return (
@@ -618,7 +795,9 @@ export function BrainMapPane() {
             if (!a || !b) return null;
             const an = byId.get(aId);
             const dimmed = !!focusPid && an?.projectId !== focusPid;
-            const hot = (!!selected && (aId === selected || bId === selected)) || (!!focusPid && an?.projectId === focusPid);
+            const hot =
+              (!!selected && (aId === selected || bId === selected)) ||
+              (!!focusPid && an?.projectId === focusPid);
             return (
               <line
                 key={`t${aId}>${bId}`}
@@ -626,7 +805,9 @@ export function BrainMapPane() {
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
-                stroke={hot && an?.projectId ? color(an.projectId) : "currentColor"}
+                stroke={
+                  hot && an?.projectId ? color(an.projectId) : "currentColor"
+                }
                 strokeWidth={hot ? 1.2 : 0.8}
                 strokeOpacity={dimmed ? 0.05 : hot ? 0.6 : 0.34}
               />
@@ -641,7 +822,12 @@ export function BrainMapPane() {
             const emph = n.id === selected;
             const isFolder = n.kind === "folder";
             const isMem = n.kind === "memory";
-            const r = (isFolder ? Math.min(7.5, 3.6 + Math.log2(n.leaf + 1) * 0.95) : isMem ? 4.2 : 3.2) * (emph ? 1.8 : 1);
+            const r =
+              (isFolder
+                ? Math.min(7.5, 3.6 + Math.log2(n.leaf + 1) * 0.95)
+                : isMem
+                  ? 4.2
+                  : 3.2) * (emph ? 1.8 : 1);
             const fill = isFolder ? n.color : isMem ? MEMORY_COLOR : undefined;
             return (
               // biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven graph node; keyboard access is via the Brain search list
@@ -652,7 +838,13 @@ export function BrainMapPane() {
                 r={r}
                 className={fill ? undefined : "fill-muted-foreground"}
                 fill={fill}
-                stroke={emph ? "currentColor" : isFolder ? "var(--color-background)" : "none"}
+                stroke={
+                  emph
+                    ? "currentColor"
+                    : isFolder
+                      ? "var(--color-background)"
+                      : "none"
+                }
                 strokeWidth={emph ? 1.4 : isFolder ? 1 : 0}
                 opacity={opacityOf(n)}
                 style={{ cursor: "pointer" }}
@@ -687,14 +879,60 @@ export function BrainMapPane() {
                 }}
               >
                 <circle cx={h.x} cy={h.y} r={r + 16} fill="transparent" />
-                <circle cx={h.x} cy={h.y} r={r + 5} fill="none" stroke={n.color} strokeWidth={1.3} strokeOpacity={emph ? 0.5 : 0.22} />
-                <circle cx={h.x} cy={h.y} r={r} fill={n.color} className="stroke-background" strokeWidth={2.4} />
-                <text x={h.x} y={h.y} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-white font-semibold" fontSize={10.5}>
-                  {(n.label.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
+                <circle
+                  cx={h.x}
+                  cy={h.y}
+                  r={r + 5}
+                  fill="none"
+                  stroke={n.color}
+                  strokeWidth={1.3}
+                  strokeOpacity={emph ? 0.5 : 0.22}
+                />
+                <circle
+                  cx={h.x}
+                  cy={h.y}
+                  r={r}
+                  fill={n.color}
+                  className="stroke-background"
+                  strokeWidth={2.4}
+                />
+                <text
+                  x={h.x}
+                  y={h.y}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  className="pointer-events-none fill-white font-semibold"
+                  fontSize={10.5}
+                >
+                  {(n.label.slice(0, 2) || "?").replace(/^./, (c) =>
+                    c.toUpperCase(),
+                  )}
                 </text>
-                <text x={h.x} y={h.y + r + 13} textAnchor="middle" className="fill-foreground font-semibold" fontSize={11}>
-                  {n.label}
-                </text>
+                {(() => {
+                  // Radial label: rotate along the project's spoke so labels fan
+                  // outward and diverge (no horizontal collisions between neighbours);
+                  // flip the left half so text stays upright.
+                  const deg = (Math.atan2(h.y, h.x) * 180) / Math.PI;
+                  const flip = h.x < 0;
+                  const off = r + 9;
+                  return (
+                    <text
+                      x={h.x}
+                      y={h.y}
+                      textAnchor={flip ? "end" : "start"}
+                      dominantBaseline="central"
+                      transform={
+                        flip
+                          ? `rotate(${deg + 180} ${h.x} ${h.y}) translate(${-off} 0)`
+                          : `rotate(${deg} ${h.x} ${h.y}) translate(${off} 0)`
+                      }
+                      className="pointer-events-none fill-foreground font-semibold"
+                      fontSize={11}
+                    >
+                      {n.label}
+                    </text>
+                  );
+                })()}
               </g>
             );
           })}
@@ -720,12 +958,17 @@ export function BrainMapPane() {
 
   const pos = posMap; // memoized; non-null after the guard above
   const { byId } = layout;
-  const focusName = focusPid ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)?.label : null;
+  const focusName = focusPid
+    ? layout.nodes.find((n) => n.kind === "project" && n.projectId === focusPid)
+        ?.label
+    : null;
   const selNode = selected ? byId.get(selected) : null;
-  const focusStats = focusPid && !selNode ? (layout.stats.get(focusPid) ?? null) : null;
+  const focusStats =
+    focusPid && !selNode ? (layout.stats.get(focusPid) ?? null) : null;
   const activeId = selected ?? hover;
   const hoverPos = hover ? (pos.get(hover) ?? null) : null;
-  const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
+  const projColorOf = (projectId: string) =>
+    layout.colorByProject.get(projectId) ?? PALETTE[9];
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-background">
@@ -736,15 +979,29 @@ export function BrainMapPane() {
       </div>
       <div className="pointer-events-none absolute top-2.5 left-1/2 z-10 -translate-x-1/2">
         <span className="rounded-full border bg-background/70 px-3 py-1 font-mono text-[10.5px] text-muted-foreground backdrop-blur">
-          {focusName ? `Viewing ${focusName} · click background to zoom out` : "Click a project to focus · scroll to zoom · drag to pan"}
+          {focusName
+            ? `Viewing ${focusName} · click background to zoom out`
+            : "Click a project to focus · scroll to zoom · drag to pan"}
         </span>
       </div>
       <div className="absolute bottom-3 left-3 z-10 flex flex-col gap-1.5 rounded-lg border bg-background/80 px-3 py-2 backdrop-blur">
-        <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">Layers</span>
+        <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+          Layers
+        </span>
         <Legend swatch="rounded-[3px] bg-foreground" label="Project" />
-        <Legend swatch="rounded-[3px] bg-muted-foreground" label="Folder / module" />
-        <Legend swatch="rounded-full bg-muted-foreground" label="File / source" />
-        <Legend swatch="rounded-full" label="Memory / context" style={{ background: MEMORY_COLOR }} />
+        <Legend
+          swatch="rounded-[3px] bg-muted-foreground"
+          label="Folder / module"
+        />
+        <Legend
+          swatch="rounded-full bg-muted-foreground"
+          label="File / source"
+        />
+        <Legend
+          swatch="rounded-full"
+          label="Memory / context"
+          style={{ background: MEMORY_COLOR }}
+        />
       </div>
 
       <svg
@@ -765,7 +1022,14 @@ export function BrainMapPane() {
             <stop offset="100%" stopColor={PALETTE[0]} stopOpacity={0} />
           </radialGradient>
         </defs>
-        <rect data-bg="1" x={-W} y={-H} width={W * 2} height={H * 2} fill="transparent" />
+        <rect
+          data-bg="1"
+          x={-W}
+          y={-H}
+          width={W * 2}
+          height={H * 2}
+          fill="transparent"
+        />
         <g ref={camG}>
           {sceneEls}
           {/* real import/anchor edges — only for the active node (hover/selected) */}
@@ -784,7 +1048,11 @@ export function BrainMapPane() {
                       y1={a.y}
                       x2={b.x}
                       y2={b.y}
-                      stroke={e.kind === "anchor" ? MEMORY_COLOR : projColorOf(byId.get(e.a)?.projectId ?? "")}
+                      stroke={
+                        e.kind === "anchor"
+                          ? MEMORY_COLOR
+                          : projColorOf(byId.get(e.a)?.projectId ?? "")
+                      }
                       strokeWidth={1.4}
                       strokeOpacity={0.85}
                       strokeDasharray={e.kind === "anchor" ? "3 3" : undefined}
@@ -796,11 +1064,20 @@ export function BrainMapPane() {
           {/* recently-modified pulse — emerald ping on the focused project's freshest files */}
           {focusPid
             ? layout.nodes.map((n) => {
-                if (n.kind !== "file" || n.projectId !== focusPid || !layout.recent.has(n.id)) return null;
+                if (
+                  n.kind !== "file" ||
+                  n.projectId !== focusPid ||
+                  !layout.recent.has(n.id)
+                )
+                  return null;
                 const p = pos.get(n.id);
                 if (!p) return null;
                 return (
-                  <g key={`recent${n.id}`} transform={`translate(${p.x} ${p.y})`} pointerEvents="none">
+                  <g
+                    key={`recent${n.id}`}
+                    transform={`translate(${p.x} ${p.y})`}
+                    pointerEvents="none"
+                  >
                     <circle
                       cx={0}
                       cy={0}
@@ -831,28 +1108,87 @@ export function BrainMapPane() {
           ) : null}
           {/* brain core */}
           {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-driven brain core (click = reset view) */}
-          <g style={{ cursor: "pointer" }} onClick={(ev) => { ev.stopPropagation(); reset(); }}>
-            <circle cx={0} cy={0} r={110} fill="url(#brainGlow)" className="motion-safe:[animation:koden-breathe_4s_ease-in-out_infinite]" style={{ transformOrigin: "center" }} />
-            <circle cx={0} cy={0} r={62} fill="none" className="stroke-border motion-safe:[animation:koden-spin_34s_linear_infinite]" style={{ transformOrigin: "center" }} strokeWidth={1} strokeDasharray="2 11" strokeOpacity={0.5} />
-            <circle cx={0} cy={0} r={46} fill="none" className="stroke-border motion-safe:[animation:koden-spin_20s_linear_infinite_reverse]" style={{ transformOrigin: "center" }} strokeWidth={1} strokeDasharray="3 7" strokeOpacity={0.75} />
+          <g
+            style={{ cursor: "pointer" }}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              reset();
+            }}
+          >
+            <circle
+              cx={0}
+              cy={0}
+              r={110}
+              fill="url(#brainGlow)"
+              className="motion-safe:[animation:koden-breathe_4s_ease-in-out_infinite]"
+              style={{ transformOrigin: "center" }}
+            />
+            <circle
+              cx={0}
+              cy={0}
+              r={62}
+              fill="none"
+              className="stroke-border motion-safe:[animation:koden-spin_34s_linear_infinite]"
+              style={{ transformOrigin: "center" }}
+              strokeWidth={1}
+              strokeDasharray="2 11"
+              strokeOpacity={0.5}
+            />
+            <circle
+              cx={0}
+              cy={0}
+              r={46}
+              fill="none"
+              className="stroke-border motion-safe:[animation:koden-spin_20s_linear_infinite_reverse]"
+              style={{ transformOrigin: "center" }}
+              strokeWidth={1}
+              strokeDasharray="3 7"
+              strokeOpacity={0.75}
+            />
             <circle cx={0} cy={0} r={27} className="fill-foreground" />
-            <text x={0} y={0} textAnchor="middle" dominantBaseline="central" className="pointer-events-none fill-background font-bold" fontSize={23}>
+            <text
+              x={0}
+              y={0}
+              textAnchor="middle"
+              dominantBaseline="central"
+              className="pointer-events-none fill-background font-bold"
+              fontSize={23}
+            >
               K
             </text>
-            <text x={0} y={44} textAnchor="middle" className="pointer-events-none fill-muted-foreground font-mono" fontSize={8} letterSpacing={1.5}>
+            <text
+              x={0}
+              y={44}
+              textAnchor="middle"
+              className="pointer-events-none fill-muted-foreground font-mono"
+              fontSize={8}
+              letterSpacing={1.5}
+            >
               BRAIN CORE
             </text>
           </g>
         </g>
       </svg>
 
-      {hover ? <Tooltip id={hover} byId={byId} pos={pos} cam={cam.current} svgRef={svgRef} /> : null}
+      {hover ? (
+        <Tooltip
+          id={hover}
+          byId={byId}
+          pos={pos}
+          cam={cam.current}
+          svgRef={svgRef}
+        />
+      ) : null}
 
       {selNode ? (
         <SidePanel
           node={selNode}
           color={projColorOf(selNode.projectId)}
-          projectName={layout.nodes.find((n) => n.kind === "project" && n.projectId === selNode.projectId)?.label ?? "—"}
+          projectName={
+            layout.nodes.find(
+              (n) => n.kind === "project" && n.projectId === selNode.projectId,
+            )?.label ?? "—"
+          }
           connections={layout.adj.get(selNode.id)?.size ?? 0}
           onClose={reset}
         />
@@ -861,7 +1197,12 @@ export function BrainMapPane() {
       ) : null}
 
       {/* zoom controls */}
-      <div className={cn("absolute bottom-3 z-10 flex flex-col gap-1", selNode || focusStats ? "right-[20rem]" : "right-3")}>
+      <div
+        className={cn(
+          "absolute bottom-3 z-10 flex flex-col gap-1",
+          selNode || focusStats ? "right-[20rem]" : "right-3",
+        )}
+      >
         <button
           type="button"
           onClick={() => zoomBy(1.3)}
@@ -883,7 +1224,15 @@ export function BrainMapPane() {
   );
 }
 
-function Legend({ swatch, label, style }: { swatch: string; label: string; style?: React.CSSProperties }) {
+function Legend({
+  swatch,
+  label,
+  style,
+}: {
+  swatch: string;
+  label: string;
+  style?: React.CSSProperties;
+}) {
   return (
     <div className="flex items-center gap-2 text-[11px] font-medium text-foreground/80">
       <span className={cn("inline-block size-2.5", swatch)} style={style} />
@@ -914,14 +1263,25 @@ function Tooltip({
   const offY = r.top + (r.height - H * sc) / 2;
   const sx = offX + (cam.x + cam.s * p.x + W / 2) * sc;
   const sy = offY + (cam.y + cam.s * p.y + H / 2) * sc;
-  const kind = n.kind === "project" ? "project" : n.kind === "memory" ? "memory" : n.kind === "folder" ? "folder" : "file";
+  const kind =
+    n.kind === "project"
+      ? "project"
+      : n.kind === "memory"
+        ? "memory"
+        : n.kind === "folder"
+          ? "folder"
+          : "file";
   return (
     <div
       className="pointer-events-none fixed z-30 -translate-x-1/2 -translate-y-full rounded-md bg-popover px-2.5 py-1.5 text-popover-foreground shadow-lg"
       style={{ left: sx, top: sy - 14 }}
     >
-      <div className="max-w-[260px] truncate text-xs font-semibold">{n.label}</div>
-      <div className="font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground">{kind}</div>
+      <div className="max-w-[260px] truncate text-xs font-semibold">
+        {n.label}
+      </div>
+      <div className="font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground">
+        {kind}
+      </div>
     </div>
   );
 }
@@ -940,11 +1300,19 @@ function SidePanel({
   onClose: () => void;
 }) {
   const kind =
-    node.kind === "memory" ? "Memory node" : node.kind === "project" ? "Project" : node.kind === "folder" ? "Folder / module" : "File";
+    node.kind === "memory"
+      ? "Memory node"
+      : node.kind === "project"
+        ? "Project"
+        : node.kind === "folder"
+          ? "Folder / module"
+          : "File";
   return (
     <aside className="absolute top-14 right-3 bottom-3 z-20 flex w-72 flex-col overflow-hidden rounded-2xl border bg-background/95 shadow-2xl backdrop-blur">
       <div className="flex items-center justify-between border-b px-4 py-3">
-        <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">{kind}</span>
+        <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">
+          {kind}
+        </span>
         <button
           type="button"
           onClick={onClose}
@@ -955,11 +1323,20 @@ function SidePanel({
         </button>
       </div>
       <div className="flex flex-col gap-3 px-4 py-4 text-sm">
-        <div className="font-semibold break-words leading-tight">{node.label}</div>
-        {node.path ? <div className="font-mono text-[11px] break-all text-muted-foreground">{node.path}</div> : null}
+        <div className="font-semibold break-words leading-tight">
+          {node.label}
+        </div>
+        {node.path ? (
+          <div className="font-mono text-[11px] break-all text-muted-foreground">
+            {node.path}
+          </div>
+        ) : null}
         <Field label="Belongs to">
           <span className="inline-flex items-center gap-1.5">
-            <span className="inline-block size-2.5 rounded-[3px]" style={{ background: color }} />
+            <span
+              className="inline-block size-2.5 rounded-[3px]"
+              style={{ background: color }}
+            />
             <span className="font-medium">{projectName}</span>
           </span>
         </Field>
@@ -980,20 +1357,52 @@ function SidePanel({
   );
 }
 
-function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose: () => void }) {
+function ProjectSummaryPanel({
+  stats,
+  onClose,
+}: {
+  stats: ProjectStats;
+  onClose: () => void;
+}) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const totalLang = stats.languages.reduce((s, l) => s + l.count, 0) || 1;
   const topLangs = stats.languages.slice(0, 6);
   const layers = [
-    { key: "modules", label: "Modules", color: stats.color, count: stats.modules, items: stats.moduleList.map((m) => `${m.name}  ·  ${m.count}`) },
-    { key: "source", label: "Source", color: "#6b7280", count: stats.source, items: stats.sourceList },
-    { key: "config", label: "Config", color: "#41464f", count: stats.config, items: stats.configList },
-    { key: "memory", label: "Memory", color: MEMORY_COLOR, count: stats.memory, items: stats.memoryList },
+    {
+      key: "modules",
+      label: "Modules",
+      color: stats.color,
+      count: stats.modules,
+      items: stats.moduleList.map((m) => `${m.name}  ·  ${m.count}`),
+    },
+    {
+      key: "source",
+      label: "Source",
+      color: "#6b7280",
+      count: stats.source,
+      items: stats.sourceList,
+    },
+    {
+      key: "config",
+      label: "Config",
+      color: "#41464f",
+      count: stats.config,
+      items: stats.configList,
+    },
+    {
+      key: "memory",
+      label: "Memory",
+      color: MEMORY_COLOR,
+      count: stats.memory,
+      items: stats.memoryList,
+    },
   ];
   return (
     <aside className="absolute top-14 right-3 bottom-3 z-20 flex w-72 flex-col overflow-hidden rounded-2xl border bg-background/95 shadow-2xl backdrop-blur">
       <div className="flex items-center justify-between border-b px-4 py-3">
-        <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Project branch</span>
+        <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">
+          Project branch
+        </span>
         <button
           type="button"
           onClick={onClose}
@@ -1009,23 +1418,35 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
             className="flex size-9 items-center justify-center rounded-xl text-sm font-bold text-white"
             style={{ background: stats.color }}
           >
-            {(stats.name.slice(0, 2) || "?").replace(/^./, (c) => c.toUpperCase())}
+            {(stats.name.slice(0, 2) || "?").replace(/^./, (c) =>
+              c.toUpperCase(),
+            )}
           </span>
           <span className="truncate text-base font-bold">{stats.name}</span>
         </div>
         <div className="flex gap-2 px-4 pt-3">
           <div className="flex-1 rounded-lg bg-muted/40 px-3 py-2">
-            <div className="text-lg font-bold tabular-nums">{stats.files.toLocaleString()}</div>
-            <div className="font-mono text-[9.5px] text-muted-foreground">files</div>
+            <div className="text-lg font-bold tabular-nums">
+              {stats.files.toLocaleString()}
+            </div>
+            <div className="font-mono text-[9.5px] text-muted-foreground">
+              files
+            </div>
           </div>
           <div className="flex-1 rounded-lg bg-muted/40 px-3 py-2">
-            <div className="text-lg font-bold tabular-nums">{stats.modules}</div>
-            <div className="font-mono text-[9.5px] text-muted-foreground">modules</div>
+            <div className="text-lg font-bold tabular-nums">
+              {stats.modules}
+            </div>
+            <div className="font-mono text-[9.5px] text-muted-foreground">
+              modules
+            </div>
           </div>
         </div>
 
         <div className="px-4 pt-4">
-          <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Layer breakdown</span>
+          <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">
+            Layer breakdown
+          </span>
           <div className="mt-2 flex flex-col">
             {layers.map((l) => {
               const open = expanded === l.key;
@@ -1037,11 +1458,25 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
                     disabled={l.count === 0}
                     className="flex w-full items-center gap-2.5 py-1.5 text-left disabled:opacity-50"
                   >
-                    <span className="inline-block size-2.5 rounded-[3px]" style={{ background: l.color }} />
-                    <span className="flex-1 text-[12.5px] font-medium text-foreground/85">{l.label}</span>
-                    <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{l.count}</span>
+                    <span
+                      className="inline-block size-2.5 rounded-[3px]"
+                      style={{ background: l.color }}
+                    />
+                    <span className="flex-1 text-[12.5px] font-medium text-foreground/85">
+                      {l.label}
+                    </span>
+                    <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                      {l.count}
+                    </span>
                     {l.count > 0 ? (
-                      <span className={cn("text-[10px] text-muted-foreground transition-transform", open && "rotate-90")}>›</span>
+                      <span
+                        className={cn(
+                          "text-[10px] text-muted-foreground transition-transform",
+                          open && "rotate-90",
+                        )}
+                      >
+                        ›
+                      </span>
                     ) : (
                       <span className="w-[10px]" />
                     )}
@@ -1058,7 +1493,9 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
                         </div>
                       ))}
                       {l.items.length > 80 ? (
-                        <div className="py-0.5 font-mono text-[10px] text-muted-foreground">+{l.items.length - 80} more</div>
+                        <div className="py-0.5 font-mono text-[10px] text-muted-foreground">
+                          +{l.items.length - 80} more
+                        </div>
                       ) : null}
                     </div>
                   ) : null}
@@ -1070,22 +1507,37 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
 
         {topLangs.length ? (
           <div className="px-4 pt-4">
-            <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Languages</span>
+            <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">
+              Languages
+            </span>
             <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-muted">
               {topLangs.map((l) => (
                 <span
                   key={l.name}
-                  style={{ width: `${(l.count / totalLang) * 100}%`, background: LANG_COLOR[l.name] ?? LANG_COLOR.Other }}
+                  style={{
+                    width: `${(l.count / totalLang) * 100}%`,
+                    background: LANG_COLOR[l.name] ?? LANG_COLOR.Other,
+                  }}
                   title={`${l.name} ${Math.round((l.count / totalLang) * 100)}%`}
                 />
               ))}
             </div>
             <div className="mt-2 flex flex-col gap-1">
               {topLangs.map((l) => (
-                <div key={l.name} className="flex items-center gap-2 text-[11px]">
-                  <span className="inline-block size-2 rounded-full" style={{ background: LANG_COLOR[l.name] ?? LANG_COLOR.Other }} />
+                <div
+                  key={l.name}
+                  className="flex items-center gap-2 text-[11px]"
+                >
+                  <span
+                    className="inline-block size-2 rounded-full"
+                    style={{
+                      background: LANG_COLOR[l.name] ?? LANG_COLOR.Other,
+                    }}
+                  />
                   <span className="flex-1 text-foreground/80">{l.name}</span>
-                  <span className="font-mono text-muted-foreground tabular-nums">{Math.round((l.count / totalLang) * 100)}%</span>
+                  <span className="font-mono text-muted-foreground tabular-nums">
+                    {Math.round((l.count / totalLang) * 100)}%
+                  </span>
                 </div>
               ))}
             </div>
@@ -1094,10 +1546,15 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
 
         {stats.topModules.length ? (
           <div className="px-4 pt-4 pb-4">
-            <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">Top modules</span>
+            <span className="font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">
+              Top modules
+            </span>
             <div className="mt-2 flex flex-wrap gap-1.5">
               {stats.topModules.map((m) => (
-                <span key={m} className="rounded-md border bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground/80">
+                <span
+                  key={m}
+                  className="rounded-md border bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground/80"
+                >
                   {m}
                 </span>
               ))}
@@ -1118,10 +1575,18 @@ function ProjectSummaryPanel({ stats, onClose }: { stats: ProjectStats; onClose:
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
       <span className="text-[13px]">{children}</span>
     </div>
   );
