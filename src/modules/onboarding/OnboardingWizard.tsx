@@ -45,7 +45,7 @@ const DONE_KEY = "koden.onboarding.v1.done";
 // Providers offered in the inline cloud quick-setup: keyed AND with a curated
 // (non "-custom") model, so saving a key here yields a WORKING default model.
 // Free-form providers (OpenRouter, openai-compatible) only ship a "-custom"
-// placeholder whose model id the user must supply — offering them here would let
+// placeholder whose model id the user must supply, so offering them here would let
 // someone finish onboarding with a non-working AI. Those + local servers route
 // to the full Settings > Models panel instead.
 const isCuratedModelId = (id: string): boolean => !id.endsWith("-custom");
@@ -69,7 +69,7 @@ const STEPS: StepMeta[] = [
   { title: "How Koden works", subtitle: "Three pieces, set up once." },
   {
     title: "Connect an AI model",
-    subtitle: "Bring your own — cloud or local.",
+    subtitle: "Bring your own, cloud or local.",
   },
   {
     title: "Choose your projects folder",
@@ -85,7 +85,7 @@ const STEPS: StepMeta[] = [
 /**
  * First-run "Welcome to Koden" onboarding. A multi-step modal built on the shared
  * Dialog that walks a new user through: what Koden is, how it works, connecting an
- * AI model (real BYOK — cloud key or hand-off to local model settings), choosing
+ * AI model (real BYOK: cloud key or hand-off to local model settings), choosing
  * the workspace source-of-truth folder, and optionally enabling the Brain Librarian.
  *
  * Every step writes through the real backend: API keys go to the OS keyring via
@@ -402,7 +402,7 @@ export function OnboardingWizard() {
                   ? "Saving…"
                   : libBudget.trim() || libKey.trim()
                     ? "Enable & continue"
-                    : "Skip — leave off"}
+                    : "Leave it off"}
                 <HugeiconsIcon
                   icon={ArrowRight01Icon}
                   size={15}
@@ -464,8 +464,8 @@ function WelcomeBody() {
   return (
     <div className="space-y-3 text-center">
       <p className="text-sm leading-relaxed text-muted-foreground">
-        Koden is a terminal and editor with an AI that actually does the work —
-        it reads your code, runs commands, and remembers how your projects fit
+        Koden is a terminal and editor with an AI that actually does the work.
+        It reads your code, runs commands, and remembers how your projects fit
         together.
       </p>
       <p className="text-sm leading-relaxed text-muted-foreground">
@@ -479,16 +479,15 @@ function WelcomeBody() {
 function HowBody() {
   return (
     <div className="space-y-4">
-      <FeatureRow icon={HierarchySquare01Icon} title="The Brain — local index">
-        Koden indexes your projects on your machine for instant search and a
-        live map of how your code connects. Nothing is uploaded.
+      <FeatureRow icon={HierarchySquare01Icon} title="The Brain">
+        A local index of your projects for instant search and a live map of how
+        your code connects. Nothing is uploaded.
       </FeatureRow>
-      <FeatureRow icon={CloudIcon} title="The AI — your model">
-        Bring your own model: a cloud API key (Anthropic, OpenAI, …) or a
-        local/open model (Ollama, LM Studio). You're in control of cost and
-        privacy.
+      <FeatureRow icon={CloudIcon} title="The AI">
+        Bring your own model: a cloud API key (Anthropic, OpenAI, …) or a local
+        model (Ollama, LM Studio). You're in control of cost and privacy.
       </FeatureRow>
-      <FeatureRow icon={RoboticIcon} title="The Librarian — optional memory">
+      <FeatureRow icon={RoboticIcon} title="The Librarian">
         An optional helper that tidies your project notes over time. Off by
         default; you can turn it on in a moment.
       </FeatureRow>
@@ -569,8 +568,8 @@ function AiBody({
           className="shrink-0 text-muted-foreground"
         />
         <div className="flex-1 text-xs text-muted-foreground">
-          Prefer a local / open model (Ollama, LM Studio)? Free and private —
-          set it up in the full model settings.
+          Prefer a local or open model (Ollama, LM Studio)? It's free and
+          private. Set it up in the full model settings.
         </div>
         <Button
           variant="outline"
@@ -678,7 +677,7 @@ function LibrarianBody({
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-muted-foreground">
         The Librarian uses an <span className="text-foreground">Anthropic</span>{" "}
-        model to propose tidy-ups to your project memory — you always approve
+        model to propose tidy-ups to your project memory, and you always approve
         before anything is saved. It's Anthropic-only for now and costs a little
         per run, so it's gated by a small spending cap (set $0 anytime to turn
         it off).
@@ -691,7 +690,7 @@ function LibrarianBody({
             size={15}
             strokeWidth={2}
           />
-          Anthropic key detected — just set a budget below to enable it.
+          Anthropic key detected. Just set a budget below to enable it.
         </div>
       ) : (
         <div>
@@ -717,12 +716,12 @@ function LibrarianBody({
           inputMode="decimal"
           value={budget}
           onChange={(e) => onBudget(e.target.value)}
-          placeholder="0.00 — leave blank to keep it off"
+          placeholder="0.00 (blank keeps it off)"
           className="h-9 text-sm"
         />
         <p className="mt-1.5 text-[11px] text-muted-foreground">
           A few dollars is plenty. This is a spending cap, not a recurring
-          charge — spend only counts up; clear it to $0 to disable.
+          charge. Spend only counts up; clear it to $0 to disable.
         </p>
       </div>
     </div>
@@ -744,15 +743,15 @@ function DoneBody({
       icon: CloudIcon,
       label: aiConfigured
         ? "AI model connected"
-        : "AI model — set up later in Settings › Models",
+        : "AI model: set up later in Settings › Models",
     },
     {
       ok: wsAdded !== null && wsAdded > 0,
       icon: FolderOpenIcon,
       label:
         wsAdded !== null && wsAdded > 0
-          ? `Workspace set — ${wsAdded} project${wsAdded === 1 ? "" : "s"} indexing`
-          : "Workspace — add a folder later from the Brain button",
+          ? `Workspace set: ${wsAdded} project${wsAdded === 1 ? "" : "s"} indexing`
+          : "Workspace: add a folder later from the Brain button",
     },
     {
       ok: libEnabled,
