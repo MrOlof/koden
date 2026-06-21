@@ -239,13 +239,6 @@ export function BrainMapPane() {
       moved: false,
       bg: target.getAttribute("data-bg") === "1",
     };
-    // Capture so a pan keeps tracking even when the cursor leaves the SVG box, and
-    // pointerup off-element still ends it. (Without this, pan truncates at the edge.)
-    try {
-      (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    } catch {
-      // setPointerCapture can throw if the pointer is already gone — harmless.
-    }
     applyCam(false); // cancel any in-flight fly-to transition before dragging
     if (svgRef.current) svgRef.current.style.cursor = "grabbing";
   };
@@ -254,7 +247,17 @@ export function BrainMapPane() {
     if (!d) return;
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
-    if (Math.abs(dx) + Math.abs(dy) > 4) d.moved = true;
+    // Capture only once a real DRAG starts (not on a click) — capturing on
+    // pointerdown would steal the click from nodes and break focus/select. Once
+    // captured, the pan keeps tracking even past the SVG edge.
+    if (!d.moved && Math.abs(dx) + Math.abs(dy) > 4) {
+      d.moved = true;
+      try {
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      } catch {
+        // pointer already gone — harmless.
+      }
+    }
     const sc = vbScale();
     cam.current.x = d.cx + dx / sc;
     cam.current.y = d.cy + dy / sc;
@@ -322,7 +325,7 @@ export function BrainMapPane() {
       const an = byId.get(a);
       return an && an.project_id === focusPid ? 0.4 : 0.03;
     }
-    return kind === "import" ? 0.22 : kind === "anchor" ? 0.3 : 0.14;
+    return kind === "import" ? 0.32 : kind === "anchor" ? 0.42 : 0.2;
   };
 
   const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
@@ -389,16 +392,16 @@ export function BrainMapPane() {
                   y1={a.y}
                   x2={b.x}
                   y2={b.y}
-                  className={hot ? undefined : "text-border"}
+                  className={hot ? undefined : "text-muted-foreground"}
                   stroke={stroke}
-                  strokeWidth={hot ? 1.4 : 0.7}
+                  strokeWidth={hot ? 1.4 : 0.8}
                   strokeOpacity={edgeOpacity(e.a, e.b, e.kind)}
                 />
               );
             })}
           </g>
           {/* spines: brain → hubs */}
-          <g className="text-border">
+          <g className="text-muted-foreground">
             {layout.projects.map((p) => {
               const h = pos.get(p.node.id);
               if (!h) return null;
@@ -410,8 +413,8 @@ export function BrainMapPane() {
                   x2={h.x}
                   y2={h.y}
                   stroke={focusPid === p.node.project_id ? p.color : "currentColor"}
-                  strokeWidth={focusPid === p.node.project_id ? 1.3 : 0.9}
-                  strokeOpacity={focusPid ? (focusPid === p.node.project_id ? 0.5 : 0.05) : 0.28}
+                  strokeWidth={focusPid === p.node.project_id ? 1.4 : 1}
+                  strokeOpacity={focusPid ? (focusPid === p.node.project_id ? 0.6 : 0.06) : 0.45}
                 />
               );
             })}
