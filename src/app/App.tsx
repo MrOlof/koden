@@ -5,14 +5,17 @@ import {
 } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { toast } from "sonner";
 import { installTestBus } from "@/dev/testBus";
 import { getLaunchDir } from "@/lib/launchDir";
-import { getDefaultFolder } from "@/modules/settings/store";
-import { usePresence } from "@/lib/usePresence";
 import { quoteShellArg } from "@/lib/shellQuote";
+import { usePresence } from "@/lib/usePresence";
 import { useZoom } from "@/lib/useZoom";
-import { AgentNotificationsBridge, RetryBridge, UsageBridge } from "@/modules/agents";
+import { isMarkdownPath } from "@/lib/utils";
+import {
+  AgentNotificationsBridge,
+  RetryBridge,
+  UsageBridge,
+} from "@/modules/agents";
 import { useUsageStore } from "@/modules/agents/store/usageStore";
 import {
   AgentRunBridge,
@@ -24,15 +27,12 @@ import {
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
+import { brainBuildGist, resolveProjectForCwd } from "@/modules/brain";
+import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import {
-  CommandPalette,
-  createCommandItems,
-} from "@/modules/command-palette";
-import { BrainSetupWizard, brainBuildGist, resolveProjectForCwd } from "@/modules/brain";
-import {
+  type EditorPaneHandle,
   NewEditorDialog,
   useEditorFileSync,
-  type EditorPaneHandle,
 } from "@/modules/editor";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
 import type { GitHistorySearchHandle } from "@/modules/git-history";
@@ -41,38 +41,62 @@ import {
   type SearchInlineHandle,
   type SearchTarget,
 } from "@/modules/header";
+import { OnboardingWizard } from "@/modules/onboarding/OnboardingWizard";
+import {
+  AGENT_ROLES,
+  type Agent,
+  AgentBusBridge,
+  AgentDock,
+  type AgentRole,
+  DirectorBusBridge,
+  type DirectorCommand,
+  getAgentCommandWithArgs,
+  hydrateOrchestration,
+  OrchestrationActivityBridge,
+  OrchestrationAttentionBridge,
+  roleAccent,
+  type SpawnTerminalRequest,
+  type TeamTemplate,
+  terminalsToRegister,
+  useOrchestrationStore,
+} from "@/modules/orchestration";
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { isMarkdownPath } from "@/lib/utils";
+import { getDefaultFolder } from "@/modules/settings/store";
 import {
-  useGlobalShortcuts,
   type ShortcutHandlers,
   type ShortcutId,
+  useGlobalShortcuts,
 } from "@/modules/shortcuts";
 import {
-  SidebarRail,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  SidebarRail,
   useSidebarPanel,
 } from "@/modules/sidebar";
 import {
   SourceControlPanel,
   useSourceControlContext,
 } from "@/modules/source-control";
+import {
+  SpaceSwitcher,
+  useSpacePersistence,
+  useSpaces,
+  useSpacesBoot,
+} from "@/modules/spaces";
 import { StatusBar } from "@/modules/statusbar";
 import {
   GridDialog,
   type TerminalTab,
   useLayoutMode,
-  useTabs,
   useTabStatusStore,
+  useTabs,
   useWindowTitle,
   useWorkspaceCwd,
   VerticalTabs,
 } from "@/modules/tabs";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import {
   clearFocusedTerminal,
   disposeSession,
@@ -84,9 +108,9 @@ import {
   navigateFocusedBlocks,
   nextPaneColor,
   respawnSession,
-  sideToSplit,
   type SplitPaneType,
   type SplitSide,
+  sideToSplit,
   submitToLeaf,
   type TerminalPaneHandle,
   usePaneTitleStore,
@@ -94,37 +118,15 @@ import {
   whenSessionReady,
   writeToSession,
 } from "@/modules/terminal";
-import {
-  SpaceSwitcher,
-  useSpaces,
-  useSpacePersistence,
-  useSpacesBoot,
-} from "@/modules/spaces";
-import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
-import {
-  type Agent,
-  AgentBusBridge,
-  AgentDock,
-  AGENT_ROLES,
-  type AgentRole,
-  type DirectorCommand,
-  DirectorBusBridge,
-  getAgentCommandWithArgs,
-  hydrateOrchestration,
-  OrchestrationActivityBridge,
-  OrchestrationAttentionBridge,
-  roleAccent,
-  type SpawnTerminalRequest,
-  type TeamTemplate,
-  terminalsToRegister,
-  useOrchestrationStore,
-} from "@/modules/orchestration";
 import { hydrateDocs } from "@/modules/workspace-docs";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { CloseDialogs } from "./components/CloseDialogs";
 import {
   TOGGLE_BLOCK_INPUT_EVENT,
@@ -480,7 +482,9 @@ export default function App() {
   const setLive = useChatStore((s) => s.setLive);
   const respondToApproval = useChatStore((s) => s.respondToApproval);
 
-  const linkOrchestrationTerminal = useOrchestrationStore((s) => s.linkTerminal);
+  const linkOrchestrationTerminal = useOrchestrationStore(
+    (s) => s.linkTerminal,
+  );
   const setOrchestrationStatus = useOrchestrationStore((s) => s.setStatus);
   const agentCount = useOrchestrationStore((s) => Object.keys(s.agents).length);
 
@@ -602,7 +606,8 @@ export default function App() {
     const prev = autoColorPrev.current;
     autoColorPrev.current = { mode: paneColorMode, palette: paneColorPalette };
     if (prev === null) return;
-    if (prev.mode === paneColorMode && prev.palette === paneColorPalette) return;
+    if (prev.mode === paneColorMode && prev.palette === paneColorPalette)
+      return;
     if (paneColorMode !== "automatic") return;
     const setPaneColor = usePaneTitleStore.getState().setPaneColor;
     for (const t of tabsRef.current) {
@@ -924,12 +929,16 @@ export default function App() {
             // gist and worker prompt never clobber each other. Fail-open.
             let combined = workerPrompt;
             try {
-              const projectId = spawnCwd ? await resolveProjectForCwd(spawnCwd) : null;
+              const projectId = spawnCwd
+                ? await resolveProjectForCwd(spawnCwd)
+                : null;
               if (projectId) {
                 const gist = await brainBuildGist(projectId, task, 800);
                 if (gist && gist.bytes) {
                   combined = `${gist.bytes}\n\n${workerPrompt}`;
-                  toast.success(`Brain: injected gist (${gist.sources.length} files)`);
+                  toast.success(
+                    `Brain: injected gist (${gist.sources.length} files)`,
+                  );
                 }
               }
             } catch (e) {
@@ -959,7 +968,6 @@ export default function App() {
       ensureKodenDir,
     ],
   );
-
 
   const sendCd = useCallback(
     (path: string) => {
@@ -1073,7 +1081,6 @@ export default function App() {
     },
     [newPreviewTab],
   );
-
 
   // Pick a fresh leaf accent. Automatic mode draws a generated color from the
   // chosen palette so each new pane is distinct; manual mode uses the per-type
@@ -1420,7 +1427,11 @@ export default function App() {
           }
           await native.writeFile(
             ps1Path,
-            kodenFunctionsPs1(getAgentCommandWithArgs(), promptPath, agentsPath),
+            kodenFunctionsPs1(
+              getAgentCommandWithArgs(),
+              promptPath,
+              agentsPath,
+            ),
           );
           command = `. ${quoteShellArg(ps1Path)}; Clear-Host; Director`;
         } catch {
@@ -1460,7 +1471,10 @@ export default function App() {
         name: "Director",
         task: "Coordinating workspace",
       });
-      const { tabId, leafId } = newAgentTab(inheritedCwdForNewTab(), "Director");
+      const { tabId, leafId } = newAgentTab(
+        inheritedCwdForNewTab(),
+        "Director",
+      );
       linkOrchestrationTerminal(directorId, { leafId, tabId });
       usePaneTitleStore
         .getState()
@@ -1524,7 +1538,10 @@ export default function App() {
       name: "Director",
       task: "Coordinating workspace",
     });
-    linkOrchestrationTerminal(directorId, { leafId: newLeafId, tabId: activeId });
+    linkOrchestrationTerminal(directorId, {
+      leafId: newLeafId,
+      tabId: activeId,
+    });
     usePaneTitleStore
       .getState()
       .setPaneTitle(newLeafId, "Director", true, roleAccent("director"));
@@ -1560,7 +1577,10 @@ export default function App() {
         if (directorId) store.setStatus(directorId, "working");
         return;
       }
-      if (directorId && (cmd.cmd === "subagent-start" || cmd.cmd === "subagent-stop")) {
+      if (
+        directorId &&
+        (cmd.cmd === "subagent-start" || cmd.cmd === "subagent-stop")
+      ) {
         store.setStatus(directorId, "working");
       }
 
@@ -1805,8 +1825,9 @@ export default function App() {
 
   const handleNewTabInSpace = useCallback(
     (spaceId: string) => {
-      const root = useSpaces.getState().spaces.find((s) => s.id === spaceId)
-        ?.root;
+      const root = useSpaces
+        .getState()
+        .spaces.find((s) => s.id === spaceId)?.root;
       newTabInSpace(spaceId, root ?? undefined);
     },
     [newTabInSpace],
@@ -2036,7 +2057,7 @@ export default function App() {
             />
           )}
 
-          <BrainSetupWizard />
+          <OnboardingWizard />
 
           <main className="zoom-content flex min-h-0 flex-1 flex-row">
             {/* Sidebar mode: a slim always-visible activity rail (Files |
@@ -2071,7 +2092,10 @@ export default function App() {
                 }}
               >
                 <div className="flex h-full min-h-0 flex-col border-r border-border/60 bg-card">
-                  <div key={sidebarView} className="min-h-0 flex-1 koden-panel-in">
+                  <div
+                    key={sidebarView}
+                    className="min-h-0 flex-1 koden-panel-in"
+                  >
                     {sidebarView === "explorer" ? (
                       <FileExplorer
                         ref={explorerRef}
