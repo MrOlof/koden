@@ -330,6 +330,71 @@ fn code_impact_reverse_import_closure() {
     assert!(imp.ast_dependents.contains(&"src/c.ts".to_string()), "{:?}", imp.ast_dependents);
 }
 
+/// P2 gate (strengthened): incremental relink == full rebuild across ADD + DELETE
+/// + RENAME + MODIFY in one batch — not just a single modify.
+#[test]
+fn incremental_relink_equals_full_rebuild_add_delete_rename() {
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path();
+    ts_chain(root); // a, b(→a), c(→b)
+
+    let inc_store = tempfile::tempdir().unwrap();
+    let inc = SqliteIndex::open(&inc_store.path().join("i.sqlite")).unwrap();
+    index_dir(&inc, PID, root);
+
+    // add d(→c); delete a; rename b→b2; modify c to import ./b2.
+    write(root, "src/d.ts", b"import { charlie } from './c';\nexport function delta() {}");
+    std::fs::remove_file(root.join("src/a.ts")).unwrap();
+    std::fs::rename(root.join("src/b.ts"), root.join("src/b2.ts")).unwrap();
+    std::fs::write(
+        root.join("src/c.ts"),
+        b"import { bravo } from './b2';\nexport function charlie() { bravo(); }",
+    )
+    .unwrap();
+    index_changed(
+        &inc,
+        PID,
+        root,
+        &[
+            root.join("src/d.ts"),
+            root.join("src/a.ts"),
+            root.join("src/b.ts"),
+            root.join("src/b2.ts"),
+            root.join("src/c.ts"),
+        ],
+    );
+
+    let full_store = tempfile::tempdir().unwrap();
+    let full = SqliteIndex::open(&full_store.path().join("i.sqlite")).unwrap();
+    index_dir(&full, PID, root);
+
+    assert_eq!(
+        inc.project_edges(PID).unwrap(),
+        full.project_edges(PID).unwrap(),
+        "edges diverge (add/delete/rename)"
+    );
+    assert_eq!(
+        inc.project_node_keys(PID).unwrap(),
+        full.project_node_keys(PID).unwrap(),
+        "nodes diverge (add/delete/rename)"
+    );
+}
+
+/// A getter and setter on the same line are both kept (start_col disambiguates
+/// the node PK — they used to collide and one was silently dropped).
+#[test]
+fn same_line_getter_setter_both_indexed() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/c.ts", b"export class C { get x() { return 1; } set x(v: number) {} }");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    let syms = get_symbol_readonly(&db, PID, "x").unwrap();
+    assert_eq!(syms.len(), 2, "getter + setter both kept: {syms:?}");
+}
+
 /// P2 gate: an incrementally-relinked graph equals a full rebuild over the same
 /// final on-disk state (identical nodes + edges).
 #[test]

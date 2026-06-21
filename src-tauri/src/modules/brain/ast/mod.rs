@@ -115,6 +115,9 @@ pub struct CodeNode {
     pub name: String,
     pub kind: String,
     pub start_line: i64,
+    /// 0-based column — disambiguates same-line same-kind defs (e.g. a getter and
+    /// setter of the same property on one line) so neither is dropped.
+    pub start_col: i64,
 }
 
 /// One file's AST analysis: definitions + raw import specifiers (one parse).
@@ -219,10 +222,12 @@ fn run_defs(language: &Language, lang: Lang, tree: &Tree, src: &[u8]) -> Vec<Cod
                     continue;
                 }
                 let kind = node.parent().map(|p| normalize_kind(p.kind())).unwrap_or("symbol");
+                let pos = node.start_position();
                 out.push(CodeNode {
                     name: name.to_string(),
                     kind: kind.to_string(),
-                    start_line: node.start_position().row as i64 + 1,
+                    start_line: pos.row as i64 + 1,
+                    start_col: pos.column as i64,
                 });
             }
         }

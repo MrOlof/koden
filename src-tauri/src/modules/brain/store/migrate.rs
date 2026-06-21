@@ -16,8 +16,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
          PRAGMA foreign_keys=ON;
          PRAGMA busy_timeout=5000;",
     )?;
-    conn.execute_batch(DDL)?;
 
+    // Read the stored version BEFORE (re)creating tables, so an upgrade can drop
+    // derived tables whose schema changed. `brain_meta` must exist to read it.
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS brain_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
     let current: Option<i64> = conn
         .query_row(
             "SELECT value FROM brain_meta WHERE key='schema_version'",
@@ -26,6 +28,22 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
         )
         .ok()
         .and_then(|s| s.parse().ok());
+
+    // On any upgrade, drop the DERIVED (file-backed) tables so the DDL recreates
+    // them at the current schema and the next warm pass rebuilds them — backfills
+    // new columns + the AST-fed `symbols` column. Canonical data (notes,
+    // proposals, reject_signatures) is preserved (preserve-over-destroy).
+    if matches!(current, Some(v) if v < SCHEMA_VERSION) {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS code_fts;
+             DROP TABLE IF EXISTS code_nodes;
+             DROP TABLE IF EXISTS code_imports;
+             DROP TABLE IF EXISTS code_edges;
+             DELETE FROM files;",
+        )?;
+    }
+
+    conn.execute_batch(DDL)?;
 
     match current {
         Some(v) if v == SCHEMA_VERSION => Ok(v),
@@ -52,6 +70,27 @@ mod tests {
         assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
         // second run must not error and must keep the version.
         assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn upgrade_rebuilds_derived_file_tables() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        migrate(&conn).unwrap();
+        // Simulate an older store with a stale derived row.
+        conn.execute("UPDATE brain_meta SET value='1' WHERE key='schema_version'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO files(project_id,path,hash,size,fts_rowid) VALUES('p','x.rs','h',1,1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+        // The upgrade cleared the derived file manifest so a warm pass rebuilds it
+        // (backfilling the AST-fed symbols column + any new columns).
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "upgrade clears derived file rows");
     }
 
     #[test]

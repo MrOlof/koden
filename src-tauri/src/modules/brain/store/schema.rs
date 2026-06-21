@@ -7,7 +7,9 @@
 /// v2: added the `notes` table (P1 native memory store).
 /// v3: added `proposals` + `reject_signatures` (P1 doctor → proposal review loop).
 /// v4: added the AST graph — `code_nodes` + `code_imports` + `code_edges` (P2).
-pub const SCHEMA_VERSION: i64 = 4;
+/// v5: `code_nodes.start_col` (getter/setter PK fix); upgrades rebuild derived
+///     file tables so the AST-fed `symbols` column is backfilled.
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -102,7 +104,8 @@ CREATE TABLE IF NOT EXISTS code_nodes (
     name       TEXT NOT NULL,
     kind       TEXT NOT NULL,
     start_line INTEGER NOT NULL,
-    PRIMARY KEY (project_id, path, name, kind, start_line)
+    start_col  INTEGER NOT NULL,
+    PRIMARY KEY (project_id, path, name, kind, start_line, start_col)
 );
 CREATE INDEX IF NOT EXISTS code_nodes_name ON code_nodes(project_id, name);
 CREATE INDEX IF NOT EXISTS code_nodes_path ON code_nodes(project_id, path);

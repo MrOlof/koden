@@ -13,6 +13,10 @@
 //! k1=1.2, b=0.75 — identical to Conductr's `K1`/`B`, `lexical.ts:11-12`) with
 //! first-class per-column weights, so the per-field "path ~3×" weight is also a
 //! real parameter rather than Conductr's string-repetition hack (`code/search.ts:9-24`).
+//! Precision: RRF fuses by RANK, not score magnitude (by design — it needs no
+//! cross-scale calibration). The per-column bm25 weights therefore shape ordering
+//! WITHIN the identity leg; the per-leg `w_leg` shape each leg's cross-leg weight.
+//! A strong vs weak hit at the same intra-leg rank fuse the same — intentional.
 
 /// Default RRF constant (Conductr `rrf.ts:9`).
 pub const RRF_K: f64 = 60.0;

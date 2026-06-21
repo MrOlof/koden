@@ -343,7 +343,17 @@ pub fn index_changed(
                     indexed += 1;
                 }
             }
-            Ok(_) => {} // directory event — ignore
+            Ok(_) => {
+                // A directory event (e.g. an atomic move-in of an existing tree)
+                // whose children weren't individually reported — index them so the
+                // incremental graph converges with a full rebuild.
+                for child in walk::walk_files(path) {
+                    let crel = rel_path(root, &child);
+                    if !crel.is_empty() && index_one_file(index, project_id, &crel, &child) {
+                        indexed += 1;
+                    }
+                }
+            }
             Err(_) => {
                 // gone (deleted / moved away) — prune the stale row + FTS doc.
                 if index.remove_file(project_id, &rel).unwrap_or(false) {

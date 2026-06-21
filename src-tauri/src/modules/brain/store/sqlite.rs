@@ -113,8 +113,8 @@ impl SqliteIndex {
         if let Some(a) = &analysis {
             for n in &a.nodes {
                 tx.execute(
-                    "INSERT OR IGNORE INTO code_nodes(project_id,path,name,kind,start_line) VALUES(?1,?2,?3,?4,?5)",
-                    rusqlite::params![project_id, rel_path, n.name, n.kind, n.start_line],
+                    "INSERT OR IGNORE INTO code_nodes(project_id,path,name,kind,start_line,start_col) VALUES(?1,?2,?3,?4,?5,?6)",
+                    rusqlite::params![project_id, rel_path, n.name, n.kind, n.start_line, n.start_col],
                 )?;
             }
             for spec in &a.imports {
@@ -343,15 +343,16 @@ impl SqliteIndex {
     /// Sorted node keys `path|name|kind|line` — for the property test.
     pub fn project_node_keys(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT path,name,kind,start_line FROM code_nodes WHERE project_id=?1 ORDER BY path,name,kind,start_line",
+            "SELECT path,name,kind,start_line,start_col FROM code_nodes WHERE project_id=?1 ORDER BY path,name,kind,start_line,start_col",
         )?;
         let it = stmt.query_map([project_id], |r| {
             Ok(format!(
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}",
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?
             ))
         })?;
         let mut v = Vec::new();
@@ -430,10 +431,13 @@ impl SqliteIndex {
         tx.execute("DELETE FROM code_edges WHERE project_id=?1", [project_id])?;
         for (src, spec) in imports {
             if let Some(dst) = resolve_import(&src, &spec, &files) {
-                tx.execute(
-                    "INSERT OR IGNORE INTO code_edges(project_id,src_path,dst_path,kind) VALUES(?1,?2,?3,'imports')",
-                    (project_id, &src, &dst),
-                )?;
+                if dst != src {
+                    // skip self-loops (a file resolving an import to itself)
+                    tx.execute(
+                        "INSERT OR IGNORE INTO code_edges(project_id,src_path,dst_path,kind) VALUES(?1,?2,?3,'imports')",
+                        (project_id, &src, &dst),
+                    )?;
+                }
             }
         }
         tx.commit()?;
@@ -465,13 +469,18 @@ fn resolve_import(
     spec: &str,
     files: &std::collections::HashSet<String>,
 ) -> Option<String> {
-    if !(spec.starts_with("./") || spec.starts_with("../")) {
+    // Normalize the specifier: backslashes → '/' (Windows-authored imports) and
+    // drop any ?query / #hash suffix before resolving.
+    let spec_norm = spec.replace('\\', "/");
+    let spec_clean = spec_norm.split(['?', '#']).next().unwrap_or(&spec_norm);
+    if !(spec_clean.starts_with("./") || spec_clean.starts_with("../")) {
         return None;
     }
     let dir = std::path::Path::new(importer)
         .parent()
         .unwrap_or_else(|| std::path::Path::new(""));
-    let base = normalize_rel(&dir.join(spec));
+    // `None` when the spec escapes the project root — not an in-project edge.
+    let base = normalize_rel(&dir.join(spec_clean))?;
     if base.is_empty() {
         return None;
     }
@@ -484,19 +493,21 @@ fn resolve_import(
 }
 
 /// Lexically normalize a path (resolve `.`/`..`) to a forward-slash rel string.
-fn normalize_rel(p: &std::path::Path) -> String {
+/// Returns `None` if `..` escapes above the start (would point outside the
+/// project root) — preventing a false edge to a same-named in-root file.
+fn normalize_rel(p: &std::path::Path) -> Option<String> {
     use std::path::Component;
     let mut stack: Vec<String> = Vec::new();
     for comp in p.components() {
         match comp {
             Component::Normal(s) => stack.push(s.to_string_lossy().to_string()),
             Component::ParentDir => {
-                stack.pop();
+                stack.pop()?; // escaped above the root → not an in-project edge
             }
             _ => {}
         }
     }
-    stack.join("/")
+    Some(stack.join("/"))
 }
 
 /// All definition locations of a symbol (`brain_get_symbol`).
@@ -542,6 +553,7 @@ pub fn code_impact_readonly(
         for x in it {
             v.push(x?);
         }
+        v.sort(); // deterministic order for multi-definition symbols
         v
     };
 

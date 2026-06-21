@@ -352,7 +352,34 @@ impact(alpha) dependents = {b, c}). The `symbols` FTS column is now AST-fed.
 Green: clippy `-D warnings` clean · `cargo test` 243 passed / 1 pre-existing ·
 brain lib 51 · brain_sandbox 11.
 
-⏭ P2 remaining (refinements, gate already met): module resolution (tsconfig paths
-/ package exports / Cargo members) + Rust `use` edges; refs/calls edges +
-`brain_code_graph`/`brain_neighbors` (BFS depth-k); a frontend impact view; then a
-P2 verification pass. **P2's marquee (real AST graph + tiered impact) + gate are done.**
+### P2 adversarial-verification round + hardening ✅
+8-reviewer + synthesis fan-out (waved 4-at-a-time after the first run hit a transient
+server rate-limit; ~1.1M tokens). 31 findings, severities adjudicated against code.
+**The convergence gate held structurally** — no real incremental≠full break (the
+dir-move-in case self-heals + a full pass is always correct); `analyze` is panic-safe
+and `parent().kind()` derivation is robust. Fixed the must-fix set:
+- **HIGH — `normalize_rel` root escape**: `../shared` from a root file collapsed to
+  `shared` → false edge. Now returns `None` on escape (drops the edge). + guard test.
+- **MEDIUM — getter/setter PK collision**: same-line accessors collided on
+  `code_nodes` PK and one was dropped. Added `start_col` to the node + PK (schema v5).
+  + `same_line_getter_setter_both_indexed` test.
+- **MEDIUM — symbols backfill on upgrade**: restructured `migrate` to DROP the
+  derived file tables on any version bump (preserving notes/proposals) so a warm pass
+  rebuilds + backfills the AST-fed `symbols` column. + upgrade test.
+- **MEDIUM — dir move-in**: `index_changed` now walks+indexes a moved-in directory's
+  children (closes the one self-healing convergence gap).
+- **MEDIUM — gate test strengthened**: added an ADD+DELETE+RENAME+MODIFY convergence
+  test (not just one MODIFY), so the "proven" claim is honest.
+- Cheap correctness: spec normalization (backslash + `?query`/`#hash`), self-loop
+  edge skip, sorted `defined_in`, and a precise RRF doc note (RRF fuses by rank, so
+  per-column bm25 weights order intra-leg while per-leg weights drive cross-leg — by
+  design, not a dropped weight).
+Green: clippy `-D warnings` clean · `cargo test` 244 passed / 1 pre-existing ·
+brain lib 52 · brain_sandbox 13.
+
+⏭ P2 deferred (logged, non-blocking — gate met): scoped def queries (drop
+function-local const/object-method noise from get_symbol/impact); generators +
+ambient/trait-signature/extern/private-method def coverage; module resolution
+(tsconfig/pkg/Cargo) + Rust `use` edges; refs/calls edges + `brain_code_graph`/
+`brain_neighbors`; rebuild_edges coalescing; a frontend impact view.
+**P2's marquee (real AST graph + tiered impact), gate, and verification are done.**
