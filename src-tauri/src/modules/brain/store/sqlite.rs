@@ -43,16 +43,26 @@ const RRF_W_IDENTITY: f64 = 1.5;
 const RRF_W_CONTENT: f64 = 1.0;
 
 /// V2 temporal re-rank ([DP-12]) weights: a bounded multiplicative boost so a
-/// recently-touched / frequently-touched file is NUDGED up, never buried (preserves
-/// the path-match-outranks invariant). Quantized into coarse buckets so sub-threshold
-/// drift can never reorder two near-equal docs. Boost = (1 + RECENCY_W·recency) ·
-/// (1 + FREQ_W·freq), each factor in [1, 1+W]. DETERMINISTIC: computed from STORED
+/// recently-/frequently-touched file is NUDGED up WITHIN its lexical tier, never
+/// buried. Quantized into coarse buckets so sub-threshold drift can't reorder two
+/// near-equal docs. Boost = (1 + RECENCY_W·recency)·(1 + FREQ_W·freq), each factor in
+/// [1, 1+W]. BOUNDEDNESS INVARIANT (enforced by `temporal_boost_cannot_flip_cross_leg`):
+/// the max boost (1+RECENCY_W)(1+FREQ_W) MUST stay below the cross-leg RRF margin
+/// (RRF_W_IDENTITY/RRF_W_CONTENT = 1.5) so a fresh body-only hit can NEVER outrank a
+/// stale path/identity match — preserving [DP-2]. DETERMINISTIC: computed from STORED
 /// `accessed_at_ms`/`accessed_count` and a snapshot-stable `ref_ms` (never `now()`).
-const RECENCY_W: f64 = 0.5;
-const FREQ_W: f64 = 0.25;
+const RECENCY_W: f64 = 0.25;
+const FREQ_W: f64 = 0.1;
 const DAY_MS: i64 = 86_400_000;
+/// Recency factor for an UNSTAMPED file (accessed_at_ms == 0): NEUTRAL (mid), not
+/// "maximally stale" — a never-touched-but-relevant file mustn't be driven to the
+/// bottom just because some OTHER file was recently touched.
+const NEUTRAL_RECENCY: f64 = 0.5;
 
 /// Recency bucket (0=stale .. 4=fresh) for an age (ms) measured against `ref_ms`.
+/// Coarse step-cliffs are DELIBERATE quantization — they keep the boost a function of
+/// a few discrete buckets so sub-threshold age drift can't reorder near-equal docs
+/// (do NOT replace with a continuous function of age — that reintroduces read drift).
 fn recency_bucket(age_ms: i64) -> i64 {
     if age_ms < DAY_MS {
         4
@@ -75,11 +85,15 @@ fn freq_norm(count: i64) -> f64 {
 }
 
 /// The multiplicative temporal boost for one doc. Pure + quantized → unit-testable.
-/// `ref_ms` is the snapshot's max accessed_at_ms (so age is relative + stable). All-
-/// zero inputs (unstamped rows) yield a UNIFORM boost → no reordering.
+/// `ref_ms` is the doc's OWN-project max accessed_at_ms (so age is relative + stable).
+/// An unstamped doc (accessed_at_ms == 0) gets the NEUTRAL recency factor, so a fully-
+/// unstamped scope yields a UNIFORM boost → no reordering.
 fn temporal_boost(accessed_at_ms: i64, accessed_count: i64, ref_ms: i64) -> f64 {
-    let age = (ref_ms - accessed_at_ms).max(0);
-    let recency = recency_bucket(age) as f64 / 4.0;
+    let recency = if accessed_at_ms == 0 {
+        NEUTRAL_RECENCY
+    } else {
+        recency_bucket((ref_ms - accessed_at_ms).max(0)) as f64 / 4.0
+    };
     (1.0 + RECENCY_W * recency) * (1.0 + FREQ_W * freq_norm(accessed_count))
 }
 
@@ -874,9 +888,11 @@ fn apply_temporal_boost(
     if fused.is_empty() {
         return Ok(());
     }
-    // Load (composite id → accessed_at_ms, accessed_count) + ref_ms in one scan.
+    // Load (composite id → accessed_*) AND a PER-PROJECT ref_ms (max accessed_at_ms)
+    // in one scan, so a doc's age is relative to its OWN project even on a cross-
+    // project (project=None) search — indexing in project B never reorders project A.
     let mut access: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
-    let mut ref_ms: i64 = 0;
+    let mut proj_ref: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut scan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<()> {
         let mut stmt = conn.prepare(sql)?;
         let it = stmt.query_map(params, |r| {
@@ -884,7 +900,8 @@ fn apply_temporal_boost(
         })?;
         for row in it {
             let (proj, path, at, count) = row?;
-            ref_ms = ref_ms.max(at);
+            let e = proj_ref.entry(proj.clone()).or_insert(0);
+            *e = (*e).max(at);
             access.insert(format!("{proj}\u{0}{path}"), (at, count));
         }
         Ok(())
@@ -899,9 +916,13 @@ fn apply_temporal_boost(
 
     for (id, score) in fused.iter_mut() {
         let (at, count) = access.get(id).copied().unwrap_or((0, 0));
+        let ref_ms = id.split_once('\u{0}').and_then(|(p, _)| proj_ref.get(p)).copied().unwrap_or(0);
         *score *= temporal_boost(at, count, ref_ms);
+        debug_assert!(score.is_finite(), "temporal boost produced a non-finite score");
     }
     // Re-sort with the weighted_rrf comparator (score desc, id asc) — see rank.rs.
+    // Scores are provably finite (RRF sum × bounded quantized boost); any future
+    // score source (a vector leg) MUST preserve finiteness or this degrades to id-only.
     fused.sort_by(|a, b| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0))
     });
@@ -964,6 +985,36 @@ pub fn project_fingerprint_with_conn(conn: &Connection, project_id: &str) -> rus
 /// Project aggregate fingerprint via a fresh read-only connection.
 pub fn project_fingerprint_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result<String> {
     project_fingerprint_with_conn(&open_readonly(db_path)?, project_id)
+}
+
+/// Digest of the project's TEMPORAL state — blake3 over the sorted
+/// `(path, accessed_at_ms, accessed_count)` tuples. The temporal boost
+/// ([temporal_boost]) shapes the gist body order, so this is folded into the gist
+/// cache KEY alongside the (content-only, portable) fingerprint: any record_access
+/// movement rotates the key, so the same key can never map to two different gist
+/// bodies (no fingerprint-cache poisoning across reindex histories). Kept SEPARATE
+/// from the fingerprint so the fingerprint stays content-portable across machines.
+pub fn project_temporal_digest_with_conn(conn: &Connection, project_id: &str) -> rusqlite::Result<String> {
+    let mut stmt =
+        conn.prepare("SELECT path, accessed_at_ms, accessed_count FROM files WHERE project_id=?1")?;
+    let it = stmt.query_map([project_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    let mut rows: Vec<(String, i64, i64)> = Vec::new();
+    for x in it {
+        rows.push(x?);
+    }
+    rows.sort(); // order-independent (Merkle-style)
+    let mut h = blake3::Hasher::new();
+    for (path, at, count) in &rows {
+        h.update(path.as_bytes());
+        h.update(b"\0");
+        h.update(&at.to_le_bytes());
+        h.update(b"\0");
+        h.update(&count.to_le_bytes());
+        h.update(b"\n");
+    }
+    Ok(h.finalize().to_hex().to_string())
 }
 
 /// Top distinct definition names in a file (sorted) over a caller-supplied
@@ -1181,11 +1232,28 @@ mod tests {
         assert!(fresh_freq > stale_rare, "fresh+frequent must out-boost stale+rare");
         // a fresh doc beats a 120d-stale one even with equal (zero) frequency.
         assert!(temporal_boost(r, 0, r) > temporal_boost(r - 120 * DAY_MS, 0, r));
-        // all-zero (unstamped) inputs → a fixed UNIFORM boost (no reordering).
+        // all-zero (unstamped) inputs → a fixed UNIFORM boost (no reordering); an
+        // unstamped file gets the NEUTRAL recency factor, NOT "maximally stale".
         assert_eq!(temporal_boost(0, 0, 0), temporal_boost(0, 0, 0));
-        assert_eq!(temporal_boost(0, 0, 0), 1.0 + RECENCY_W); // age 0, freq 0
+        assert_eq!(temporal_boost(0, 0, 0), 1.0 + RECENCY_W * NEUTRAL_RECENCY);
+        // an unstamped file is NEUTRAL, strictly above a truly-stale (bucket 0) file.
+        assert!(temporal_boost(0, 0, 1_000_000) > temporal_boost(1, 0, 1_000_000 + 120 * DAY_MS));
         // bounded: never more than the max recency × max freq factor.
         assert!(fresh_freq <= (1.0 + RECENCY_W) * (1.0 + FREQ_W) + 1e-9);
+    }
+
+    #[test]
+    fn temporal_boost_cannot_flip_cross_leg() {
+        // THE boundedness invariant ([DP-2] protection): the largest possible boost
+        // must stay strictly below the cross-leg RRF margin, so a fully-boosted
+        // body-only (content-leg) hit can never outrank an un-boosted path/identity
+        // hit. Without this, temporal recency would bury filename matches.
+        let max_boost = (1.0 + RECENCY_W) * (1.0 + FREQ_W);
+        let cross_leg_margin = RRF_W_IDENTITY / RRF_W_CONTENT;
+        assert!(
+            max_boost < cross_leg_margin,
+            "max temporal boost {max_boost} must be < cross-leg margin {cross_leg_margin} (else recency buries path-matches)"
+        );
     }
 
     #[test]

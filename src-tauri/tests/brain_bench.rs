@@ -230,6 +230,35 @@ fn production_weights_beat_content_dominant() {
     assert!(prod.rrf_identity > prod.rrf_content, "production invariant: rrf_identity > rrf_content (strict)");
 }
 
+/// V2.3 boundedness guard: the temporal boost must NUDGE, never BURY. Even when a
+/// body-only (content-leg) distractor is made fresh AND very frequent while the
+/// path-match target is stale, the path-match must stay rank-1 — the bounded boost
+/// (max < cross-leg RRF margin) guarantees it. This is the ONLY condition that
+/// exercises differential recency (index_dir stamps uniformly), so without it CI
+/// could never catch a recency-buries-path-match regression.
+#[test]
+fn temporal_boost_cannot_bury_path_match() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    build_corpus(work.path());
+    let idx = SqliteIndex::open(&store.path().join("index.sqlite")).unwrap();
+    index_dir(&idx, PID, work.path());
+    let day = 86_400_000i64;
+    let now = 1_000 * day;
+    // body-only distractor: fresh + very frequent (max boost).
+    for _ in 0..40 {
+        idx.record_access(PID, "src/api/dispatch.ts", now).unwrap();
+    }
+    // path-match target: stale (300d old).
+    idx.record_access(PID, "src/webhook/handler.ts", now - 300 * day).unwrap();
+    let res = idx.search(Some(PID), "webhook", TOPK).unwrap();
+    assert_eq!(
+        res.first().map(|h| h.path.as_str()),
+        Some("src/webhook/handler.ts"),
+        "bounded boost: a fresh+frequent body-only hit must NOT bury the stale path-match: {res:?}"
+    );
+}
+
 /// Offline weight CALIBRATION sweep (BUILD-PROMPT §13.12). Grid-sweeps a fixed
 /// (no-RNG) set of weights via `search_weighted`, maximizing MRR over the labeled
 /// positives SUBJECT TO the negative control staying empty (the regularizer that

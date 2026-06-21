@@ -343,6 +343,30 @@ fn gist_byte_identical_on_unchanged_relaunch() {
     assert_ne!(g3.fingerprint, g1.fingerprint, "content change → new cache key");
 }
 
+/// V2.3 guard: the gist cache KEY must cover temporal state, because the temporal
+/// re-rank boost shapes the gist body order. A temporal-only change (record_access
+/// bumps accessed_count with content UNCHANGED) must rotate the key — else two index
+/// histories with the same content but different access counts would share a key yet
+/// produce different bytes (fingerprint-cache poisoning).
+#[test]
+fn gist_key_covers_temporal_state() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    let k1 = build_gist(&db, PID, "proj", "login", 400).fingerprint;
+    // temporal-only change: same content, just a bumped access stamp/count.
+    idx.record_access(PID, "src/auth/login.ts", 999_999).unwrap();
+    let k2 = build_gist(&db, PID, "proj", "login", 400).fingerprint;
+    assert_ne!(k1, k2, "gist key must rotate on a temporal-only change (no cache poisoning)");
+    // and it remains stable when nothing changes (byte-identity gate).
+    let k3 = build_gist(&db, PID, "proj", "login", 400).fingerprint;
+    assert_eq!(k2, k3, "gist key stable across an unchanged relaunch");
+}
+
 /// P3.2: cold-start synthesis is deterministic + drives a non-thin gist; the
 /// write path lands the gist bytes in the agent file; auto-synth stays byte-stable.
 #[test]

@@ -849,3 +849,32 @@ Green: clippy `-D warnings` clean · `cargo test` 300 / 1 pre-existing · brain_
 ⏭ Deferred refinements: an explicit `touch_file` on agent file-open (a real access
 counter beyond index-time recency); the same boost on the gist Memory (notes) layer;
 weight tuning of RECENCY_W/FREQ_W via a recency-labeled bench fixture.
+
+### V2.3 verification + hardening ✅
+3 reviewers (determinism · boost-correctness · schema+wiring) + synthesis. The literal
+byte-identity gate was re-verified HELD (no wall-clock in the read path; record_access
+fires only on a hash-changing reindex; the re-sort comparator is byte-identical to
+weighted_rrf). But the panel found TWO real defects that the narrow same-process gate
+hid — fixed before close:
+- **Boost could BURY a path-match (defeats [DP-2])**: max boost was 1.875 but the
+  cross-leg RRF margin is only 1.5, so a fresh+frequent body-only hit could outrank a
+  stale path-match — AND it was invisible to CI (index_dir stamps uniformly). Fixed:
+  RECENCY_W 0.5→0.25, FREQ_W 0.25→0.1 (max boost 1.375 < 1.5), with a static invariant
+  test (`temporal_boost_cannot_flip_cross_leg`) AND a bench guard
+  (`temporal_boost_cannot_bury_path_match`) that stamps the distractor fresh+frequent
+  and the target stale and asserts the path-match still wins (fails under the old weights).
+- **Gist cache key didn't cover temporal state (cache poisoning)**: the body order
+  depends on accessed_*, but the key only hashed (path,hash) — two index histories
+  converging to the same content (same key) but different access counts produce
+  different bytes. Fixed: a SEPARATE `project_temporal_digest` (blake3 over sorted
+  (path, accessed_at_ms, accessed_count)) folded into the gist KEY — kept separate from
+  the content fingerprint so the fingerprint stays portable. + `gist_key_covers_temporal_state`.
+- should-fix: unstamped files (accessed_at_ms==0) now get a NEUTRAL recency factor
+  (not "maximally stale"); ref_ms is now PER-PROJECT even on a project=None search
+  (no cross-project reorder); a `debug_assert!(score.is_finite())` guards the NaN
+  footgun for a future vector leg; docstrings corrected (the boundedness invariant +
+  the intentional quantization cliffs).
+Green: clippy `-D warnings` clean · `cargo test` 301 / 1 pre-existing · brain_sandbox
+35 · brain_bench 4 + 1 ignored.
+
+**V2.3 closed (temporal re-rank + adversarial pass + boundedness/cache-key hardening).**

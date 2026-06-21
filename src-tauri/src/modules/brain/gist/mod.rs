@@ -96,8 +96,16 @@ fn build_gist_on_conn(
     let fp = conn
         .and_then(|c| store::project_fingerprint_with_conn(c, project_id).ok())
         .unwrap_or_default();
+    // The temporal re-rank ([DP-12]) boost shapes the "Relevant files" order, so the
+    // cache key must cover the temporal state too — otherwise two index histories that
+    // converge to the same (path,hash) set (same fp) but different access counts would
+    // share a key yet produce different bytes (cache poisoning). Folded SEPARATELY so
+    // the content fingerprint stays portable.
+    let temporal = conn
+        .and_then(|c| store::project_temporal_digest_with_conn(c, project_id).ok())
+        .unwrap_or_default();
     let key = blake3::hash(
-        format!("{fp}\u{0}{intent}\u{0}{budget_tokens}\u{0}{SCHEMA_VERSION}").as_bytes(),
+        format!("{fp}\u{0}{temporal}\u{0}{intent}\u{0}{budget_tokens}\u{0}{SCHEMA_VERSION}").as_bytes(),
     )
     .to_hex()
     .to_string();
