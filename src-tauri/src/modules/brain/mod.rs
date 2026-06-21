@@ -16,6 +16,7 @@ pub mod memory;
 pub mod rank;
 pub mod reflect;
 pub mod registry;
+pub mod resume;
 pub mod secrets;
 pub mod store;
 pub mod tokenize;
@@ -62,12 +63,15 @@ impl Default for BrainConfig {
     }
 }
 
-/// Live per-pane session context: pty leaf → resolved project + agent. Populated
-/// by agent-signal events; consumed by P3 gist synthesis.
+/// Live per-pane session context: pty leaf → resolved project + agent + cwd.
+/// Populated by agent-signal events; consumed by P3 gist synthesis and the P4
+/// resume journal (the cwd lets an `exited` signal derive its session key after
+/// the pty session map has already dropped).
 #[derive(Clone, Debug, Default)]
 pub struct LiveSession {
     pub project: Option<ProjectId>,
     pub agent: Option<String>,
+    pub cwd: Option<String>,
 }
 
 /// Managed Tauri state. `default()` is cheap + infallible (only allocates locks),
@@ -82,6 +86,9 @@ pub struct BrainState {
     /// Set by the worker after opening the store; read-only command connections
     /// open against this path.
     pub db_path: RwLock<Option<PathBuf>>,
+    /// Panes recoverable from the previous session (P4), computed once at boot
+    /// from the resume journals; surfaced to the UI via `brain_recovered_panes`.
+    pub recovered: RwLock<Vec<resume::RecoveredPane>>,
 }
 
 impl Default for BrainState {
@@ -93,6 +100,7 @@ impl Default for BrainState {
             config: RwLock::new(BrainConfig::default()),
             tx: Mutex::new(None),
             db_path: RwLock::new(None),
+            recovered: RwLock::new(Vec::new()),
         }
     }
 }

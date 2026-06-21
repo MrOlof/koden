@@ -2,6 +2,7 @@ export { BrainPane } from "./BrainPane";
 export {
   brainBudgetStatus,
   brainBuildGist,
+  brainRecoveredPanes,
   brainReflect,
   brainSetBudget,
   resolveProjectForCwd,
@@ -16,4 +17,5 @@ export type {
   Project,
   ProjectStatus,
   ProposalAction,
+  RecoveredPane,
 } from "./lib/bindings";

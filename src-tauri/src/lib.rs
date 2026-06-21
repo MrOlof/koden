@@ -215,6 +215,7 @@ pub fn run() {
             brain::commands::brain_reflect,
             brain::commands::brain_set_budget,
             brain::commands::brain_budget_status,
+            brain::commands::brain_recovered_panes,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

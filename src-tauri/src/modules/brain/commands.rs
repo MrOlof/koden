@@ -255,6 +255,13 @@ pub fn brain_budget_status(state: State<BrainState>) -> (f64, f64) {
     store::budget_state_readonly(&db).unwrap_or((0.0, 0.0))
 }
 
+/// Panes recoverable from the previous session (P4 crash-resume), computed at boot
+/// from the per-pane journals. Drives the UI's "resume where you left off" cards.
+#[tauri::command]
+pub fn brain_recovered_panes(state: State<BrainState>) -> Vec<crate::modules::brain::resume::RecoveredPane> {
+    state.recovered.read().map(|r| r.clone()).unwrap_or_default()
+}
+
 /// Enqueue a worker event via the registered sender (single-writer discipline).
 fn enqueue(state: &State<BrainState>, ev: BrainEvent) -> Result<(), String> {
     let guard = state.tx.lock().map_err(|_| "brain tx poisoned".to_string())?;

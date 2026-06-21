@@ -13,6 +13,7 @@ use crate::modules::brain::freshness::{hash, walk, watch};
 use crate::modules::brain::memory;
 use crate::modules::brain::reflect;
 use crate::modules::brain::registry::Project;
+use crate::modules::brain::resume;
 use crate::modules::brain::secrets;
 use crate::modules::brain::store::SqliteIndex;
 use crate::modules::brain::{BrainState, BrainStatus, LiveSession};
@@ -73,6 +74,26 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
         Ok(n) if n > 0 => log::info!("brain: swept {n} orphaned reflect reservation(s)"),
         Ok(_) => {}
         Err(e) => log::warn!("brain: budget sweep failed ({e}); continuing"),
+    }
+
+    // Boot crash-resume recovery (P4): fold the per-pane journals into recoverable
+    // panes for the UI's resume cards, then GC expired journals. Done BEFORE the
+    // agent-signal listener is registered so a live signal can't race the recovered
+    // map. Fail-open — no journals / a torn journal just yields fewer cards.
+    if let Some(rdir) = resume_dir(&app) {
+        let recovered = resume::recover_all(&rdir);
+        if !recovered.is_empty() {
+            log::info!("brain: {} pane(s) recoverable from the previous session", recovered.len());
+        }
+        if let Some(state) = app.try_state::<BrainState>() {
+            if let Ok(mut r) = state.recovered.write() {
+                *r = recovered;
+            }
+        }
+        let gc = resume::gc_resume_dir(&rdir, now_epoch_ms(), resume::RESUME_TTL_DAYS);
+        if gc > 0 {
+            log::debug!("brain: GC'd {gc} expired resume journal(s)");
+        }
     }
 
     // 2. Internal event channel; register the sender so commands can enqueue.
@@ -463,22 +484,55 @@ fn rel_path(root: &std::path::Path, path: &std::path::Path) -> String {
         .unwrap_or(path_c)
 }
 
-/// Update the live per-pane session map from agent lifecycle signals. Resolves
-/// pty → cwd (B1/B3 accessor) → project (registry longest-prefix). Consumed by
-/// P3 gist synthesis.
+/// The brain-private data dir (`<app_local>/koden/brain/resume`) for the P4
+/// journals — alongside `index.sqlite`, NOT the frontend's `~/.koden` agent bus.
+fn resume_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_local_data_dir()
+        .ok()
+        .map(|d| d.join("koden").join("brain").join("resume"))
+}
+
+/// Update the live per-pane session map from agent lifecycle signals AND journal
+/// the event for crash-resume (P4). Resolves pty → cwd (B1/B3 accessor) → project
+/// (registry longest-prefix) for EVERY kind. cwd is remembered on the session so an
+/// `exited` signal can still derive its key after the pty session map has dropped.
 fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>) {
     let Some(brain) = app.try_state::<BrainState>() else {
         return;
     };
+    // Live cwd (started/working/attention/finished), falling back to the cwd we
+    // remembered at 'started' (needed for 'exited', when the pty session is gone).
+    let live_cwd = app.try_state::<PtyState>().and_then(|pty| pty.session_cwd(pty_id));
+    let remembered_cwd = brain
+        .sessions
+        .read()
+        .ok()
+        .and_then(|s| s.get(&pty_id).and_then(|x| x.cwd.clone()));
+    let cwd = live_cwd.or(remembered_cwd);
+    let project = cwd.as_deref().and_then(|c| brain.registry.resolve(c)).map(|p| p.id);
+
+    // Journal the lifecycle event (fail-open). pane_uuid is None until P4-a wires a
+    // restart-stable uuid; the key falls back to cwd+agent (spec-sanctioned).
+    if let (Some(cwd_s), Some(rdir)) = (cwd.as_ref(), resume_dir(app)) {
+        let key = resume::SessionKey::derive(cwd_s, agent.as_deref().unwrap_or(""), None);
+        let rec = resume::ResumeRecord {
+            ts: now_epoch_ms(),
+            kind: kind.to_string(),
+            agent: agent.clone(),
+            cwd: cwd_s.clone(),
+            project: project.clone(),
+            claude_session_id: None,
+        };
+        if let Err(e) = resume::record_event(&rdir, &key, &rec) {
+            log::debug!("brain: resume journal write failed ({e})");
+        }
+    }
+
     match kind {
         "started" => {
-            let project = app
-                .try_state::<PtyState>()
-                .and_then(|pty| pty.session_cwd(pty_id))
-                .and_then(|cwd| brain.registry.resolve(&cwd))
-                .map(|p| p.id);
             if let Ok(mut sessions) = brain.sessions.write() {
-                sessions.insert(pty_id, LiveSession { project, agent });
+                sessions.insert(pty_id, LiveSession { project, agent, cwd });
             }
         }
         "exited" => {

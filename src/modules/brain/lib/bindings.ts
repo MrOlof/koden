@@ -115,6 +115,22 @@ export function brainBudgetStatus(): Promise<[number, number]> {
   return invoke<[number, number]>("brain_budget_status", {});
 }
 
+/** A pane recoverable from the previous session (P4 crash-resume). Field names
+ *  mirror the Rust `RecoveredPane` serde struct (snake_case). */
+export type RecoveredPane = {
+  key: string;
+  last_kind: string;
+  agent: string | null;
+  cwd: string;
+  project: string | null;
+  claude_session_id: string | null;
+};
+
+/** Panes recoverable from the previous session — drives the resume cards. */
+export function brainRecoveredPanes(): Promise<RecoveredPane[]> {
+  return invoke<RecoveredPane[]>("brain_recovered_panes", {});
+}
+
 export type Gist = { bytes: string; fingerprint: string; sources: string[] };
 
 /** Build the cache-stable gist for a project + intent (blank intent → cold-start

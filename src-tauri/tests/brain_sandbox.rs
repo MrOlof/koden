@@ -17,6 +17,9 @@ use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::reflect::{
     reflect_with_client, ReflectClient, ReflectConfig, ReflectReason, ReflectResponse,
 };
+use koden_lib::modules::brain::resume::{
+    gc_resume_dir, record_event, recover_all, resume_command, ResumePlan, ResumeRecord, SessionKey,
+};
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, list_notes_readonly, list_proposals_readonly,
     SearchIndex, SqliteIndex,
@@ -745,6 +748,45 @@ fn reflect_dedups_on_rerun() {
     assert_eq!(fake2.calls(), 1, "still calls the model");
     let props = list_proposals_readonly(&db, Some(PID)).unwrap();
     assert_eq!(props.iter().filter(|p| p.source == "reflect").count(), 1, "queue holds one");
+}
+
+/// P4 crash-resume, end-to-end: per-pane journal → boot recovery (skips cleanly
+/// exited panes, keeps the latest captured session id) → Tier-2 launch rewrite.
+#[test]
+fn resume_journal_recovers_and_plans_tier2() {
+    fn rec(kind: &str, cwd: &str, sid: Option<&str>) -> ResumeRecord {
+        ResumeRecord {
+            ts: 1,
+            kind: kind.into(),
+            agent: Some("claude".into()),
+            cwd: cwd.into(),
+            project: Some("p".into()),
+            claude_session_id: sid.map(String::from),
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rdir = dir.path();
+    // Pane A: claude working; a later signal captured its session id.
+    let a = SessionKey::derive("/work/proj", "claude", None);
+    record_event(rdir, &a, &rec("started", "/work/proj", None)).unwrap();
+    record_event(rdir, &a, &rec("working", "/work/proj", Some("sess-xyz"))).unwrap();
+    // Pane B: cleanly exited → no recovery card.
+    let b = SessionKey::derive("/work/other", "claude", None);
+    record_event(rdir, &b, &rec("started", "/work/other", None)).unwrap();
+    record_event(rdir, &b, &rec("exited", "/work/other", None)).unwrap();
+
+    let recovered = recover_all(rdir);
+    assert_eq!(recovered.len(), 1, "only the still-open pane gets a card");
+    let pane = &recovered[0];
+    assert_eq!(pane.last_kind, "working");
+    assert_eq!(pane.claude_session_id.as_deref(), Some("sess-xyz"), "kept the captured id");
+
+    match resume_command(pane, "claude") {
+        ResumePlan::Tier2 { command } => assert!(command.contains("--resume sess-xyz"), "{command}"),
+        other => panic!("expected Tier2, got {other:?}"),
+    }
+    // A fresh journal is not GC'd.
+    assert_eq!(gc_resume_dir(rdir, 0, 7), 0);
 }
 
 /// No notes → EmptyCorpus, no call, no spend (don't burn a token on nothing).
