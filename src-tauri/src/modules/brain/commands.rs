@@ -7,6 +7,7 @@ use tauri::State;
 
 use crate::modules::brain::ast::{Impact, SymbolInfo};
 use crate::modules::brain::events::BrainEvent;
+use crate::modules::brain::gist::{self, Gist};
 use crate::modules::brain::memory::proposal::MemoryProposal;
 use crate::modules::brain::memory::NoteSummary;
 use crate::modules::brain::registry::Project;
@@ -94,6 +95,26 @@ pub fn brain_search(
             Ok(Vec::new())
         }
     }
+}
+
+/// Build the cache-stable gist for a project + intent (P3). Zero tokens; an
+/// unchanged relaunch returns a byte-identical gist. `None` if the index isn't ready.
+#[tauri::command]
+pub fn brain_build_gist(
+    state: State<BrainState>,
+    project: String,
+    intent: String,
+    budget: Option<usize>,
+) -> Option<Gist> {
+    let db = state.db_path.read().ok().and_then(|p| p.clone())?;
+    let name = state
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project)
+        .map(|p| p.name)
+        .unwrap_or_else(|| project.clone());
+    Some(gist::build_gist(&db, &project, &name, &intent, budget.unwrap_or(800)))
 }
 
 /// Definition locations of a symbol (path/kind/line) — the AST graph (P2).

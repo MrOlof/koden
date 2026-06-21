@@ -633,7 +633,7 @@ fn run_leg(
                 "SELECT f.project_id, f.path FROM code_fts
                  JOIN files f ON f.fts_rowid = code_fts.rowid
                  WHERE code_fts MATCH ?1 AND f.project_id = ?2
-                 ORDER BY {bm25} LIMIT ?3"
+                 ORDER BY {bm25}, f.path LIMIT ?3"
             );
             let mut stmt = conn.prepare(&sql)?;
             let it = stmt.query_map(
@@ -649,7 +649,7 @@ fn run_leg(
                 "SELECT f.project_id, f.path FROM code_fts
                  JOIN files f ON f.fts_rowid = code_fts.rowid
                  WHERE code_fts MATCH ?1
-                 ORDER BY {bm25} LIMIT ?2"
+                 ORDER BY {bm25}, f.path LIMIT ?2"
             );
             let mut stmt = conn.prepare(&sql)?;
             let it = stmt.query_map(
@@ -723,6 +723,41 @@ pub fn search_readonly(
 ) -> rusqlite::Result<Vec<Hit>> {
     let conn = open_readonly(db_path)?;
     search_with_conn(&conn, project, query, limit)
+}
+
+/// Project aggregate fingerprint via a read-only connection (gist cache key).
+pub fn project_fingerprint_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result<String> {
+    let conn = open_readonly(db_path)?;
+    let mut stmt = conn.prepare("SELECT path, hash FROM files WHERE project_id=?1")?;
+    let it = stmt.query_map([project_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for x in it {
+        entries.push(x?);
+    }
+    Ok(crate::modules::brain::freshness::aggregate_fingerprint(&mut entries))
+}
+
+/// Top distinct definition names in a file (sorted) — for the gist skeleton.
+pub fn symbols_for_path_readonly(
+    db_path: &Path,
+    project_id: &str,
+    path: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    let conn = open_readonly(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT name FROM code_nodes WHERE project_id=?1 AND path=?2 ORDER BY name LIMIT ?3",
+    )?;
+    let it = stmt.query_map(rusqlite::params![project_id, path, limit as i64], |r| {
+        r.get::<_, String>(0)
+    })?;
+    let mut v = Vec::new();
+    for x in it {
+        v.push(x?);
+    }
+    Ok(v)
 }
 
 /// File count for a project via a read-only connection.

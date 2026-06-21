@@ -383,3 +383,25 @@ ambient/trait-signature/extern/private-method def coverage; module resolution
 (tsconfig/pkg/Cargo) + Rust `use` edges; refs/calls edges + `brain_code_graph`/
 `brain_neighbors`; rebuild_edges coalescing; a frontend impact view.
 **P2's marquee (real AST graph + tiered impact), gate, and verification are done.**
+
+### P3.1 — cache-stable gist core + the byte-stability gate ✅
+`brain/gist/mod.rs`: `build_gist(db, project, name, intent, budget)` synthesizes a
+token-bounded, **fingerprint-keyed** context bundle — always-kept freshness line +
+relevant files (with their top AST symbols) + top memory notes — assembled with
+per-layer caps + proportional char-budget trim (chars/4, [DP-21]). Key =
+`blake3(project_fingerprint ‖ intent ‖ budget ‖ schema_version)`. Zero tokens to
+build (pure index reads); secret-safe (draws only from the redacted index + scan-
+redacted note titles). Determinism prerequisite fixed: search now has a secondary
+`f.path` sort so bm25 ties order stably. New readonly helpers
+(`project_fingerprint_readonly`, `symbols_for_path_readonly`) + `brain_build_gist`.
+**P3 gate proven** (`gist_byte_identical_on_unchanged_relaunch`): two builds over an
+unchanged index are byte-identical (and share the cache key); a content edit changes
+the key. The thin-gist confidence behavior falls out (tiny budget / no hits → just
+the freshness line).
+Green: clippy `-D warnings` clean · `cargo test` 244 passed / 1 pre-existing ·
+brain lib 52 · brain_sandbox 14.
+
+⏭ P3 remaining: cold-start query synthesis (KODEN_SESSION→project, agent name→
+intent, git HEAD + changed/recent files, top notes); `brain_write_gist` →
+`~/.koden/agent-<id>.txt` + the worker trigger on agent-start; injection toast;
+richer confidence gate + snippet-text enrichment; then a P3 verification pass.

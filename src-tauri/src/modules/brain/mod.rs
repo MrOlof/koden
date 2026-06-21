@@ -11,6 +11,7 @@ pub mod ast;
 pub mod commands;
 pub mod events;
 pub mod freshness;
+pub mod gist;
 pub mod memory;
 pub mod rank;
 pub mod registry;

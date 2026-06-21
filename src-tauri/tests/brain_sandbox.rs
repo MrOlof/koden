@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use koden_lib::modules::brain::gist::build_gist;
 use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::store::{
@@ -299,6 +300,38 @@ fn doctor_queues_proposals_and_reject_sticks() {
         pending2.iter().any(|p| p.title.contains("no type")),
         "un-rejected proposal stays pending"
     );
+}
+
+/// P3 gate: an unchanged relaunch yields a BYTE-IDENTICAL gist (prompt-cache-safe),
+/// and a content edit changes the cache key.
+#[test]
+fn gist_byte_identical_on_unchanged_relaunch() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    write(
+        root,
+        ".koden-memory/n.md",
+        b"---\nid: n\ntype: decision\ntitle: Auth approach\n---\nbody",
+    );
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+
+    let g1 = build_gist(&db, PID, "proj", "login", 400);
+    let g2 = build_gist(&db, PID, "proj", "login", 400);
+    assert_eq!(g1.bytes, g2.bytes, "unchanged relaunch must be byte-identical");
+    assert_eq!(g1.fingerprint, g2.fingerprint);
+    assert!(g1.bytes.contains("src/auth/login.ts"), "relevant file present: {}", g1.bytes);
+    assert!(g1.bytes.contains("Auth approach"), "memory note present");
+
+    // a content edit changes the fingerprint cache key (cache correctly invalidated)
+    std::fs::write(root.join("src/auth/login.ts"), b"export function loginHandlerV2() {}").unwrap();
+    index_changed(&idx, PID, root, &[root.join("src/auth/login.ts")]);
+    let g3 = build_gist(&db, PID, "proj", "login", 400);
+    assert_ne!(g3.fingerprint, g1.fingerprint, "content change → new cache key");
 }
 
 fn ts_chain(root: &Path) {
