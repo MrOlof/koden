@@ -145,8 +145,14 @@ export type TasksTab = TabBase & {
   listId: string;
 };
 
-/** Singleton workspace views (one per space). "brain" is the Koden Brain pane. */
-export type OrchestrationView = "agent-topology" | "message-flow" | "director" | "brain";
+/** Singleton workspace views (one per space). "brain" is the Koden Brain pane;
+ *  "brain-map" is its interactive knowledge-graph view. */
+export type OrchestrationView =
+  | "agent-topology"
+  | "message-flow"
+  | "director"
+  | "brain"
+  | "brain-map";
 
 export type OrchestrationTab = TabBase & {
   id: number;
@@ -173,6 +179,7 @@ const ORCHESTRATION_TITLES: Record<OrchestrationView, string> = {
   "message-flow": "Message Flow",
   director: "Director",
   brain: "Brain",
+  "brain-map": "Brain Map",
 };
 
 export function isRenamableKind(kind: Tab["kind"]): boolean {

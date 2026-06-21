@@ -879,6 +879,11 @@ export default function App() {
     [openOrchestrationTab],
   );
 
+  const openBrainMap = useCallback(
+    () => openOrchestrationTab("brain-map"),
+    [openOrchestrationTab],
+  );
+
   // Director "run in terminal": open an agent terminal tab and link the
   // orchestration record to it so the dock/topology can activate it.
   const handleSpawnTerminalAgent = useCallback(
@@ -2020,6 +2025,7 @@ export default function App() {
               onToggleSidebar={toggleSidebar}
               onOpenCommandPalette={() => openCommandPalette("commands")}
               onOpenBrain={openBrain}
+              onOpenBrainMap={openBrainMap}
               onActivateAgent={onActivateAgent}
               onActivateLocalAgent={onActivateLocalAgent}
               onOpenSettings={() => void openSettingsWindow()}

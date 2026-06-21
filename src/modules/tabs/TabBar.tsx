@@ -574,6 +574,16 @@ export function TabIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "brain") {
     return <BrainTabIcon />;
   }
+  if (tab.kind === "brain-map") {
+    return (
+      <HugeiconsIcon
+        icon={HierarchySquare01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
   if (tab.kind === "agent-topology" || tab.kind === "message-flow") {
     return (
       <HugeiconsIcon

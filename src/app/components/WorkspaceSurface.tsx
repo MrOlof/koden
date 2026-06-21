@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
-import { BrainPane } from "@/modules/brain";
+import { BrainMapPane, BrainPane } from "@/modules/brain";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
 import { MarkdownStack } from "@/modules/markdown";
@@ -92,6 +92,7 @@ export function WorkspaceSurface({
   const isFlowTab = kind === "message-flow";
   const isDirectorTab = kind === "director";
   const isBrainTab = kind === "brain";
+  const isBrainMapTab = kind === "brain-map";
 
   return (
     <div className="relative h-full min-h-0">
@@ -264,6 +265,15 @@ export function WorkspaceSurface({
         aria-hidden={!isBrainTab}
       >
         {isBrainTab ? <BrainPane /> : null}
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isBrainMapTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isBrainMapTab}
+      >
+        {isBrainMapTab ? <BrainMapPane /> : null}
       </div>
     </div>
   );
