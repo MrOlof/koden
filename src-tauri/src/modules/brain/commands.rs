@@ -178,6 +178,18 @@ pub fn brain_code_impact(
     })
 }
 
+/// Whole-brain knowledge graph for the Brain Map: project hubs + (capped) files +
+/// memory notes, with containment/import/anchor edges. Read-only snapshot.
+#[tauri::command]
+pub fn brain_graph(state: State<BrainState>, max_files: Option<usize>) -> store::BrainGraph {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return store::BrainGraph::default();
+    };
+    let projects: Vec<(String, String)> =
+        state.registry.projects().into_iter().map(|p| (p.id, p.name)).collect();
+    store::graph_readonly(&db, &projects, max_files.unwrap_or(80).clamp(1, 2000)).unwrap_or_default()
+}
+
 /// Structured memory notes (review inbox / cards). `project = None` = all.
 #[tauri::command]
 pub fn brain_notes(state: State<BrainState>, project: Option<String>) -> Vec<NoteSummary> {

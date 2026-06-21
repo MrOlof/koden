@@ -142,6 +142,28 @@ export function brainRecoveredPanes(): Promise<RecoveredPane[]> {
   return invoke<RecoveredPane[]>("brain_recovered_panes", {});
 }
 
+/** A node in the Brain Map knowledge graph. Field names mirror the Rust serde
+ *  struct (`project_id` snake_case). */
+export type GraphNode = {
+  id: string;
+  kind: "project" | "file" | "memory";
+  label: string;
+  project_id: string;
+  path: string | null;
+  degree: number;
+};
+
+export type GraphEdge = { a: string; b: string; kind: "contains" | "import" | "anchor" };
+
+export type BrainGraph = { nodes: GraphNode[]; edges: GraphEdge[] };
+
+/** Whole-brain knowledge graph for the Brain Map (project hubs + capped files +
+ *  memory notes, with containment/import/anchor edges). `maxFiles` caps files per
+ *  project so large repos stay legible. */
+export function brainGraph(maxFiles = 80): Promise<BrainGraph> {
+  return invoke<BrainGraph>("brain_graph", { maxFiles });
+}
+
 export type Gist = { bytes: string; fingerprint: string; sources: string[] };
 
 /** Build the cache-stable gist for a project + intent (blank intent → cold-start

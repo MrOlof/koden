@@ -1,9 +1,12 @@
 //! Storage/search layer. ONE SQLite file behind a `SearchIndex` trait so tantivy
 //! could swap in later without schema churn (ADR-006).
 
+pub mod graph;
 pub mod migrate;
 pub mod schema;
 pub mod sqlite;
+
+pub use graph::{graph_readonly, BrainGraph};
 
 pub use sqlite::{
     budget_state_readonly, code_impact_readonly, file_count_readonly, file_count_with_conn,

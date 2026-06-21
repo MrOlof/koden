@@ -24,8 +24,8 @@ use koden_lib::modules::brain::reflect::{
 };
 use koden_lib::modules::brain::resume::{record_event, recover_all, ResumeRecord, SessionKey};
 use koden_lib::modules::brain::store::{
-    code_impact_readonly, get_symbol_readonly, list_proposals_readonly, search_readonly,
-    semantic_meta_readonly, SqliteIndex,
+    code_impact_readonly, get_symbol_readonly, graph_readonly, list_proposals_readonly,
+    search_readonly, semantic_meta_readonly, SqliteIndex,
 };
 use koden_lib::modules::brain::worker::index_dir;
 
@@ -121,6 +121,19 @@ fn run_all(root: &Path) -> Report {
     let impact = code_impact_readonly(&db, PID, "loginHandler", 5).unwrap_or_default();
     r.check("code impact", impact.ast_dependents.iter().any(|p| p.ends_with("session.ts")),
         format!("dependents: {:?}", impact.ast_dependents));
+
+    // 3b. Brain Map graph snapshot: project + file + memory nodes, real edges.
+    let g = graph_readonly(&db, &[(PID.to_string(), "CLI".to_string())], 80).unwrap_or_default();
+    let files = g.nodes.iter().filter(|n| n.kind == "file").count();
+    let mems = g.nodes.iter().filter(|n| n.kind == "memory").count();
+    let imports = g.edges.iter().filter(|e| e.kind == "import").count();
+    let anchors = g.edges.iter().filter(|e| e.kind == "anchor").count();
+    let contains = g.edges.iter().filter(|e| e.kind == "contains").count();
+    r.check(
+        "brain graph",
+        files > 0 && mems > 0 && contains == files && imports > 0,
+        format!("{} nodes ({files} files, {mems} memory), {} edges (contains={contains}, import={imports}, anchor={anchors})", g.nodes.len(), g.edges.len()),
+    );
 
     // 4. Gist: byte-identical on rerun (the P3 cache gate) + secret-safe.
     let g1 = build_gist(&db, PID, "proj", "login", 400);
