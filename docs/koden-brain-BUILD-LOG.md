@@ -652,9 +652,14 @@ Produced autonomously (headless), the parts that don't need the GUI:
   blake3 → secrets-redact → FTS; reflect_with_client over a fake LLM; record_event →
   recover_all) across 26 `brain_sandbox` integration tests — real pipeline, not unit
   mocks.
-- **Headless brain CLI** (`src-tauri/examples/brain_cli.rs`) — the "headless koden
-  CLI" the mandate references (none existed; `koden.exe` is GUI-only via
-  `koden_lib::run()`). Drives the WHOLE V1 brain through a real binary, no Tauri app:
+- **Headless brain validation harness** (`src-tauri/examples/brain_cli.rs`). NOTE:
+  this is NOT the project's "Koden CLI" — that is the e2e test harness
+  (`pnpm test:e2e` + the `window.__KODEN_TEST__` bus + `scripts/launch-sandbox.mjs`,
+  see `tests/e2e/README.md`), which is currently NOT runnable (Phase-0 spike pending:
+  no `tauri-plugin-webdriver`, `wdio.conf.ts` still stubbed) and has no brain bus
+  methods. `brain_cli` is a separate Rust driver of the brain pipeline through a real
+  binary (no Tauri app) — earlier called "the headless koden CLI", which was wrong.
+  It drives the WHOLE V1 brain end-to-end:
   `cargo run --example brain_cli -- all` runs a 14-check battery against a built-in
   fixture and exits 0 only if all pass. Live result — **14/14 passed**: index (4
   files) · memory scan · search · AST symbol + tiered impact (login→session) · gist
