@@ -634,3 +634,31 @@ V1 (P0→P5) is functionally complete. Next: V2 advanced track (stale-ADR curati
 HNSW ANN + real embedder enablement, Tier-2 capture, richer resume, cross-project
 graph) + the cross-phase live-evidence pass (`pnpm tauri dev`, real-kill crash sim,
 real-key smoke).
+
+## Live-evidence pass (partial — what a test harness CAN prove)
+
+Produced autonomously (headless), the parts that don't need the GUI:
+- **V1 links into the real app binary**: `cargo build --bin koden` → `koden.exe`
+  (~42 MB), exit 0. The whole brain subsystem ships in the shipped binary, not just
+  under `cargo test`. `cargo build --features semantic` also links the gated stack.
+- **REAL-kill crash sim** (BUILD-PROMPT §13.29 — a genuine process kill, not the
+  in-process mock the unit test uses): new `src-tauri/examples/brain_crash_sim.rs`.
+  Process 1 opens the store, journals `started`+`working` for a pane, then
+  `std::process::abort()` (exit 127 — killed, no clean exit / no `exited` marker);
+  the journal survives on disk; a FRESH process 2 runs `recover_all()` and recovers
+  exactly one pane as still-`working` → `PASS`. Repeatable:
+  `cargo run --example brain_crash_sim -- write <dir>` then `… -- recover <dir>`.
+- The §6.5 offline sandbox already drives the REAL pipeline end-to-end (walk →
+  blake3 → secrets-redact → FTS; reflect_with_client over a fake LLM; record_event →
+  recover_all) across 26 `brain_sandbox` integration tests — real pipeline, not unit
+  mocks.
+
+⏭ Still needs the running GUI app / the user (cannot be driven from a test harness
+here): the **fake-claude → agent-detect → brain-worker replay** (the worker is
+Tauri-`AppHandle`-coupled; needs `pnpm tauri dev` + a real terminal tab — harness in
+`scripts/README-sandbox.md`); the **live gist-injection-at-spawn** proof; the
+**recovery-card UI** + Resume/Dismiss (P4-a + GUI, not built); and the **one real-key
+reflect smoke** (needs the user's Anthropic key — real spend, must not run without
+explicit authorization; a real-kill BUDGET sim rides along with it, since leaving a
+`reserved` row requires a real reflect — its crash-safety is already unit-proven by
+`crash_midcall_is_overcounted_never_leaked`).
