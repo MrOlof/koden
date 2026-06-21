@@ -8,9 +8,9 @@ Source + labels: `src-tauri/tests/brain_bench.rs` (hermetic — corpus + ground-
 defined in-test; no network, no `~/.koden`).
 
 ## Methodology
-- A small realistic mixed TS/Rust corpus (13 files, incl. 3 confuser pairs) is
-  indexed through the **real** pipeline (`brain::worker::index_dir`: walk → blake3 →
-  secrets redact → FTS5).
+- A small realistic mixed TS/Rust corpus (16 files = 10 base + 3 confuser pairs of
+  2 files each) is indexed through the **real** pipeline (`brain::worker::index_dir`:
+  walk → blake3 → secrets redact → FTS5).
 - Graded metrics over the labeled positives: **recall@5** (HARD floor ≥ 0.80),
   **MRR**, and **precision@1** (the rank-1 signal that drives the gist's top line).
 - Query bands with **labeled ground-truth**:
@@ -27,8 +27,8 @@ defined in-test; no network, no `~/.koden`).
 ## Results (2026-06-21, P0 lexical + V2.2 calibration, `feat/koden-brain`)
 
 ```
-corpus: 13 files, indexed 13 (pruned 0)   (3 confuser pairs added)
-coverage: 12 positive (incl. confusers) + 3 negative-control + 2 semantic-intent
+corpus: 16 files, indexed 16 (pruned 0)
+coverage: 12 positive (incl. confusers) + 3 negative-control + 2 semantic-intent queries
 
 [positives] recall@5 = 12/12 = 1.00 · MRR = 1.000 · precision@1 = 1.00 (measured)
     worst cases: none
@@ -38,6 +38,8 @@ coverage: 12 positive (incl. confusers) + 3 negative-control + 2 semantic-intent
 [semantic-intent] (P0 lexical expected to miss; semantic is P5) hit 0/2
     "money formatting" -> ideal src/utils/currency.ts: miss (lexical gap)
     "user authentication flow" -> ideal src/auth/login.ts: miss (lexical gap)
+
+known weakness: pure semantic/synonym queries are out of scope for P0
 ```
 
 ## Weight calibration (V2.2) — measured, not guessed
@@ -50,14 +52,18 @@ alone decides rank-1) and a deterministic offline **calibration sweep**
 
 ```
 WEIGHT CALIBRATION SWEEP (max MRR s.t. negative-control leaks == 0)
-  rrf_identity >= rrf_content (1.5, 3.0):  MRR 1.000   leaks 0   <- production band
-  rrf_identity <= rrf_content (0.25,0.5,1): MRR 0.875  leaks 0   (confusers steal rank-1)
+  rrf_identity >  rrf_content (1.5, 3.0):    MRR 1.000   leaks 0   <- production band
+  rrf_identity <= rrf_content (0.25,0.5,1.0): MRR 0.875  leaks 0   (confusers steal rank-1)
   best leak-free: MRR 1.000 ; production default (rrf_identity 1.5) -> MRR 1.000
 ```
 
-So the production `rrf_identity = 1.5 > rrf_content = 1.0` is in the MRR-optimal,
-leak-free band — now **measured**, and the `provisional` comment is downgraded to
-`measured` in `sqlite.rs`. RRF fuses by RANK, so the per-column bm25 magnitudes
+The condition is STRICT `>`: at the boundary `rrf_identity == rrf_content == 1.0` the
+confuser targets TIE their distractors on RRF score, and the deterministic tie-break
+(ascending composite id) sorts the distractor paths first → they win rank-1 → MRR
+drops to 0.875. So `rrf_identity = 1.0` is in the LOSING band, not the winning one —
+do NOT lower the production default to 1.0. The production `rrf_identity = 1.5 >
+rrf_content = 1.0` is in the MRR-optimal, leak-free band — now **measured**, and the
+`provisional` comment is downgraded to `measured` in `sqlite.rs`. RRF fuses by RANK, so the per-column bm25 magnitudes
 (path 3×) only order within a leg; the sweep confirms `path_bm25 ∈ {2,3,4}` doesn't
 move MRR — the leg RRF weights are the load-bearing cross-leg knob. A CI-running
 guard (`production_weights_beat_content_dominant`) asserts the corpus genuinely

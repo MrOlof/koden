@@ -177,9 +177,11 @@ fn relevance_benchmark_with_negative_control() {
     // ---- gates ----
     assert!(neg_leaks.is_empty(), "negative-control queries must return nothing: {neg_leaks:?}");
     assert!(recall >= 0.8, "positive recall@{TOPK} {recall:.2} below 0.80 floor; misses: {pos_misses:?}");
-    // With confusers present the corpus genuinely discriminates: precision@1 must be
-    // strong but is NOT a forced 1.0 (a body-heavy weighting would drop it).
-    assert!(precision_at_1 >= 0.75, "precision@1 {precision_at_1:.2} below floor — confusers winning rank-1");
+    // The 9 base positives are rank-1 under any non-degenerate weighting, so a 0.75
+    // floor (9/12) would pass even if ALL 3 confusers regressed. Floor at 0.90 (≥11/12)
+    // so a confuser regression is actually caught here too (the hard confuser
+    // invariant also lives in `path_identity_outranks_body_confuser`).
+    assert!(precision_at_1 >= 0.90, "precision@1 {precision_at_1:.2} below 0.90 — confusers losing rank-1");
 }
 
 /// The confuser invariant at bench scale: a body-only mention must NOT outrank the
@@ -218,6 +220,14 @@ fn production_weights_beat_content_dominant() {
     let content_dominant = SearchWeights { rrf_identity: 0.25, ..SearchWeights::default() };
     let (p, c) = (mrr(&prod), mrr(&content_dominant));
     assert!(p > c, "production weights ({p:.3}) must beat content-dominant ({c:.3}) — corpus must discriminate");
+
+    // Defend the ACTUAL decision boundary: rrf_identity == rrf_content (1.0) is in the
+    // LOSING band (ties break to the distractor), so production must beat it too —
+    // this is what makes the "STRICT rrf_identity > rrf_content" claim CI-enforced and
+    // stops a future tuner from lowering the default to 1.0.
+    let boundary = SearchWeights { rrf_identity: prod.rrf_content, ..SearchWeights::default() };
+    assert!(p > mrr(&boundary), "production must beat the equal-weight boundary (1.0) — strict > is load-bearing");
+    assert!(prod.rrf_identity > prod.rrf_content, "production invariant: rrf_identity > rrf_content (strict)");
 }
 
 /// Offline weight CALIBRATION sweep (BUILD-PROMPT §13.12). Grid-sweeps a fixed

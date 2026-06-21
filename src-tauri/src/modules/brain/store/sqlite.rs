@@ -30,9 +30,11 @@ const W_CONTENT: (f64, f64, f64) = (0.0, 0.0, 1.0);
 /// RRF leg weights ([DP-9]). Identity (path+symbols) weighted above content so a
 /// filename match outranks a body-only mention (CONCEPT [DP-2]); content still
 /// contributes for recall. MEASURED (not guessed): the `brain_bench` calibration
-/// sweep over the labeled corpus + confusers shows `rrf_identity >= rrf_content` is
-/// MRR-optimal (1.000 vs 0.875 when content dominates), at zero negative-control
-/// leaks across the whole grid; 1.5 sits in that optimal band. Re-run the sweep
+/// sweep over the labeled corpus + confusers shows STRICT `rrf_identity > rrf_content`
+/// is MRR-optimal (1.000 vs 0.875 once content ties-or-dominates), at zero
+/// negative-control leaks across the whole grid; 1.5 sits in that optimal band. (The
+/// boundary rrf_identity == rrf_content == 1.0 is in the LOSING band — ties break to
+/// the distractor by ascending id — so do NOT lower the default to 1.0.) Re-run the sweep
 /// (`cargo test --test brain_bench -- --ignored`) and record before/after on any
 /// change (§13.12). NB: RRF fuses by RANK, so the bm25 column MAGNITUDES above
 /// (path 3×) only order WITHIN a leg — the leg RRF weights here are the load-bearing
@@ -84,8 +86,11 @@ impl SqliteIndex {
         crate::modules::brain::reflect::budget::sweep_orphaned_reservations(&self.conn, now)
     }
 
-    /// Search with EXPLICIT ranking weights (the offline calibration seam, used by
-    /// the relevance benchmark to sweep weights over the labeled corpus).
+    /// Search with EXPLICIT ranking weights — the offline CALIBRATION seam, used
+    /// only by the relevance benchmark to sweep weights over the labeled corpus.
+    /// NOT for the production search path: it runs over the WRITER connection, so it
+    /// bypasses the read-only WAL snapshot that `search_readonly`/`open_readonly_snapshot`
+    /// give the gist byte-identity gate. Production callers must use those instead.
     pub fn search_weighted(
         &self,
         project: Option<&str>,
@@ -1094,16 +1099,34 @@ mod tests {
 
     #[test]
     fn search_with_weights_defaults_equal_search_with_conn() {
-        // The parameterized core with default weights must be byte-identical to the
-        // production search (guards the V2.2 refactor).
+        // Guards the V2.2 refactor against default-weights DRIFT. Pinning the
+        // production weights as INLINE LITERALS (independent of SearchWeights::default)
+        // is the point: if anyone edits Default or the W_*/RRF_W_* consts, the
+        // field-by-field assertion below trips — so production ordering (and the gist
+        // byte-identity gate) can't change silently. (A `default() == default()`
+        // comparison would be tautological and catch nothing.)
+        let pinned = SearchWeights {
+            identity_bm25: (3.0, 1.5, 0.0),
+            content_bm25: (0.0, 0.0, 1.0),
+            rrf_identity: 1.5,
+            rrf_content: 1.0,
+        };
+        let d = SearchWeights::default();
+        assert_eq!(d.identity_bm25, pinned.identity_bm25, "W_IDENTITY drifted from the documented production value");
+        assert_eq!(d.content_bm25, pinned.content_bm25, "W_CONTENT drifted");
+        assert_eq!(d.rrf_identity, pinned.rrf_identity, "RRF_W_IDENTITY drifted");
+        assert_eq!(d.rrf_content, pinned.rrf_content, "RRF_W_CONTENT drifted");
+
         let (_dir, path) = temp_db();
         let idx = SqliteIndex::open(&path).expect("open");
         idx.index_file("p", "src/auth/login.rs", "pub fn loginHandler() {}", "a", 24).unwrap();
         idx.index_file("p", "src/db/pool.rs", "pub fn buildConnectionPool() {}", "b", 30).unwrap();
         idx.index_file("p", "src/api/router.rs", "// login route registered here", "c", 30).unwrap();
+        // search_with_conn must thread the PINNED production weights (not whatever
+        // Default happens to be) — so compare against the literal struct.
         for q in ["login handler", "connection pool", "login"] {
             let a = search_with_conn(&idx.conn, Some("p"), q, 10).unwrap();
-            let b = search_with_weights(&idx.conn, Some("p"), q, 10, &SearchWeights::default()).unwrap();
+            let b = search_with_weights(&idx.conn, Some("p"), q, 10, &pinned).unwrap();
             assert_eq!(a.len(), b.len(), "q={q}");
             for (x, y) in a.iter().zip(&b) {
                 assert_eq!((&x.path, x.score), (&y.path, y.score), "q={q}: divergent hit");

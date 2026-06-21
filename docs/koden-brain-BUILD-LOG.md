@@ -169,7 +169,8 @@ hard gate), semantic-intent (P0-lexical expected to miss; reported not asserted)
 Measured from a real run (`docs/koden-brain-BENCH.md`): positives **9/9=1.00**,
 negative-control leaks **0/3**, semantic-intent **0/2** (the honest lexical gap
 that P5 closes). Deliberately not a flat vanity 1.0 — the discriminating signal is
-the negative control + the semantic band.
+the negative control + the semantic band. _(P0-era figures; V2.2 grew the corpus to
+16 files / 12 positives with confusers — see the V2.2 entry + current BENCH.md.)_
 
 ### P0 Brain pane (frontend) ✅
 Recon mapped the conventions (invoke via `@tauri-apps/api/core`, `ExplorerSearch`
@@ -781,8 +782,9 @@ and must be judged against a discriminating benchmark).
   these the corpus scored a vanity 1.0 for any weighting.
 - Offline calibration sweep (`weight_sweep_reports_mrr_subject_to_zero_leaks`,
   `#[ignore]`d): grid-sweeps weights maximizing MRR SUBJECT TO zero negative-control
-  leaks (the regularizer). Result: identity-dominant (rrf_identity ≥ rrf_content) →
-  MRR 1.000; content-dominant → MRR 0.875; all leak-free. So production
+  leaks (the regularizer). Result: STRICT identity-dominant (rrf_identity > rrf_content)
+  → MRR 1.000; content tie-or-dominant (rrf_identity <= rrf_content, incl. the 1.0==1.0
+  boundary which loses on the ascending-id tie-break) → MRR 0.875; all leak-free. So production
   `rrf_identity = 1.5` is in the optimal band — `provisional` comment downgraded to
   `measured` (with the §13.12 before/after note). RRF fuses by rank, so path_bm25 ∈
   {2,3,4} doesn't move MRR — the leg weights are the load-bearing knob.
@@ -793,3 +795,28 @@ Green: clippy `-D warnings` clean · brain_bench 3 + 1 ignored · lib 294 / 1
 pre-existing · brain_sandbox 34. ⏭ temporal re-rank [DP-12] is the natural follow-on
 (now has a discriminating benchmark to be judged against); its byte-identity trap is
 documented (recency MUST be a stored snapshot-stable timestamp, never now()).
+
+### V2.2 verification + hardening ✅
+3 reviewers (refactor-equivalence · benchmark-honesty · calibration-soundness) +
+synthesis. Verdict: the load-bearing rules HOLD and were exhaustively verified — the
+refactor is a PURE extraction (`git show` confirmed; production consts byte-identical;
+determinism + tie-break preserved → gist byte-identity gate intact), and the benchmark
+genuinely discriminates (not a vanity 1.0). But the panel caught two **false "measured"
+claims** (exactly the §13.12 failure) — fixed:
+- **Corpus count**: BENCH.md's "real run" block said "13 files" but the redesigned
+  confusers make it **16** (10 base + 3 pairs × 2). Re-ran and re-pasted the actual
+  verbatim output (16 files).
+- **`>=` vs strict `>`**: the optimal band is STRICT `rrf_identity > rrf_content` — the
+  boundary 1.0==1.0 scores 0.875 (ties break to the distractor by ascending id), so
+  `>=` was false and would have misled a tuner into lowering the default to 1.0 (a real
+  regression). Corrected in sqlite.rs, BENCH.md, and the V2.2 log entry.
+Plus the should-fix test-quality items: de-tautologized the equivalence test (pin the
+production weights as inline literals + assert `Default` matches them field-by-field,
+so default-weights drift actually trips it); raised the vacuous precision@1 floor
+0.75→0.90 (the 9 base positives alone met 0.75); added a CI boundary assertion so the
+strict-`>` claim is enforced (production beats the 1.0 equal-weight case); scoped
+`search_weighted`'s doc (writer-conn calibration seam, not for production search). P0's
+9/9 bench figure annotated as superseded by the V2.2 corpus.
+Green: clippy `-D warnings` clean · brain_bench 3 + 1 ignored · lib 297 / 1 pre-existing.
+
+**V2.2 closed (ranking calibration + adversarial pass + honesty corrections).**
