@@ -1,5 +1,5 @@
 export { BrainPane } from "./BrainPane";
-export { BrainTabIcon } from "./BrainTabIcon";
+export { BrainHeaderButton, BrainTabIcon } from "./BrainTabIcon";
 export {
   brainBudgetStatus,
   brainBuildGist,

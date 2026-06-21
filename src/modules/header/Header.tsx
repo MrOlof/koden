@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
+import { BrainHeaderButton } from "@/modules/brain";
 import type { SpaceMeta } from "@/modules/spaces";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
@@ -53,6 +54,8 @@ type Props = {
   onMoveToSpace: (tabId: number, spaceId: string) => void;
   onToggleSidebar: () => void;
   onOpenCommandPalette: () => void;
+  /** Open the Koden Brain (search / memory / librarian). */
+  onOpenBrain: () => void;
   onActivateAgent: (tabId: number, leafId: number) => void;
   onActivateLocalAgent: () => void;
   onOpenSettings: () => void;
@@ -89,6 +92,7 @@ export function Header({
   onMoveToSpace,
   onToggleSidebar,
   onOpenCommandPalette,
+  onOpenBrain,
   onActivateAgent,
   onActivateLocalAgent,
   onOpenSettings,
@@ -158,6 +162,7 @@ export function Header({
             onActivateLocal={onActivateLocalAgent}
           />
         )}
+        {!IS_MAC && <BrainHeaderButton onClick={onOpenBrain} />}
       </div>
 
       {!IS_MAC && <span className="mx-1 h-full w-px shrink-0 bg-border/70" />}
@@ -206,6 +211,7 @@ export function Header({
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
           />
+          <BrainHeaderButton onClick={onOpenBrain} />
           {settingsButton}
         </>
       )}

@@ -1,5 +1,6 @@
 import { Brain02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useBrainStatus } from "./lib/useBrainStatus";
 
@@ -48,5 +49,24 @@ export function BrainTabIcon() {
         )}
       />
     </span>
+  );
+}
+
+/**
+ * Top-bar entry point for the Brain — a ghost icon button (matching the bell /
+ * command-palette buttons) carrying the same live status icon. Lives in the header
+ * so the brain's state is always visible, not buried in a tab.
+ */
+export function BrainHeaderButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button
+      size="icon-sm"
+      variant="ghost"
+      onClick={onClick}
+      aria-label="Open Koden Brain"
+      className="shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+    >
+      <BrainTabIcon />
+    </Button>
   );
 }

@@ -2019,6 +2019,7 @@ export default function App() {
               onMoveToSpace={handleMoveTab}
               onToggleSidebar={toggleSidebar}
               onOpenCommandPalette={() => openCommandPalette("commands")}
+              onOpenBrain={openBrain}
               onActivateAgent={onActivateAgent}
               onActivateLocalAgent={onActivateLocalAgent}
               onOpenSettings={() => void openSettingsWindow()}
