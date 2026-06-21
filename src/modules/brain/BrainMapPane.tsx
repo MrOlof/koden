@@ -448,6 +448,7 @@ export function BrainMapPane() {
     setHover(null);
   }, [flyTo, fitScale, animateSpread]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `layout` isn't read here; it re-runs the effect once the graph loads and the <svg> mounts so the wheel listener actually attaches.
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
