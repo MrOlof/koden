@@ -320,10 +320,33 @@ fn seed_registry(app: &AppHandle, launch_dir: Option<&str>) {
     }
 }
 
-fn has_project_marker(p: &std::path::Path) -> bool {
+pub fn has_project_marker(p: &std::path::Path) -> bool {
     [".git", "package.json", "Cargo.toml", "pyproject.toml", "go.mod", ".kodenignore"]
         .iter()
         .any(|m| p.join(m).exists())
+}
+
+fn is_ignored_dir(p: &std::path::Path) -> bool {
+    matches!(
+        p.file_name().and_then(|s| s.to_str()),
+        Some(n) if n.starts_with('.') || n == "node_modules" || n == "target" || n == "dist"
+    )
+}
+
+/// Immediate child directories of `root` that look like real projects (have a
+/// project marker). The workspace-root setup registers each as its OWN project, so a
+/// parent of 20 repos becomes 20 hubs — not one giant parent project.
+pub fn discover_workspace_projects(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && !is_ignored_dir(p) && has_project_marker(p))
+        .collect();
+    out.sort();
+    out
 }
 
 fn is_sane_root(p: &std::path::Path) -> bool {

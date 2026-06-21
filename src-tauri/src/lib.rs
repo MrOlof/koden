@@ -204,6 +204,8 @@ pub fn run() {
             brain::commands::brain_list_projects,
             brain::commands::brain_add_project,
             brain::commands::brain_remove_project,
+            brain::commands::brain_set_workspace,
+            brain::commands::brain_workspace_status,
             brain::commands::brain_get_symbol,
             brain::commands::brain_code_impact,
             brain::commands::brain_graph,

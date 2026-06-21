@@ -46,6 +46,20 @@ export function brainRemoveProject(project: string): Promise<void> {
   return invoke<void>("brain_remove_project", { project });
 }
 
+export type WorkspaceStatus = { root: string | null; configured: boolean; projects: number };
+
+/** First-run / setup status of the workspace (source of truth). `configured` is false
+ *  when no root is set and no projects exist → show the setup wizard. */
+export function brainWorkspaceStatus(): Promise<WorkspaceStatus> {
+  return invoke<WorkspaceStatus>("brain_workspace_status", {});
+}
+
+/** Set the workspace root + auto-register each child that's a real project (.git /
+ *  manifest) as its own project. Returns the added projects. */
+export function brainSetWorkspace(path: string): Promise<Project[]> {
+  return invoke<Project[]>("brain_set_workspace", { path });
+}
+
 /** Trigger a full reconcile (all projects, or one). Non-blocking on the worker. */
 export function brainRescan(project: string | null = null): Promise<void> {
   return invoke<void>("brain_rescan", { project });

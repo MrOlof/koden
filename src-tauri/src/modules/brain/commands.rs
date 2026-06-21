@@ -58,6 +58,43 @@ pub fn brain_remove_project(state: State<BrainState>, project: String) -> Result
     enqueue(&state, BrainEvent::RemoveProject { project })
 }
 
+/// Status of the workspace/source-of-truth setup — drives the first-run wizard.
+#[derive(serde::Serialize)]
+pub struct WorkspaceStatus {
+    pub root: Option<String>,
+    pub configured: bool,
+    pub projects: usize,
+}
+
+/// Whether a workspace is set up (a root was chosen OR any project is registered).
+#[tauri::command]
+pub fn brain_workspace_status(state: State<BrainState>) -> WorkspaceStatus {
+    let root = state.registry.workspace_root();
+    let projects = state.registry.projects().len();
+    WorkspaceStatus { configured: root.is_some() || projects > 0, root, projects }
+}
+
+/// Set the workspace root (source of truth) and auto-register each immediate child
+/// that looks like a real project (has .git / a manifest) as its OWN project. Returns
+/// the added projects; the worker indexes them, re-arms the watcher, and persists.
+#[tauri::command]
+pub fn brain_set_workspace(state: State<BrainState>, path: String) -> Result<Vec<Project>, String> {
+    let root = std::path::PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let root_norm = crate::modules::fs::to_canon(&root).trim_end_matches('/').to_string();
+    state.registry.set_workspace_root(Some(root_norm));
+    let mut added = Vec::new();
+    for child in crate::modules::brain::worker::discover_workspace_projects(&root) {
+        if let Some(p) = state.registry.add_root(&child) {
+            added.push(p);
+        }
+    }
+    enqueue(&state, BrainEvent::Rescan { project: None })?;
+    Ok(added)
+}
+
 /// Overall status + per-project indexed file counts.
 #[tauri::command]
 pub fn brain_index_status(state: State<BrainState>) -> BrainStatusReport {
