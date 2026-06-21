@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { brainGraph, type BrainGraph, type GraphNode } from "./lib/bindings";
 
@@ -37,6 +37,7 @@ type Layout = {
   byId: Map<string, GraphNode>;
   adj: Map<string, Set<string>>;
   projects: ProjectMeta[];
+  colorByProject: Map<string, string>;
   maxR: number;
 };
 
@@ -71,16 +72,19 @@ function computeLayout(graph: BrainGraph): Layout {
   };
   for (const e of graph.edges) link(e.a, e.b);
 
+  // Node positions. The brain core is hard-pinned at (0,0) in the render (it is a
+  // frontend-only node; the backend emits no "brain" node/edge), so it needs no entry.
   const pos = new Map<string, Pos>();
-  pos.set("brain", { x: 0, y: 0 });
 
   const projectNodes = graph.nodes.filter((n) => n.kind === "project");
   const P = Math.max(1, projectNodes.length);
   const projects: ProjectMeta[] = [];
+  const colorByProject = new Map<string, string>();
   let maxR = R_HUB;
 
   projectNodes.forEach((proj, i) => {
     const color = PALETTE[i % PALETTE.length];
+    colorByProject.set(proj.project_id, color);
     const angle = -Math.PI / 2 + (i * 2 * Math.PI) / P;
     pos.set(proj.id, { x: Math.cos(angle) * R_HUB, y: Math.sin(angle) * R_HUB });
 
@@ -112,7 +116,7 @@ function computeLayout(graph: BrainGraph): Layout {
     projects.push({ node: proj, color, angle, childCount: children.length });
   });
 
-  return { pos, byId, adj, projects, maxR };
+  return { pos, byId, adj, projects, colorByProject, maxR };
 }
 
 /**
@@ -166,8 +170,9 @@ export function BrainMapPane() {
     [applyCam],
   );
 
-  // Auto-fit the whole graph into view once it's laid out.
-  useEffect(() => {
+  // Auto-fit the whole graph into view once it's laid out. useLayoutEffect so the
+  // fitted transform is committed BEFORE first paint (no flash at identity scale).
+  useLayoutEffect(() => {
     if (!layout) return;
     const fit = Math.min(1.1, Math.max(0.3, (Math.min(W, H) / 2) * 0.92 / Math.max(1, layout.maxR)));
     cam.current = { x: 0, y: 0, s: fit };
@@ -234,7 +239,14 @@ export function BrainMapPane() {
       moved: false,
       bg: target.getAttribute("data-bg") === "1",
     };
-    applyCam(false);
+    // Capture so a pan keeps tracking even when the cursor leaves the SVG box, and
+    // pointerup off-element still ends it. (Without this, pan truncates at the edge.)
+    try {
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    } catch {
+      // setPointerCapture can throw if the pointer is already gone — harmless.
+    }
+    applyCam(false); // cancel any in-flight fly-to transition before dragging
     if (svgRef.current) svgRef.current.style.cursor = "grabbing";
   };
   const onPointerMove = (e: React.PointerEvent) => {
@@ -248,9 +260,14 @@ export function BrainMapPane() {
     cam.current.y = d.cy + dy / sc;
     camG.current?.setAttribute("transform", camTransform());
   };
-  const onPointerUp = () => {
+  const onPointerUp = (e: React.PointerEvent) => {
     const d = drag.current;
     drag.current = null;
+    try {
+      (e.currentTarget as Element).releasePointerCapture(e.pointerId);
+    } catch {
+      // already released — harmless.
+    }
     if (svgRef.current) svgRef.current.style.cursor = "grab";
     if (d && !d.moved && d.bg) reset();
   };
@@ -308,8 +325,7 @@ export function BrainMapPane() {
     return kind === "import" ? 0.22 : kind === "anchor" ? 0.3 : 0.14;
   };
 
-  const projColorOf = (projectId: string) =>
-    layout.projects.find((p) => p.node.project_id === projectId)?.color ?? PALETTE[9];
+  const projColorOf = (projectId: string) => layout.colorByProject.get(projectId) ?? PALETTE[9];
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-background">
@@ -345,7 +361,6 @@ export function BrainMapPane() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
       >
         <title>Koden Brain Map</title>
         <defs>

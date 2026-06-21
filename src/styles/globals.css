@@ -520,8 +520,9 @@ html *::-webkit-scrollbar {
   animation: koden-shimmer var(--shimmer-duration, 2s) linear infinite;
 }
 
-/* Koden Brain tab icon: a gentle "alive while indexing" breathe (paired with the
-   status dot). Disabled under prefers-reduced-motion below. */
+/* Koden Brain "alive" breathe: the tab icon's `.koden-breathe` class (while
+   indexing, disabled under prefers-reduced-motion below) AND the Brain Map core
+   glow (which reuses this keyframe via Tailwind's motion-safe variant). */
 @keyframes koden-breathe {
   0%,
   100% {
