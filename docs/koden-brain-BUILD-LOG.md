@@ -602,7 +602,34 @@ Green: default — clippy `-D warnings` clean · `cargo test` 280 passed / 1 pre
 (`authorize_spawn_cwd_blocks_symlink_escape`, untouched) · brain_sandbox 27. semantic —
 `clippy --features semantic` clean · gated reference tests pass.
 
-**P5 closed (seams + header + default-off feature + reference impl + CI gate).**
+### P5 verification + hardening ✅
+3 reviewers (feature-isolation, schema/migration, seam-design) + synthesis, ~296k
+tokens. Verdict: **sound to close — zero must-fixes**; all 3 acceptance gates verified
+against the code (feature provably absent from the default binary; header canonical/
+preserved so enabling needs no v1 schema migration; gated code compiles + is CI-tested
+under `--features semantic`). Findings were doc-honesty + test-robustness; fixed the
+honesty-relevant ones now (the rest fold into the enablement phase):
+- The "vector leg slots in with zero churn" comment conflated zero-SCHEMA-churn (true)
+  with zero-CODE-churn (false) — there is no runtime leg registry. Reworded to state
+  plainly that enabling the vector leg is a localized edit to `search_with_conn` +
+  `SEARCH_LEG_LABELS` (only `weighted_rrf` is already N-leg).
+- The no-vector-leg gate was a self-referential literal. Now `registered_search_legs()`
+  delegates to a single source of truth (`SEARCH_LEG_LABELS` in sqlite.rs, next to the
+  legs it builds), so the gate can't drift from the live path.
+- `semantic_meta_readonly` is now genuinely fail-soft (missing table/row → `("",0)`),
+  matching its doc, so a pre-migrate read can't error.
+- Cheap hardenings: v7 gist-key-rotation doc note; a re-open-no-clobber migrate
+  assertion; reference-impl defensive-branch tests (cosine length-mismatch, zero-norm
+  empty text, upsert length-mismatch, kNN truncate/best-first).
+⏭ Deferred to the semantic-enablement phase (logged): a `cargo tree -e features` CI
+tripwire (no optional deps exist yet, so trivially true today); spec↔impl test-name
+alignment; the cosine-pre-normalization contract doc on the traits (a production-
+embedder concern).
+Green: default clippy `-D warnings` clean · `cargo test` 280 / 1 pre-existing ·
+brain_sandbox 27 · `--features semantic` clippy clean + gated tests pass.
+
+**P5 closed (seams + header + default-off feature + reference impl + CI gate +
+adversarial pass + hardening).**
 V1 (P0→P5) is functionally complete. Next: V2 advanced track (stale-ADR curation,
 HNSW ANN + real embedder enablement, Tier-2 capture, richer resume, cross-project
 graph) + the cross-phase live-evidence pass (`pnpm tauri dev`, real-kill crash sim,

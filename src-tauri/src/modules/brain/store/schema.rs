@@ -18,7 +18,9 @@
 /// v7: added `brain_semantic_meta` (the `embedderId` header, P5). CANONICAL/preserved.
 ///     Empty in v1 (no embedder); set when the `semantic` feature is enabled, so a
 ///     later build can detect a model/dimension mismatch and rebuild. The vector
-///     table (`brain_vectors`) is created LAZILY at enablement — not here.
+///     table (`brain_vectors`) is created LAZILY at enablement — not here. As with
+///     every bump, this rotates the gist cache key (see the v6 note) — one-time
+///     post-upgrade agent-prompt-cache miss, expected.
 pub const SCHEMA_VERSION: i64 = 7;
 
 /// Idempotent base DDL (safe to run on every open).

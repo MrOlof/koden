@@ -34,6 +34,12 @@ const W_CONTENT: (f64, f64, f64) = (0.0, 0.0, 1.0);
 const RRF_W_IDENTITY: f64 = 1.5;
 const RRF_W_CONTENT: f64 = 1.0;
 
+/// The labels of the RRF legs `search_with_conn` actually fuses, in order. The
+/// single source of truth for the P5 no-vector-leg gate (`search::registered_search_legs`
+/// returns this) — keep it in lockstep with the legs built in `search_with_conn`.
+/// A future semantic `vector` leg is added here AND there together at enablement.
+pub const SEARCH_LEG_LABELS: &[&str] = &["identity", "content"];
+
 pub struct SqliteIndex {
     conn: Connection,
 }
@@ -699,6 +705,8 @@ pub fn search_with_conn(
         return Ok(Vec::new());
     }
     let overfetch = (limit * 4).max(40);
+    // The two FTS5 legs — labelled by SEARCH_LEG_LABELS (identity, content). A
+    // semantic vector leg is NOT fused here in v1 (the P5 no-vector-leg invariant).
     let leg_a = run_leg(conn, &build_match("path symbols", &q_tokens), project, W_IDENTITY, overfetch)?;
     let leg_b = run_leg(conn, &build_match("content", &q_tokens), project, W_CONTENT, overfetch)?;
 
@@ -841,13 +849,19 @@ pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {
 
 /// The semantic `embedderId` header `(embedder_id, dims)` via a read-only
 /// connection. Empty `("", 0)` in v1 (no embedder); set at enablement. P5.
+///
+/// Fail-soft: a missing table/row (e.g. a pre-v7 DB read before the worker
+/// migrates) maps to `("", 0)` — the "no embedder" state — rather than erroring.
+/// `Err` only when the store FILE is absent (genuinely not ready; callers fail-soft).
 pub fn semantic_meta_readonly(db_path: &Path) -> rusqlite::Result<(String, i64)> {
     let conn = open_readonly(db_path)?;
-    conn.query_row(
-        "SELECT embedder_id, dims FROM brain_semantic_meta WHERE id=1",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
+    Ok(conn
+        .query_row(
+            "SELECT embedder_id, dims FROM brain_semantic_meta WHERE id=1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap_or_else(|_| (String::new(), 0)))
 }
 
 fn note_summary_from_row(r: &rusqlite::Row) -> rusqlite::Result<NoteSummary> {

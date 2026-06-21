@@ -151,6 +151,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!((eid2.as_str(), dims2), ("bge-small", 384), "header survives upgrade");
+        // re-open at the current version (the "already current" branch re-runs the
+        // idempotent DDL incl. INSERT OR IGNORE) — must NOT clobber the set header.
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+        let eid3: String = conn
+            .query_row("SELECT embedder_id FROM brain_semantic_meta WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(eid3, "bge-small", "re-open does not clobber the header (INSERT OR IGNORE)");
     }
 
     #[test]

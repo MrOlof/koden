@@ -16,15 +16,19 @@ pub mod reference;
 
 pub use vector::{DocId, Embedder, VectorStore};
 
-/// The RRF fusion legs actually registered in the live search path. v1 = the two
-/// FTS5 legs (`identity` = path+symbols, `content`). A semantic `vector` leg is
-/// NEVER registered in the default build — the P5 no-vector-leg gate. When the
-/// `semantic` feature is enabled AND a vector store is wired, the vector leg slots
-/// in here (one more weighted RRF leg) with zero schema churn.
+/// The RRF fusion legs the live search path actually fuses — the SAME
+/// [`SEARCH_LEG_LABELS`](crate::modules::brain::store::SEARCH_LEG_LABELS) that
+/// `store::sqlite::search_with_conn` builds, so this can't drift from reality. v1 =
+/// the two FTS5 legs (`identity` = path+symbols, `content`); no semantic `vector`
+/// leg is registered (the P5 no-vector-leg gate).
+///
+/// NOTE on the slot-in seam: enabling semantic later needs ZERO *schema* churn
+/// (the only new object is the lazy `brain_vectors` table). It is NOT zero *code*
+/// churn — there is no runtime leg registry; `weighted_rrf` is already N-leg, but
+/// adding the vector leg is a localized edit to `search_with_conn` (build a third
+/// `Leg`) plus appending its label to `SEARCH_LEG_LABELS`.
 pub fn registered_search_legs() -> Vec<&'static str> {
-    // Kept in sync with `store::sqlite::search_with_conn` (leg_a identity, leg_b
-    // content). The vector leg is intentionally absent in v1.
-    vec!["identity", "content"]
+    crate::modules::brain::store::SEARCH_LEG_LABELS.to_vec()
 }
 
 #[cfg(test)]

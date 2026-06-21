@@ -10,7 +10,7 @@ pub use sqlite::{
     get_symbol_readonly, list_notes_readonly, list_notes_with_conn, list_proposals_readonly,
     open_readonly_snapshot, project_fingerprint_readonly, project_fingerprint_with_conn,
     search_readonly, search_with_conn, semantic_meta_readonly, symbols_for_path_readonly,
-    symbols_for_path_with_conn, SqliteIndex,
+    symbols_for_path_with_conn, SqliteIndex, SEARCH_LEG_LABELS,
 };
 
 use crate::modules::brain::Hit;

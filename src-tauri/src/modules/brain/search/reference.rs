@@ -128,4 +128,34 @@ mod tests {
         store.upsert(&["a".into()], &[vec![1.0; DIMS]]).unwrap();
         assert_eq!(store.query(&vec![1.0; DIMS], 10).unwrap().len(), 1, "upsert replaces");
     }
+
+    #[test]
+    fn defensive_branches_dont_panic() {
+        // length mismatch → cosine returns 0.0, never panics.
+        assert_eq!(cosine(&[1.0, 0.0], &[1.0]), 0.0);
+        // empty text → all-zero vector (zero-norm guard, no NaN).
+        let z = embed_one("   !!!   ");
+        assert!(z.iter().all(|x| *x == 0.0), "empty/punct text → zero vector");
+        // upsert length mismatch is an Err, not a panic.
+        let store = BruteForceStore::new("reference-hash-v1");
+        assert!(store.upsert(&["a".into(), "b".into()], &[vec![1.0; DIMS]]).is_err());
+        // query over an empty store + k>rows is fine.
+        assert!(store.query(&vec![0.0; DIMS], 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn knn_truncates_to_k_best_first() {
+        let store = BruteForceStore::new("reference-hash-v1");
+        let mut a = vec![0.0; DIMS]; a[0] = 1.0;
+        let mut b = vec![0.0; DIMS]; b[1] = 1.0;
+        let mut c = vec![0.0; DIMS]; c[0] = 1.0; // identical direction to `a`
+        let n = (c.iter().map(|x| x * x).sum::<f32>()).sqrt();
+        for x in &mut c { *x /= n; }
+        store.upsert(&["a".into(), "b".into(), "c".into()], &[a.clone(), b, c]).unwrap();
+        let hits = store.query(&a, 2).unwrap();
+        assert_eq!(hits.len(), 2, "truncated to k");
+        // a and c both point along axis 0 → score 1.0; b is orthogonal → 0.0.
+        assert!(hits.iter().all(|(id, _)| id != "b"), "orthogonal doc excluded: {hits:?}");
+        assert!(hits[0].1 >= hits[1].1, "best-first");
+    }
 }
