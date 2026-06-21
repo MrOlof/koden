@@ -10,7 +10,8 @@
 
 use std::path::Path;
 
-use koden_lib::modules::brain::gist::build_gist;
+use koden_lib::modules::brain::gist::synth::synthesize_intent;
+use koden_lib::modules::brain::gist::{build_gist, build_gist_auto, write_gist};
 use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::store::{
@@ -332,6 +333,43 @@ fn gist_byte_identical_on_unchanged_relaunch() {
     index_changed(&idx, PID, root, &[root.join("src/auth/login.ts")]);
     let g3 = build_gist(&db, PID, "proj", "login", 400);
     assert_ne!(g3.fingerprint, g1.fingerprint, "content change → new cache key");
+}
+
+/// P3.2: cold-start synthesis is deterministic + drives a non-thin gist; the
+/// write path lands the gist bytes in the agent file; auto-synth stays byte-stable.
+#[test]
+fn gist_cold_start_synth_and_write() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/payments/checkout.ts", b"export function createStripeCheckout() {}");
+    write(
+        root,
+        ".koden-memory/n.md",
+        b"---\nid: n\ntype: decision\ntitle: Stripe checkout flow\n---\nbody",
+    );
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+
+    // synthesis is deterministic and includes the project name + note title.
+    let q1 = synthesize_intent(&db, PID, "shop");
+    let q2 = synthesize_intent(&db, PID, "shop");
+    assert_eq!(q1, q2);
+    assert!(q1.contains("shop") && q1.contains("Stripe checkout flow"), "synth: {q1}");
+
+    // auto-synth (blank intent) produces a non-thin, byte-stable gist.
+    let g1 = build_gist_auto(&db, PID, "shop", "", 400);
+    let g2 = build_gist_auto(&db, PID, "shop", "", 400);
+    assert_eq!(g1.bytes, g2.bytes, "auto-synth gist must be byte-stable");
+    assert!(g1.bytes.contains("checkout.ts"), "synth surfaced the stripe file: {}", g1.bytes);
+
+    // write path lands the gist in the agent file.
+    let out = store.path().join("agent-7.txt");
+    let g3 = write_gist(&db, PID, "shop", "stripe checkout", 400, &out).unwrap();
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), g3.bytes);
+    assert!(g3.bytes.contains("checkout.ts"));
 }
 
 fn ts_chain(root: &Path) {

@@ -401,7 +401,19 @@ the freshness line).
 Green: clippy `-D warnings` clean · `cargo test` 244 passed / 1 pre-existing ·
 brain lib 52 · brain_sandbox 14.
 
-⏭ P3 remaining: cold-start query synthesis (KODEN_SESSION→project, agent name→
-intent, git HEAD + changed/recent files, top notes); `brain_write_gist` →
-`~/.koden/agent-<id>.txt` + the worker trigger on agent-start; injection toast;
-richer confidence gate + snippet-text enrichment; then a P3 verification pass.
+### P3.2 — cold-start synthesis + gist write path ✅
+`gist/synth.rs`: `synthesize_intent` (deterministic-given-state: project name +
+sorted note titles; git/recent-files signal a documented refinement — must stay
+deterministic to preserve byte-stability). `build_gist_auto` synthesizes when the
+intent is blank; `write_gist` builds + writes the bytes to the agent file. Commands
+`brain_build_gist` (now auto-synth) + `brain_write_gist` (→ `~/.koden/agent-<id>.txt`,
+the existing `--append-system-prompt` channel). Tests: deterministic synth +
+non-thin auto-synth gist + byte-stable + the write path lands the bytes.
+Green: clippy `-D warnings` clean · `cargo test` 244 passed / 1 pre-existing ·
+brain_sandbox 15.
+
+⏭ P3 remaining: the FRONTEND launcher wiring (App.tsx agent-spawn calls
+`brain_write_gist` pre-spawn so the gist is in `agent-<id>.txt` before
+`--append-system-prompt`, + an injection toast) — tsc-verifiable but the actual
+inject needs a live `pnpm tauri dev` run; richer confidence gate + snippet-text
+enrichment; git/recent-files synthesis; then a P3 verification pass.

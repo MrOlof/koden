@@ -17,6 +17,8 @@
 //! Layered + fail-open: the freshness line is always kept; relevant files + their
 //! top symbols, then top memory notes, are added while the char budget allows.
 
+pub mod synth;
+
 use std::path::Path;
 
 use crate::modules::brain::store;
@@ -97,6 +99,41 @@ pub fn build_gist(
     }
 
     Gist { bytes: out, fingerprint: key, sources }
+}
+
+/// Build the gist, synthesizing a cold-start intent when `intent` is blank.
+pub fn build_gist_auto(
+    db_path: &Path,
+    project_id: &str,
+    project_name: &str,
+    intent: &str,
+    budget_tokens: usize,
+) -> Gist {
+    let query = if intent.trim().is_empty() {
+        synth::synthesize_intent(db_path, project_id, project_name)
+    } else {
+        intent.to_string()
+    };
+    build_gist(db_path, project_id, project_name, &query, budget_tokens)
+}
+
+/// Build the gist (cold-start-synthesized if `intent` is blank) and write its
+/// bytes to `out_path` — the existing `--append-system-prompt` channel
+/// (`~/.koden/agent-<id>.txt`). Returns the gist for the injection toast.
+pub fn write_gist(
+    db_path: &Path,
+    project_id: &str,
+    project_name: &str,
+    intent: &str,
+    budget_tokens: usize,
+    out_path: &Path,
+) -> std::io::Result<Gist> {
+    let g = build_gist_auto(db_path, project_id, project_name, intent, budget_tokens);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(out_path, g.bytes.as_bytes())?;
+    Ok(g)
 }
 
 /// Append `line` (with a newline) iff it fits the char budget. Returns whether it

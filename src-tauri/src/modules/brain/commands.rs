@@ -114,7 +114,37 @@ pub fn brain_build_gist(
         .find(|p| p.id == project)
         .map(|p| p.name)
         .unwrap_or_else(|| project.clone());
-    Some(gist::build_gist(&db, &project, &name, &intent, budget.unwrap_or(800)))
+    Some(gist::build_gist_auto(&db, &project, &name, &intent, budget.unwrap_or(800)))
+}
+
+/// Build the gist (cold-start-synthesized if `intent` is blank) and write it to
+/// the agent's `--append-system-prompt` file (`~/.koden/agent-<agent_id>.txt`) so
+/// a launching agent gets project context. Returns the gist for the toast.
+#[tauri::command]
+pub fn brain_write_gist(
+    state: State<BrainState>,
+    project: String,
+    intent: String,
+    agent_id: String,
+    budget: Option<usize>,
+) -> Result<Gist, String> {
+    let db = state
+        .db_path
+        .read()
+        .ok()
+        .and_then(|p| p.clone())
+        .ok_or_else(|| "brain index not ready".to_string())?;
+    let name = state
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project)
+        .map(|p| p.name)
+        .unwrap_or_else(|| project.clone());
+    let home = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
+    let path = home.join(".koden").join(format!("agent-{agent_id}.txt"));
+    gist::write_gist(&db, &project, &name, &intent, budget.unwrap_or(800), &path)
+        .map_err(|e| format!("write gist: {e}"))
 }
 
 /// Definition locations of a symbol (path/kind/line) — the AST graph (P2).
