@@ -1,10 +1,3 @@
-import {
-  HierarchySquare01Icon,
-  Search01Icon,
-  Settings01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -13,11 +6,19 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  HierarchySquare01Icon,
+  RocketIcon,
+  Search01Icon,
+  Settings01Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { useEffect, useState } from "react";
 import { BrainTabIcon } from "./BrainTabIcon";
 import {
+  type BrainStatusReport,
   brainBudgetStatus,
   brainIndexStatus,
-  type BrainStatusReport,
 } from "./lib/bindings";
 
 const POLL_MS = 2000;
@@ -46,7 +47,11 @@ type Props = {
  * ceiling/spend exists (local models cost nothing, so the cost line stays hidden) —
  * plus entries for the Brain Map, the full Brain view, and Settings.
  */
-export function BrainHeaderMenu({ onOpenBrain, onOpenBrainMap, onOpenSettings }: Props) {
+export function BrainHeaderMenu({
+  onOpenBrain,
+  onOpenBrainMap,
+  onOpenSettings,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [report, setReport] = useState<BrainStatusReport | null>(null);
   const [budget, setBudget] = useState<[number, number] | null>(null);
@@ -93,11 +98,14 @@ export function BrainHeaderMenu({ onOpenBrain, onOpenBrainMap, onOpenSettings }:
         <div className="px-2 py-1.5">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold">Koden Brain</span>
-            <span className="ml-auto text-[11px] text-muted-foreground">{stateLabel(report)}</span>
+            <span className="ml-auto text-[11px] text-muted-foreground">
+              {stateLabel(report)}
+            </span>
           </div>
           <div className="mt-1.5 flex flex-col gap-0.5 text-[11px] text-muted-foreground tabular-nums">
             <div>
-              {files.toLocaleString()} files · {projectCount} project{projectCount === 1 ? "" : "s"}
+              {files.toLocaleString()} files · {projectCount} project
+              {projectCount === 1 ? "" : "s"}
             </div>
             {showCost ? (
               <div>
@@ -114,12 +122,26 @@ export function BrainHeaderMenu({ onOpenBrain, onOpenBrainMap, onOpenSettings }:
           Brain Search
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenBrainMap} className="gap-2">
-          <HugeiconsIcon icon={HierarchySquare01Icon} size={15} strokeWidth={1.75} />
+          <HugeiconsIcon
+            icon={HierarchySquare01Icon}
+            size={15}
+            strokeWidth={1.75}
+          />
           Brain Map
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenSettings} className="gap-2">
           <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />
           Settings
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent("koden:open-onboarding"))
+          }
+          className="gap-2"
+        >
+          <HugeiconsIcon icon={RocketIcon} size={15} strokeWidth={1.75} />
+          Setup guide
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

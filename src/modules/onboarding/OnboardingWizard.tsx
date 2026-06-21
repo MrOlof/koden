@@ -177,30 +177,47 @@ export function OnboardingWizard() {
 
   const [error, setError] = useState<string | null>(null);
 
+  const loadKeys = useCallback(async () => {
+    try {
+      const keys = await getAllKeys();
+      setAiConfigured(hasAnyKey(keys));
+      setKeyedProviders(
+        PROVIDERS.filter((p) => providerSupportsKey(p.id) && keys[p.id]).map(
+          (p) => p.id,
+        ),
+      );
+    } catch {}
+  }, []);
+
+  // First-run: show once, only when setup isn't done AND no workspace is configured.
   useEffect(() => {
     let alive = true;
     if (localStorage.getItem(DONE_KEY)) return;
     brainWorkspaceStatus()
-      .then(async (s) => {
+      .then((s) => {
         if (!alive || s.configured) return;
         setShow(true);
-        try {
-          const keys = await getAllKeys();
-          if (alive) {
-            setAiConfigured(hasAnyKey(keys));
-            setKeyedProviders(
-              PROVIDERS.filter(
-                (p) => providerSupportsKey(p.id) && keys[p.id],
-              ).map((p) => p.id),
-            );
-          }
-        } catch {}
+        void loadKeys();
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, []);
+  }, [loadKeys]);
+
+  // Manual re-open from the Brain menu ("Setup guide") — bypasses the first-run
+  // gate so users can re-run setup or change provider/model/workspace anytime.
+  useEffect(() => {
+    const openIt = () => {
+      setStep(0);
+      setLibProvider("");
+      setError(null);
+      setShow(true);
+      void loadKeys();
+    };
+    window.addEventListener("koden:open-onboarding", openIt);
+    return () => window.removeEventListener("koden:open-onboarding", openIt);
+  }, [loadKeys]);
 
   // The set of providers the Librarian can use: connected cloud keys (minus the
   // free-form openai-compatible, which needs its own base URL) + the local servers.
