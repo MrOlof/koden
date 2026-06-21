@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Koden Brain — Build Timeline</title>
+<style>
+  /* ---- Design tokens: clean engineering changelog, ink-on-off-white, one accent ---- */
+  :root {
+    --bg:        #f7f6f3;   /* warm off-white */
+    --surface:   #ffffff;
+    --surface-2: #fbfaf8;
+    --ink:       #1c1c1e;   /* near-black text */
+    --ink-2:     #4a4a4f;   /* secondary text */
+    --ink-3:     #767680;   /* muted / meta */
+    --hair:      #e4e2dc;   /* hairline rules */
+    --hair-2:    #d6d4cc;
+    --accent:    #c8643c;   /* single accent — burnt terracotta */
+    --accent-soft:#f4e3da;
+    --done:      #2f7d57;   /* green, used only in pill + done node ring */
+    --done-soft: #e3f0e8;
+    --plan:      #8a8a93;   /* grey for planned */
+    --plan-soft: #ececea;
+    --spine:     #d6d4cc;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #16161a;
+      --surface:   #1e1e23;
+      --surface-2: #202026;
+      --ink:       #ececee;
+      --ink-2:     #b6b6bd;
+      --ink-3:     #84848e;
+      --hair:      #2b2b32;
+      --hair-2:    #34343c;
+      --accent:    #e08a5f;
+      --accent-soft:#3a261d;
+      --done:      #5fb98a;
+      --done-soft: #1f3329;
+      --plan:      #7d7d87;
+      --plan-soft: #2a2a30;
+      --spine:     #34343c;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .wrap { max-width: 880px; margin: 0 auto; padding: 56px 28px 96px; }
+
+  /* ---------- Header ---------- */
+  header { margin-bottom: 14px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: 34px;
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    font-weight: 650;
+  }
+  .subtitle { color: var(--ink-2); font-size: 16px; margin: 0 0 18px; max-width: 62ch; }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-3);
+    padding-bottom: 18px; border-bottom: 1px solid var(--hair);
+  }
+  .meta-row .branch { color: var(--ink-2); }
+  .meta-row .kv b { color: var(--ink-2); font-weight: 600; }
+
+  /* ---------- Progress + legend bar ---------- */
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 20px 28px; align-items: center;
+    justify-content: space-between;
+    margin: 22px 0 8px; padding: 16px 18px;
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 10px;
+  }
+  .progress { flex: 1 1 320px; min-width: 280px; }
+  .progress .plabel {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3); margin-bottom: 7px;
+  }
+  .progress .plabel strong { color: var(--ink-2); font-weight: 600; }
+  .bar {
+    height: 6px; border-radius: 4px; background: var(--hair-2); overflow: hidden;
+    display: flex;
+  }
+  .bar .seg-done { background: var(--done); }
+  .bar .seg-prog { background: var(--accent); }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; }
+  .legend .item {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; color: var(--ink-2);
+  }
+  .swatch {
+    width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto;
+    border: 1.5px solid transparent;
+  }
+  .swatch.done { background: var(--done); }
+  .swatch.prog { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .swatch.plan { background: var(--surface); border-color: var(--plan); }
+
+  /* ---------- Timeline structure ---------- */
+  .timeline { position: relative; margin-top: 40px; }
+  /* the spine */
+  .timeline::before {
+    content: ""; position: absolute;
+    left: 11px; top: 6px; bottom: 6px; width: 2px;
+    background: linear-gradient(var(--spine), var(--spine));
+  }
+
+  /* Segment label (V1 / Headless / V2 / End goal) */
+  .segment { position: relative; margin: 0 0 8px; }
+  .segment-head {
+    position: relative; padding-left: 52px; margin: 38px 0 18px;
+  }
+  .segment:first-child .segment-head { margin-top: 0; }
+  .segment-head .seg-marker {
+    position: absolute; left: 4px; top: 3px;
+    width: 16px; height: 16px; border-radius: 3px;
+    background: var(--bg); border: 2px solid var(--ink-3);
+    transform: rotate(45deg);
+  }
+  .segment-head h2 {
+    font-size: 13px; font-family: var(--mono); letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink); margin: 0; font-weight: 600;
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  .segment-head .seg-note {
+    font-family: var(--sans); text-transform: none; letter-spacing: 0;
+    font-size: 13px; color: var(--ink-3); font-weight: 400;
+  }
+
+  /* A milestone node + card */
+  .node { position: relative; padding-left: 52px; margin: 0 0 18px; }
+  .node:last-child { margin-bottom: 0; }
+
+  .dot {
+    position: absolute; left: 4px; top: 20px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--hair-2);
+    z-index: 2;
+  }
+  .node.is-done .dot { background: var(--done); border-color: var(--done); }
+  .node.is-planned .dot { background: var(--surface); border-color: var(--plan); }
+  .node.is-prog .dot {
+    background: var(--accent); border-color: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+    animation: pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 3px var(--accent-soft); }
+    50%      { box-shadow: 0 0 0 7px var(--accent-soft); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .node.is-prog .dot { animation: none; }
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--hair);
+    border-radius: 10px;
+    padding: 16px 18px;
+    transition: border-color .15s ease;
+  }
+  .card:hover { border-color: var(--hair-2); }
+  .node.is-prog .card {
+    border-color: var(--accent);
+    background: var(--surface);
+    box-shadow: 0 1px 0 var(--accent-soft), 0 0 0 1px var(--accent-soft) inset;
+  }
+
+  .card-top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 6px;
+  }
+  .card-id-title { display: flex; align-items: baseline; gap: 11px; flex-wrap: wrap; min-width: 0; }
+  .pid {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    color: var(--accent); background: var(--accent-soft);
+    padding: 2px 7px; border-radius: 5px; white-space: nowrap;
+  }
+  .node.is-done .pid { color: var(--done); background: var(--done-soft); }
+  .node.is-planned .pid { color: var(--ink-3); background: var(--plan-soft); }
+  .ptitle { font-size: 15.5px; font-weight: 600; color: var(--ink); margin: 0; line-height: 1.3; }
+  .card p { margin: 4px 0 0; color: var(--ink-2); font-size: 14px; line-height: 1.5; }
+  .card p .mono { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+
+  /* status pill */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-family: var(--mono); letter-spacing: .03em;
+    font-weight: 600; white-space: nowrap;
+    padding: 3px 9px 3px 8px; border-radius: 999px;
+    border: 1px solid transparent;
+  }
+  .pill svg { width: 12px; height: 12px; flex: 0 0 auto; }
+  .pill.done { color: var(--done); background: var(--done-soft); border-color: transparent; }
+  .pill.prog { color: var(--accent); background: var(--accent-soft); }
+  .pill.plan { color: var(--plan); background: var(--plan-soft); }
+
+  /* detail chips on a card */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+  .chip {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+    background: var(--surface-2); border: 1px solid var(--hair);
+    padding: 2px 8px; border-radius: 5px;
+  }
+
+  /* the "you are here" emphasis */
+  .here-flag {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .here-flag .ring {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  /* ---------- Process note callout ---------- */
+  .callout {
+    margin-top: 44px; padding: 22px 24px;
+    background: var(--surface); border: 1px solid var(--hair);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+  }
+  .callout h3 {
+    margin: 0 0 10px; font-size: 13px; font-family: var(--mono);
+    letter-spacing: .1em; text-transform: uppercase; color: var(--ink); font-weight: 600;
+  }
+  .callout p { margin: 0 0 10px; color: var(--ink-2); font-size: 14px; line-height: 1.6; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout ul { margin: 6px 0 12px; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
+  .callout li { margin-bottom: 4px; line-height: 1.5; }
+  .callout .gate-line {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+    border-top: 1px solid var(--hair); padding-top: 12px; margin-top: 14px;
+    line-height: 1.8;
+  }
+  .callout .gate-line b { color: var(--ink-2); font-weight: 600; }
+
+  footer {
+    margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--hair);
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 40px 18px 72px; }
+    h1 { font-size: 27px; }
+    .card-top { flex-direction: column; gap: 6px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Koden Terminal · Native Rust Librarian</p>
+    <h1>Koden Brain — Build Timeline</h1>
+    <p class="subtitle">An in-process index that keeps per-project context fresh and feeds it to agents — fail-open, never blocking first paint, secrets never indexed, every token-spend gated.</p>
+    <div class="meta-row">
+      <span class="kv"><b>2026-06-21</b></span>
+      <span class="branch">branch <b>feat/koden-brain</b> off <span>main @ f00a360</span></span>
+      <span class="kv">schema <b>v9</b> · main untouched</span>
+    </div>
+  </header>
+
+  <div class="controls">
+    <div class="progress">
+      <div class="plabel">
+        <span><strong>V1 complete</strong> · V2 in progress</span>
+        <span>P0–P5 + V2.1 + V2.2 done · DP-12 building</span>
+      </div>
+      <div class="bar" role="img" aria-label="V1 complete, V2 in progress, end goal not yet started">
+        <div class="seg-done" style="width:72%"></div>
+        <div class="seg-prog" style="width:8%"></div>
+      </div>
+    </div>
+    <div class="legend" aria-label="status legend">
+      <span class="item"><span class="swatch done"></span>Done</span>
+      <span class="item"><span class="swatch prog"></span>In&nbsp;progress</span>
+      <span class="item"><span class="swatch plan"></span>Planned</span>
+    </div>
+  </div>
+
+  <div class="timeline">
+
+    <!-- ============ START ============ -->
+    <div class="segment">
+      <div class="segment-head">
+        <span class="seg-marker"></span>
+        <h2>Start <span class="seg-note">2026-06-20 · greenfield</span></h2>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">ORIGIN</span>
+              <h3 class="ptitle">Greenfield — the build mandate</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>No brain subsystem existed. An autonomous build mandate (koden-brain-BUILD-PROMPT) on a new branch <span class="mono">feat/koden-brain</span> off <span class="mono">main</span>. Goal: a native, in-process Rust "Librarian" for the Koden terminal that indexes each project and feeds agents context — fail-open, secrets never sent to cloud, every token-spend gated.</p>
+          <div class="chips">
+            <span class="chip">cargo 1.94.1</span>
+            <span class="chip">src-tauri/src/modules/brain — did not exist</span>
+            <span class="chip">sibling feat/koden-cli merges later</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ V1 ============ -->
+    <div class="segment">
+      <div class="segment-head">
+        <span class="seg-marker"></span>
+        <h2>V1 — the keyless brain <span class="seg-note">P0 → P5 · all done, adversarially verified, committed</span></h2>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">P0</span>
+              <h3 class="ptitle">Warm lexical brain</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>One SQLite file (FTS5) behind a <span class="mono">SearchIndex</span> trait — BM25 with first-class per-column weights + weighted RRF fusion (filename match outranks a body-only mention), an ignore-aware walk, the secrets-redaction hard gate, and a GUI-resident worker thread that fails open. Backed by an offline sandbox proof and a discriminating relevance benchmark.</p>
+          <div class="chips">
+            <span class="chip">FTS5 · blake3</span>
+            <span class="chip">secrets gate</span>
+            <span class="chip">fail-open worker</span>
+            <span class="chip">Brain pane (frontend)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">P1</span>
+              <h3 class="ptitle">Native memory + doctor</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>Structured memory notes (YAML-frontmatter scan over <span class="mono">.koden-memory/</span>) plus a recursive incremental watcher, and a deterministic "doctor" that emits findings into a human-gated proposal queue. The Librarian proposes — it never auto-edits user files.</p>
+          <div class="chips">
+            <span class="chip">notes table</span>
+            <span class="chip">proposal queue · reject-sticky</span>
+            <span class="chip">review inbox UI</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">P2</span>
+              <h3 class="ptitle">AST graph</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>tree-sitter (Rust + TS/TSX) drives definition/import extraction into resolved file→file edges and a tiered code-impact closure. Edges rebuild as a pure function of (imports, file set), so incremental indexing provably converges with a full rebuild — gate proven against ADD+DELETE+RENAME+MODIFY.</p>
+          <div class="chips">
+            <span class="chip">tree-sitter</span>
+            <span class="chip">code_nodes · code_edges</span>
+            <span class="chip">incremental == full rebuild</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">P3</span>
+              <h3 class="ptitle">Cache-stable gist</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>A token-bounded, fingerprint-keyed context bundle injected into agents as the prompt-cache-stable prefix. Built over one pinned DB snapshot so it is byte-identical on an unchanged relaunch (the prompt-cache gate) — hardened against a torn-snapshot read that would have split the key across two states.</p>
+          <div class="chips">
+            <span class="chip">blake3 cache key</span>
+            <span class="chip">byte-identical relaunch</span>
+            <span class="chip">single-snapshot read</span>
+            <span class="chip">launcher-prepended</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">P4</span>
+              <h3 class="ptitle">Budgeted reflect + crash-resume</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>The only token-spending path: a crash-safe spend ledger (reserve → call → reconcile — a crash over-counts, never leaks free spend) plus a faithful Conductr "reflect" port behind a fake-LLM seam. Adds per-pane crash-resume journals (Tier-1) and a Tier-2 <span class="mono">claude --resume</span> plan. Deterministic core; the GUI half is the live-evidence pass.</p>
+          <div class="chips">
+            <span class="chip">spend ledger</span>
+            <span class="chip">metadata-only digest</span>
+            <span class="chip">redact before cloud</span>
+            <span class="chip">resume journals</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">P5</span>
+              <h3 class="ptitle">Deferred semantic seams</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p><span class="mono">Embedder</span>/<span class="mono">VectorStore</span> traits + an <span class="mono">embedderId</span> header behind a DEFAULT-OFF <span class="mono">semantic</span> cargo feature — absent from the shipped binary. The shape that lets semantic slot in later with zero schema churn; a dependency-free reference impl keeps the gated code from bit-rotting under CI.</p>
+          <div class="chips">
+            <span class="chip">feature off by default</span>
+            <span class="chip">no vector leg in v1</span>
+            <span class="chip">zero schema churn to enable</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ HEADLESS VALIDATION ============ -->
+    <div class="segment">
+      <div class="segment-head">
+        <span class="seg-marker"></span>
+        <h2>Headless validation <span class="seg-note">between V1 and V2 · what a test harness CAN prove</span></h2>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">VALIDATE</span>
+              <h3 class="ptitle">Real-binary battery + real-kill crash sim</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>A headless <span class="mono">brain_cli</span> battery runs 14/14 through a real binary against a built-in fixture (and smoke-runs over real source). A genuine two-process crash sim — actual <span class="mono">std::process::abort()</span>, then a fresh process recovers from the on-disk journal — passes. The app binary links: <span class="mono">koden.exe ~42 MB</span>, the whole brain shipped in.</p>
+          <div class="chips">
+            <span class="chip">brain_cli 14/14</span>
+            <span class="chip">real abort + recover</span>
+            <span class="chip">koden.exe ~42 MB</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ V2 ============ -->
+    <div class="segment">
+      <div class="segment-head">
+        <span class="seg-marker"></span>
+        <h2>V2 — advanced track <span class="seg-note">write-judgment · measured ranking · recency</span></h2>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">V2.1</span>
+              <h3 class="ptitle">Stale-ADR / memory curation</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>Detection signals (including supersession) feed a two-stage significance gate, which routes into archive-biased, human-gated proposals — reusing the P4 budget ledger. <span class="mono">delete</span> always down-maps to <span class="mono">Archive</span>: the Librarian never proposes silent deletion. Verification caught a real supersession-direction under-detection.</p>
+          <div class="chips">
+            <span class="chip">significance gate</span>
+            <span class="chip">archive-biased</span>
+            <span class="chip">shared budget ledger</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-done">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">V2.2</span>
+              <h3 class="ptitle">Ranking-quality calibration</h3>
+            </div>
+            <span class="pill done">DONE</span>
+          </div>
+          <p>Turned GUESSED BM25/RRF weights into MEASURED ones with a discriminating benchmark — confuser pairs (target only in path, distractor only in body) plus MRR / precision@1 and a leak-gated calibration sweep. Result: strict identity-dominant weighting is optimal; the "provisional" comment became "measured" — after the panel caught two false "measured" claims and they were corrected.</p>
+          <div class="chips">
+            <span class="chip">confuser corpus (16 files)</span>
+            <span class="chip">MRR · precision@1</span>
+            <span class="chip">leak-gated sweep</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node is-prog">
+        <span class="dot"></span>
+        <div class="card">
+          <span class="here-flag"><span class="ring"></span>You are here</span>
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">DP-12</span>
+              <h3 class="ptitle">Temporal re-rank</h3>
+            </div>
+            <span class="pill prog">IN PROGRESS</span>
+          </div>
+          <p>A deterministic, snapshot-stable recency + frequency boost on search. Recency MUST read a stored timestamp, never wall-clock <span class="mono">now()</span> — so the gist byte-identity gate from P3 still holds. Being built and verified right now, judged against the V2.2 discriminating benchmark.</p>
+          <div class="chips">
+            <span class="chip">stored timestamps only</span>
+            <span class="chip">snapshot-stable</span>
+            <span class="chip">benchmark-gated</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ END GOAL ============ -->
+    <div class="segment">
+      <div class="segment-head">
+        <span class="seg-marker"></span>
+        <h2>End goal <span class="seg-note">remaining — not yet done</span></h2>
+      </div>
+
+      <div class="node is-planned">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">GUI</span>
+              <h3 class="ptitle">Live GUI evidence</h3>
+            </div>
+            <span class="pill plan">PLANNED</span>
+          </div>
+          <p>The pieces that need the running app: an agent launch actually picking up the injected gist, the recovery-card UI (Resume / Dismiss), and one real-key reflect smoke test. Backend and gates are built and tested; these are live-session items, not harness items.</p>
+        </div>
+      </div>
+
+      <div class="node is-planned">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">SEMANTIC</span>
+              <h3 class="ptitle">HNSW + real embedder</h3>
+            </div>
+            <span class="pill plan">PLANNED</span>
+          </div>
+          <p>Enable the semantic stack behind the existing <span class="mono">semantic</span> feature — a fastembed-rs ONNX embedder + persisted HNSW ANN — landing behind the SAME traits, deps pinned only at enablement. Closes the honest lexical gap P5 left open.</p>
+        </div>
+      </div>
+
+      <div class="node is-planned">
+        <span class="dot"></span>
+        <div class="card">
+          <div class="card-top">
+            <div class="card-id-title">
+              <span class="pid">NEXT</span>
+              <h3 class="ptitle">Further reach</h3>
+            </div>
+            <span class="pill plan">PLANNED</span>
+          </div>
+          <p>Contradiction detection, a cross-project graph, learned / rerank ranking — and merging this workstream with the sibling <span class="mono">feat/koden-cli</span> (folding brain subcommands into its <span class="mono">cli/</span>).</p>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /timeline -->
+
+  <!-- ============ PROCESS NOTE ============ -->
+  <div class="callout">
+    <h3>How every phase shipped</h3>
+    <p>One cadence, repeated: <b>build → an adversarial verification fan-out by a separate set of agents → harden → commit on green.</b> Across the build those fan-outs (~30+ agent-reviews) caught REAL defects, not rubber-stamps — each fixed before its phase closed:</p>
+    <ul>
+      <li>a money-path under-charge (a 2xx with 0/0 usage charged $0);</li>
+      <li>two secret leaks to the cloud (note anchors + interpolated doctor detail);</li>
+      <li>a crash-resume torn-snapshot that split the gist cache key across two states;</li>
+      <li>a supersession-direction under-detection that yielded zero candidates on a correct corpus;</li>
+      <li>false "measured" benchmark claims (a wrong file count and a <span class="mono">&gt;=</span> that should have been a strict <span class="mono">&gt;</span>).</li>
+    </ul>
+    <div class="gate-line">
+      <b>Current gates:</b> clippy <span class="mono">-D warnings</span> clean · ~297 lib tests + 34 integration + benchmark · schema v9 · <span class="mono">main</span> untouched.
+    </div>
+  </div>
+
+  <footer>
+    <span>Koden Brain · build log timeline</span>
+    <span>self-contained · offline · no external requests</span>
+  </footer>
+
+</div><!-- /wrap -->
+</body>
+</html>
