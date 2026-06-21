@@ -41,6 +41,9 @@ pub enum BrainEvent {
     /// Webview/command-initiated reindex (e.g. a wizard "rescan", or `None` =
     /// reconcile every project).
     Rescan { project: Option<ProjectId> },
+    /// Unregister a project + prune all its indexed state (writer-side). Does not
+    /// touch user files.
+    RemoveProject { project: ProjectId },
     /// Run the memory doctor and queue proposals. `now_date` (ISO YYYY-MM-DD)
     /// enables the staleness check; `None` runs structural checks only.
     Doctor {

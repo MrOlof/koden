@@ -160,6 +160,15 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 drop(watcher.take()); // drop the old watcher first → no double-watch window
                 watcher = arm_watcher(&app, &tx); // pick up any new project roots
             }
+            BrainEvent::RemoveProject { project } => {
+                if let Err(e) = index.remove_project(&project) {
+                    log::warn!("brain: remove_project '{project}' prune failed ({e})");
+                } else {
+                    log::info!("brain: removed project '{project}' (unregistered + pruned)");
+                }
+                drop(watcher.take());
+                watcher = arm_watcher(&app, &tx); // stop watching the removed root
+            }
             BrainEvent::Tick => index.checkpoint(),
             BrainEvent::Doctor { project, now_date } => {
                 let now_ms = now_epoch_ms();

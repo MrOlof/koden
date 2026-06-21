@@ -532,6 +532,26 @@ impl SqliteIndex {
         Ok(true)
     }
 
+    /// Drop ALL indexed state for a project (used when a project is removed from the
+    /// registry). Prunes every project-scoped table; the FTS rows are deleted via the
+    /// files' `fts_rowid` first. Does NOT touch any user files — brain-local only.
+    pub fn remove_project(&self, project_id: &str) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM code_fts WHERE rowid IN (SELECT fts_rowid FROM files WHERE project_id=?1)",
+            [project_id],
+        )?;
+        tx.execute("DELETE FROM files WHERE project_id=?1", [project_id])?;
+        tx.execute("DELETE FROM notes WHERE project_id=?1", [project_id])?;
+        tx.execute("DELETE FROM proposals WHERE project_id=?1", [project_id])?;
+        tx.execute("DELETE FROM reject_signatures WHERE project_id=?1", [project_id])?;
+        tx.execute("DELETE FROM code_nodes WHERE project_id=?1", [project_id])?;
+        tx.execute("DELETE FROM code_imports WHERE project_id=?1", [project_id])?;
+        tx.execute("DELETE FROM code_edges WHERE project_id=?1", [project_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Rebuild the resolved import edges for a project from `code_imports` + the
     /// current file set. A pure function of (imports, files) — no parsing — so an
     /// incrementally-relinked graph and a full rebuild converge to the same edges.

@@ -41,6 +41,11 @@ export function brainAddProject(path: string): Promise<Project> {
   return invoke<Project>("brain_add_project", { path });
 }
 
+/** Unregister a project + prune its index. Does NOT delete user files. */
+export function brainRemoveProject(project: string): Promise<void> {
+  return invoke<void>("brain_remove_project", { project });
+}
+
 /** Trigger a full reconcile (all projects, or one). Non-blocking on the worker. */
 export function brainRescan(project: string | null = null): Promise<void> {
   return invoke<void>("brain_rescan", { project });

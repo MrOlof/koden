@@ -49,6 +49,15 @@ pub fn brain_add_project(state: State<BrainState>, path: String) -> Result<Proje
     Ok(proj)
 }
 
+/// Unregister a project and prune all its indexed state. Does NOT delete user files
+/// (brain-local only). Removed from the registry immediately; the index prune + a
+/// watcher re-arm happen on the worker.
+#[tauri::command]
+pub fn brain_remove_project(state: State<BrainState>, project: String) -> Result<(), String> {
+    state.registry.remove(&project);
+    enqueue(&state, BrainEvent::RemoveProject { project })
+}
+
 /// Overall status + per-project indexed file counts.
 #[tauri::command]
 pub fn brain_index_status(state: State<BrainState>) -> BrainStatusReport {

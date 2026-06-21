@@ -14,6 +14,7 @@ import {
   brainNotes,
   brainProposals,
   brainReflect,
+  brainRemoveProject,
   brainRescan,
   brainResolveProposal,
   brainSearch,
@@ -200,6 +201,23 @@ export function BrainPane() {
     }
   };
 
+  const removeProject = async () => {
+    const targetId = project ?? (projects.length === 1 ? projects[0]?.id : null);
+    if (!targetId) return;
+    const p = projects.find((x) => x.id === targetId);
+    const ok = window.confirm(
+      `Remove "${p?.name ?? targetId}" from the brain? This only unindexes it — your files are not touched.`,
+    );
+    if (!ok) return;
+    try {
+      await brainRemoveProject(targetId);
+      setProject(null);
+      setProjects(await brainListProjects());
+    } catch (e) {
+      console.error("brain_remove_project failed:", e);
+    }
+  };
+
   // Worker events are async; poll a few times so the result reliably shows even
   // if the worker is slower than a single fixed delay.
   const pollMemory = useCallback(() => {
@@ -304,6 +322,16 @@ export function BrainPane() {
         >
           + Add
         </button>
+        {project || projects.length === 1 ? (
+          <button
+            type="button"
+            onClick={() => void removeProject()}
+            className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-red-500"
+            title="Remove the selected project from the brain (does not delete files)"
+          >
+            Remove
+          </button>
+        ) : null}
       </div>
       {showAdd ? (
         <div className="flex shrink-0 items-center gap-1.5 px-2 pt-1.5">

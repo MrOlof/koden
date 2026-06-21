@@ -203,6 +203,7 @@ pub fn run() {
             brain::commands::brain_index_status,
             brain::commands::brain_list_projects,
             brain::commands::brain_add_project,
+            brain::commands::brain_remove_project,
             brain::commands::brain_get_symbol,
             brain::commands::brain_code_impact,
             brain::commands::brain_graph,

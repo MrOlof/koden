@@ -50,6 +50,16 @@ impl KodenBrainRegistry {
         Some(p)
     }
 
+    /// Remove a project by id. Returns true if it was registered.
+    pub fn remove(&self, id: &str) -> bool {
+        let Ok(mut guard) = self.projects.write() else {
+            return false;
+        };
+        let before = guard.len();
+        guard.retain(|p| p.id != id);
+        guard.len() != before
+    }
+
     /// Longest-prefix match `cwd` → project (CONCEPT §5.2; used by P3 gist
     /// resolution). Picks the most specific (longest root) when projects nest.
     pub fn resolve(&self, cwd: &str) -> Option<Project> {
