@@ -115,7 +115,7 @@ export function BrainHeaderMenu({ onOpenBrain, onOpenBrainMap, onOpenSettings }:
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenBrain} className="gap-2">
           <HugeiconsIcon icon={Search01Icon} size={15} strokeWidth={1.75} />
-          Open Brain (search &amp; memory)
+          Open Brain
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenSettings} className="gap-2">
           <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />
