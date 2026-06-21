@@ -512,8 +512,9 @@ export function BrainMapPane() {
   const focusProject = useCallback(
     (pid: string, pang: number) => {
       animateSpread(pid, SPREAD_TO);
-      // Centre the camera on the project's spread tree (out along its spine direction).
-      flyTo(Math.cos(pang) * 340, Math.sin(pang) * 340, 1.0, true);
+      // Zoom in along the project's spine, centred between K and the tree so the core
+      // stays visible but the branches are big enough to read.
+      flyTo(Math.cos(pang) * 250, Math.sin(pang) * 250, 1.7, true);
       setFocusPid(pid);
       setSelected(null);
     },
