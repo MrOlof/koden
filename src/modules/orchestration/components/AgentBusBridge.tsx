@@ -29,7 +29,8 @@ const TAB_STATUS: Record<string, "working" | "waiting" | "done"> = {
 // tolerant scan, so its Task payload shape no longer lives here.
 type BusEvent = {
   cmd?: string;
-  id?: number;
+  // pty id; the user-turn hook emits it as a quoted string, others as a number.
+  id?: number | string;
   state?: string;
   parent?: number;
   // user-turn: the raw Claude Code UserPromptSubmit hook payload (carries `prompt`).

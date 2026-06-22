@@ -33,7 +33,11 @@ function makeFakeTerm(lines: string[], cursorY = lines.length) {
         return { dispose: () => handlers.delete(code) };
       },
     },
-    registerMarker: vi.fn(() => ({ line: 0, isDisposed: false, dispose: vi.fn() })),
+    registerMarker: vi.fn(() => ({
+      line: 0,
+      isDisposed: false,
+      dispose: vi.fn(),
+    })),
     onWriteParsed: vi.fn(() => ({ dispose: vi.fn() })),
     onScroll: vi.fn(() => ({ dispose: vi.fn() })),
     onRender: vi.fn(() => ({ dispose: vi.fn() })),
@@ -115,7 +119,7 @@ describe("extractTurnPrompt", () => {
   });
 
   it("skips the empty-input placeholder", () => {
-    expect(extractTurnPrompt("> Try \"edit the file\"")).toBe("");
+    expect(extractTurnPrompt('> Try "edit the file"')).toBe("");
     expect(extractTurnPrompt(">")).toBe("");
     expect(extractTurnPrompt("> …")).toBe("");
   });
@@ -149,7 +153,9 @@ describe("CommandMarks.scanTurns", () => {
   });
 
   it("dedupes consecutive duplicate prompts from a repainted box", () => {
-    const cm = new CommandMarks(makeFakeTerm(["> deploy", "> deploy", "> done"]));
+    const cm = new CommandMarks(
+      makeFakeTerm(["> deploy", "> deploy", "> done"]),
+    );
     expect(cm.scanTurns().map((t) => t.text)).toEqual(["deploy", "done"]);
   });
 
@@ -180,5 +186,34 @@ describe("CommandMarks.scanTurns", () => {
     for (let i = 1; i < marks.length; i++) {
       expect(marks[i].line).toBeGreaterThanOrEqual(marks[i - 1].line);
     }
+  });
+});
+
+describe("CommandMarks.addTurn", () => {
+  it("mints a text-bearing turn mark surfaced by getMarks()", () => {
+    const cm = new CommandMarks(makeFakeTerm(["plain output"]));
+    cm.addTurn("explain the build error");
+    const marks = cm.getMarks();
+    expect(marks).toHaveLength(1);
+    expect(marks[0].status).toBe("turn");
+    expect(marks[0].text).toBe("explain the build error");
+  });
+
+  it("suppresses the lossy scrollback scrape once a real turn mark exists", () => {
+    // Buffer has a scrapeable `> ship it` prompt. Before any real turn, the
+    // scrape surfaces it; after a bus-delivered turn arrives, the real text wins
+    // and the scrape must NOT also list anything (no double-listing).
+    const cm = new CommandMarks(makeFakeTerm(["> ship it"]));
+    expect(cm.getMarks().some((m) => m.text === "ship it")).toBe(true);
+    cm.addTurn("the real prompt");
+    expect(cm.getMarks().map((m) => m.text)).toEqual(["the real prompt"]);
+  });
+
+  it("ignores empty/whitespace and caps very long prompts", () => {
+    const cm = new CommandMarks(makeFakeTerm(["x"]));
+    cm.addTurn("   ");
+    expect(cm.getMarks()).toHaveLength(0);
+    cm.addTurn("a".repeat(900));
+    expect(cm.getMarks()[0].text).toHaveLength(400);
   });
 });
