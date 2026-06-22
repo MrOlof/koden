@@ -329,6 +329,34 @@ function buildTree(
     t.children = merged;
   };
   compress(root);
+  // Cap the fan-out per node: a folder with dozens of files would otherwise explode
+  // into a solid wedge of overlapping lines/dots. Keep the largest children + fold the
+  // rest into one "+N more" leaf so every fan stays legible (hover shows the count).
+  const MAX_FAN = 14;
+  const capChildren = (t: Tree) => {
+    for (const c of t.children.values()) capChildren(c);
+    if (t.children.size <= MAX_FAN) return;
+    const entries = [...t.children.values()].sort(
+      (a, b) =>
+        Number(b.kind === "folder") - Number(a.kind === "folder") ||
+        b.leaf - a.leaf,
+    );
+    const keep = entries.slice(0, MAX_FAN - 1);
+    const rest = entries.slice(MAX_FAN - 1);
+    const restLeaf = rest.reduce((s, c) => s + c.leaf, 0);
+    const merged = new Map<string, Tree>();
+    for (const c of keep) merged.set(c.id, c);
+    const aggId = `more:${t.id}`;
+    merged.set(aggId, {
+      id: aggId,
+      kind: "file",
+      label: `+${rest.length} more`,
+      children: new Map(),
+      leaf: Math.max(1, restLeaf),
+    });
+    t.children = merged;
+  };
+  capChildren(root);
   return root;
 }
 
