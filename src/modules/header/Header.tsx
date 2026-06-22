@@ -8,8 +8,8 @@ import type { SpaceMeta } from "@/modules/spaces";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import {
+  Brain02Icon,
   CommandIcon,
-  RoboticIcon,
   Settings01Icon,
   SidebarLeftIcon,
 } from "@hugeicons/core-free-icons";
@@ -108,7 +108,7 @@ export function Header({
 }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
-  const openPanel = useChatStore((s) => s.openPanel);
+  const openMini = useChatStore((s) => s.openMini);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -218,12 +218,12 @@ export function Header({
       <Button
         size="sm"
         variant="outline"
-        onClick={openPanel}
-        title="Koden AI — chat & ask anything"
+        onClick={openMini}
+        title="Koden Brain — chat about your code & projects"
         className="h-7 shrink-0 gap-1.5 rounded-md px-2 text-[12px]"
       >
-        <HugeiconsIcon icon={RoboticIcon} size={14} strokeWidth={1.75} />
-        {compact ? null : "Koden AI"}
+        <HugeiconsIcon icon={Brain02Icon} size={14} strokeWidth={1.75} />
+        {compact ? null : "Koden Brain"}
       </Button>
 
       <SearchInline ref={searchRef} target={searchTarget} compact={compact} />
