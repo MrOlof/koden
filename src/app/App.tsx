@@ -392,6 +392,17 @@ export default function App() {
     }
   }, [home]);
 
+  // Install the current Koden Claude Code hooks (+ create ~/.koden) on startup so
+  // EVERY claude session gets status + per-turn capture — including one you start
+  // manually (`cm`/`claude`), not just Koden-launched agents. The hooks are global
+  // in ~/.claude/settings.json; this also migrates pre-rename "terax" hooks. A
+  // session must start AFTER this runs to pick the hooks up (Claude reads settings
+  // at launch), so existing sessions need a relaunch.
+  useEffect(() => {
+    void invoke("agent_enable_claude_hooks").catch(() => {});
+    void ensureKodenDir();
+  }, [ensureKodenDir]);
+
   const activeSpaceId = useSpaces((s) => s.activeId);
   const spacesHydrated = useSpaces((s) => s.hydrated);
   // Reactive spaces list so the tab "Move to space" submenu re-renders as

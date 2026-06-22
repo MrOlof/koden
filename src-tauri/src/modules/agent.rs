@@ -8,7 +8,16 @@ const HOOK_EVENTS: [(&str, &str); 3] = [
 
 // Includes the pre-v2.1.139 /dev/tty variant so re-running migrates it, plus
 // the bus marker so subagent hooks are recognized for idempotent re-install.
-const OWNED_MARKERS: [&str; 3] = ["notify;Koden;", "koden;notify", "director-bus.jsonl"];
+// The last two are legacy pre-rename "terax" hooks (gated on TERAX_TERMINAL, so
+// inert under Koden) — recognized so a re-install MIGRATES/removes them instead
+// of leaving dead cruft alongside the live Koden hooks.
+const OWNED_MARKERS: [&str; 5] = [
+    "notify;Koden;",
+    "koden;notify",
+    "director-bus.jsonl",
+    "notify;Terax",
+    ".terax/agent-bus.jsonl",
+];
 
 // Gated on KODEN_TERMINAL; no-op outside Koden. Returns the sequence via
 // `terminalSequence` because hooks lost /dev/tty access in v2.1.139.
@@ -60,7 +69,7 @@ fn bus_cat_cmd() -> String {
 fn user_turn_hook_cmd() -> String {
     let bus = bus_path_str();
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && {{ p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; printf '{{"terminalSequence":"\\u001b]777;notify;Koden;working\\u0007"}}'; }} || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && {{ mkdir -p "$(dirname "{bus}")" 2>/dev/null; p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; printf '{{"terminalSequence":"\\u001b]777;notify;Koden;working\\u0007"}}'; }} || true"#
     )
 }
 
@@ -271,6 +280,28 @@ mod tests {
         assert_eq!(hook_count(&out, "Notification"), 1);
         assert!(command(&out, "Notification", 0).contains("terminalSequence"));
         assert!(!command(&out, "Notification", 0).contains("/dev/tty"));
+    }
+
+    #[test]
+    fn migrates_legacy_terax_hooks() {
+        // A pre-rename build installed TERAX-gated hooks; a Koden re-install must
+        // remove them (they're inert under Koden) rather than leave dead cruft.
+        let legacy = json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    { "hooks": [ { "type": "command",
+                        "command": "[ -n \"$TERAX_TERMINAL\" ] && printf '{\"terminalSequence\":\"\\u001b]777;notify;Terax;working\\u0007\"}' || true" } ] },
+                    { "hooks": [ { "type": "command",
+                        "command": "[ -n \"$TERAX_SESSION\" ] && printf '{}' >> \"/x/.terax/agent-bus.jsonl\" || true" } ] }
+                ]
+            }
+        });
+        let out = merge_hooks(legacy);
+        assert_eq!(hook_count(&out, "UserPromptSubmit"), 1);
+        let cmd = command(&out, "UserPromptSubmit", 0);
+        assert!(cmd.contains("notify;Koden;working"));
+        assert!(cmd.contains("user-turn"));
+        assert!(!cmd.contains("Terax"));
     }
 
     #[test]
