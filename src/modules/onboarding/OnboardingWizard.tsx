@@ -9,12 +9,9 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   getProvider,
-  LMSTUDIO_DEFAULT_BASE_URL,
-  MLX_DEFAULT_BASE_URL,
   MODEL_PRICING,
   MODELS,
   type ModelId,
-  OLLAMA_DEFAULT_BASE_URL,
   PROVIDERS,
   type ProviderId,
   providerSupportsKey,
@@ -26,6 +23,14 @@ import {
   brainSetWorkspace,
   brainWorkspaceStatus,
 } from "@/modules/brain/lib/bindings";
+import {
+  cheapestLibModel,
+  isCuratedModelId,
+  isLocalLibProvider,
+  LOCAL_LIB_PROVIDERS,
+  libLocalBaseUrl,
+  libRates,
+} from "@/modules/brain/lib/librarian";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { emitKeysChanged, setDefaultModel } from "@/modules/settings/store";
 import {
@@ -52,8 +57,6 @@ const DONE_KEY = "koden.onboarding.v1.done";
 // placeholder whose model id the user must supply, so offering them here would let
 // someone finish onboarding with a non-working AI. Those + local servers route
 // to the full Settings > Models panel instead.
-const isCuratedModelId = (id: string): boolean => !id.endsWith("-custom");
-
 const CLOUD_PROVIDERS: readonly ProviderId[] = PROVIDERS.filter(
   (p) =>
     providerSupportsKey(p.id) &&
@@ -63,57 +66,6 @@ const CLOUD_PROVIDERS: readonly ProviderId[] = PROVIDERS.filter(
 function defaultModelForProvider(id: ProviderId): ModelId | null {
   return (
     MODELS.find((m) => m.provider === id && isCuratedModelId(m.id))?.id ?? null
-  );
-}
-
-// ── Librarian model selection ──────────────────────────────────────────────
-// The Librarian does light background work, so it defaults to the cheapest model
-// of the connected provider. Rates ($/million tokens) come from the same pricing
-// table the main AI uses, so the budget meter stays accurate; local models are free.
-
-const LOCAL_LIB_PROVIDERS: readonly ProviderId[] = [
-  "ollama",
-  "lmstudio",
-  "mlx",
-];
-
-function isLocalLibProvider(p: ProviderId): boolean {
-  return (LOCAL_LIB_PROVIDERS as readonly string[]).includes(p);
-}
-
-function libLocalBaseUrl(p: ProviderId): string {
-  if (p === "lmstudio") return LMSTUDIO_DEFAULT_BASE_URL;
-  if (p === "mlx") return MLX_DEFAULT_BASE_URL;
-  return OLLAMA_DEFAULT_BASE_URL;
-}
-
-function libRates(
-  provider: ProviderId,
-  model: string,
-): { inRate: number; outRate: number } {
-  if (isLocalLibProvider(provider)) return { inRate: 0, outRate: 0 };
-  const p = MODEL_PRICING[model];
-  // Unknown price → conservative tier so the budget can never under-count.
-  return p
-    ? { inRate: p.input, outRate: p.output }
-    : { inRate: 5, outRate: 25 };
-}
-
-/** Cheapest curated model for a provider (by input+output $/Mtok), or its first
- *  curated model if none are priced. "" when the provider has no curated model. */
-function cheapestLibModel(provider: ProviderId): string {
-  const priced = MODELS.filter(
-    (m) => m.provider === provider && isCuratedModelId(m.id),
-  )
-    .flatMap((m) => {
-      const p = MODEL_PRICING[m.id];
-      return p ? [{ id: m.id, sum: p.input + p.output }] : [];
-    })
-    .sort((a, b) => a.sum - b.sum);
-  if (priced[0]) return priced[0].id;
-  return (
-    MODELS.find((m) => m.provider === provider && isCuratedModelId(m.id))?.id ??
-    ""
   );
 }
 

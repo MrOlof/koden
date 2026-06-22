@@ -221,6 +221,7 @@ pub fn run() {
             brain::commands::brain_set_budget,
             brain::commands::brain_set_librarian,
             brain::commands::brain_budget_status,
+            brain::commands::brain_librarian_status,
             brain::commands::brain_recovered_panes,
             brain::commands::brain_curate,
             fs::tree::list_subdirs,

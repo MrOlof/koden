@@ -11,10 +11,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { AGENT_ICONS } from "@/modules/ai/components/AgentSwitcher";
 import {
-  BUILTIN_AGENTS,
+  getProvider,
+  MODEL_PRICING,
+  PROVIDERS,
+  type ProviderId,
+  providerSupportsKey,
+} from "@/modules/ai/config";
+import {
   type Agent,
   type AgentIconId,
+  BUILTIN_AGENTS,
 } from "@/modules/ai/lib/agents";
+import { getAllKeys } from "@/modules/ai/lib/keyring";
 import {
   isValidHandle,
   normalizeHandle,
@@ -25,6 +33,20 @@ import {
   newSnippetId,
   useSnippetsStore,
 } from "@/modules/ai/store/snippetsStore";
+import {
+  brainBudgetStatus,
+  brainLibrarianStatus,
+  brainSetBudget,
+  brainSetLibrarian,
+} from "@/modules/brain/lib/bindings";
+import {
+  cheapestLibModel,
+  isLocalLibProvider,
+  LOCAL_LIB_PROVIDERS,
+  libCloudModels,
+  libLocalBaseUrl,
+  libRates,
+} from "@/modules/brain/lib/librarian";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setCustomInstructions } from "@/modules/settings/store";
 import {
@@ -72,11 +94,13 @@ export function AgentsSection() {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
-        title="Agents"
-        description="Personas and snippets the AI uses. Switch agents from the input bar."
+        title="Koden AI"
+        description="The model the Brain Librarian uses, plus the agent personas and snippets. Your main AI provider keys live in the Models tab."
       />
 
       <CustomInstructionsBlock value={customInstructions} />
+
+      <BrainLibrarianBlock />
 
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
@@ -555,6 +579,213 @@ function CustomInstructionsBlock({ value }: { value: string }) {
         className="min-h-[100px] resize-y bg-card/60 font-sans text-[12px] leading-relaxed border border-border"
       />
     </div>
+  );
+}
+
+// The Brain Librarian's LLM selection + spending cap, changeable here as well as in
+// onboarding. Reuses the shared librarian helpers so the picker matches the wizard.
+function BrainLibrarianBlock() {
+  const [keyed, setKeyed] = useState<ProviderId[]>([]);
+  const [provider, setProvider] = useState<ProviderId>("anthropic");
+  const [model, setModel] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [cap, setCap] = useState("");
+  const [spent, setSpent] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const [lib, budget, keys] = await Promise.all([
+          brainLibrarianStatus(),
+          brainBudgetStatus(),
+          getAllKeys(),
+        ]);
+        if (!alive) return;
+        setProvider(lib.provider as ProviderId);
+        setModel(lib.model);
+        setBaseUrl(lib.base_url);
+        setCap(budget[0] > 0 ? String(budget[0]) : "");
+        setSpent(budget[1]);
+        setKeyed(
+          PROVIDERS.filter((p) => providerSupportsKey(p.id) && keys[p.id]).map(
+            (p) => p.id,
+          ),
+        );
+      } catch {}
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const providers: ProviderId[] = [
+    ...keyed.filter((p) => p !== "openai-compatible"),
+    ...LOCAL_LIB_PROVIDERS,
+  ];
+  if (provider && !providers.includes(provider)) providers.unshift(provider);
+
+  const local = isLocalLibProvider(provider);
+  const rates = libRates(provider, model);
+  const cloudModels = local ? [] : libCloudModels(provider);
+
+  const pickProvider = (p: ProviderId) => {
+    setProvider(p);
+    setSaved(false);
+    if (isLocalLibProvider(p)) {
+      setBaseUrl(libLocalBaseUrl(p));
+      setModel("");
+    } else {
+      setModel(cheapestLibModel(p));
+      setBaseUrl("");
+    }
+  };
+
+  const save = async () => {
+    if (!model.trim()) {
+      setErr("Choose a model for the Librarian.");
+      return;
+    }
+    const budget = Number.parseFloat(cap);
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = libRates(provider, model.trim());
+      await brainSetLibrarian(
+        provider,
+        model.trim(),
+        local ? baseUrl.trim() : "",
+        r.inRate,
+        r.outRate,
+      );
+      await brainSetBudget(budget > 0 ? budget : 0);
+      setSaved(true);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectCls =
+    "h-8 w-full rounded-md border bg-background px-2 text-[12px] outline-none [&>option]:bg-popover [&>option]:text-popover-foreground";
+
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="flex flex-col">
+        <Label>Brain Librarian</Label>
+        <span className="text-[10.5px] text-muted-foreground">
+          Optional helper that curates your project memory — it only proposes,
+          you approve. Runs on a small, cheap model; set a spending cap to
+          enable it (clear to $0 to turn it off). Spent so far: $
+          {spent.toFixed(4)}.
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="flex flex-col gap-1">
+          <Label>Provider</Label>
+          <select
+            value={provider}
+            onChange={(e) => pickProvider(e.target.value as ProviderId)}
+            className={selectCls}
+          >
+            {providers.map((id) => (
+              <option key={id} value={id}>
+                {getProvider(id).label}
+                {isLocalLibProvider(id) ? " (local, free)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {local ? (
+          <div className="flex flex-col gap-1">
+            <Label>Model name</Label>
+            <Input
+              value={model}
+              onChange={(e) => {
+                setModel(e.target.value);
+                setSaved(false);
+              }}
+              placeholder="e.g. llama3.1"
+              className="h-8 text-[12px]"
+            />
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <Label>Model</Label>
+            <select
+              value={model}
+              onChange={(e) => {
+                setModel(e.target.value);
+                setSaved(false);
+              }}
+              className={selectCls}
+            >
+              {cloudModels.map((m) => {
+                const p = MODEL_PRICING[m.id];
+                return (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                    {p ? ` ($${p.input}/$${p.output})` : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+        )}
+      </div>
+
+      {local ? (
+        <div className="flex flex-col gap-1">
+          <Label>Server URL</Label>
+          <Input
+            value={baseUrl}
+            onChange={(e) => {
+              setBaseUrl(e.target.value);
+              setSaved(false);
+            }}
+            placeholder="http://localhost:11434/v1"
+            className="h-8 text-[12px]"
+          />
+        </div>
+      ) : null}
+
+      <div className="flex items-end gap-2">
+        <div className="flex flex-1 flex-col gap-1">
+          <Label>Spending cap (USD)</Label>
+          <Input
+            inputMode="decimal"
+            value={cap}
+            onChange={(e) => {
+              setCap(e.target.value);
+              setSaved(false);
+            }}
+            placeholder="0.00 (blank / 0 = off)"
+            className="h-8 text-[12px]"
+          />
+        </div>
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() => void save()}
+          className="h-8"
+        >
+          {busy ? "Saving…" : saved ? "Saved" : "Save"}
+        </Button>
+      </div>
+
+      <span className="text-[10px] text-muted-foreground">
+        {local
+          ? "Local models are free; any non-zero cap just switches the Librarian on."
+          : `≈ $${rates.inRate} / $${rates.outRate} per 1M tokens. A few dollars is plenty.`}
+      </span>
+      {err ? <span className="text-[10px] text-destructive">{err}</span> : null}
+    </section>
   );
 }
 

@@ -177,6 +177,20 @@ export function brainBudgetStatus(): Promise<[number, number]> {
   return invoke<[number, number]>("brain_budget_status", {});
 }
 
+export type LibrarianStatus = {
+  provider: string;
+  model: string;
+  base_url: string;
+  in_rate_mtok: number;
+  out_rate_mtok: number;
+};
+
+/** The current Librarian LLM selection (provider/model/base URL + $/Mtok rates).
+ *  Defaults to Anthropic Haiku when unset. */
+export function brainLibrarianStatus(): Promise<LibrarianStatus> {
+  return invoke<LibrarianStatus>("brain_librarian_status", {});
+}
+
 /** A pane recoverable from the previous session (P4 crash-resume). Field names
  *  mirror the Rust `RecoveredPane` serde struct (snake_case). */
 export type RecoveredPane = {

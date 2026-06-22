@@ -1103,6 +1103,32 @@ pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {
     )
 }
 
+/// The Librarian LLM selection `(provider, model, base_url, in_rate_mtok, out_rate_mtok)`
+/// via a read-only connection (the command-thread status read). Fail-soft to the
+/// Anthropic Haiku default so a pre-table DB or read race never errors the UI.
+pub fn librarian_config_readonly(
+    db_path: &Path,
+) -> rusqlite::Result<(String, String, String, f64, f64)> {
+    let conn = open_readonly(db_path)?;
+    Ok(conn
+        .query_row(
+            "SELECT provider, model, base_url, in_rate_mtok, out_rate_mtok FROM brain_librarian WHERE id=1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, f64>(4)?,
+                ))
+            },
+        )
+        .unwrap_or_else(|_| {
+            ("anthropic".to_string(), "claude-haiku-4-5".to_string(), String::new(), 1.0, 5.0)
+        }))
+}
+
 /// The semantic `embedderId` header `(embedder_id, dims)` via a read-only
 /// connection. Empty `("", 0)` in v1 (no embedder); set at enablement. P5.
 ///

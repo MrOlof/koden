@@ -353,6 +353,37 @@ pub fn brain_budget_status(state: State<BrainState>) -> (f64, f64) {
     store::budget_state_readonly(&db).unwrap_or((0.0, 0.0))
 }
 
+/// The current Librarian LLM selection (read-only). Defaults to Anthropic Haiku
+/// when unset. Lets Settings show + edit which model the reflect/curate path uses.
+#[derive(serde::Serialize)]
+pub struct LibrarianStatus {
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub in_rate_mtok: f64,
+    pub out_rate_mtok: f64,
+}
+
+#[tauri::command]
+pub fn brain_librarian_status(state: State<BrainState>) -> LibrarianStatus {
+    let def = || LibrarianStatus {
+        provider: "anthropic".to_string(),
+        model: "claude-haiku-4-5".to_string(),
+        base_url: String::new(),
+        in_rate_mtok: 1.0,
+        out_rate_mtok: 5.0,
+    };
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return def();
+    };
+    match store::librarian_config_readonly(&db) {
+        Ok((provider, model, base_url, in_rate_mtok, out_rate_mtok)) => {
+            LibrarianStatus { provider, model, base_url, in_rate_mtok, out_rate_mtok }
+        }
+        Err(_) => def(),
+    }
+}
+
 /// Panes recoverable from the previous session (P4 crash-resume), computed at boot
 /// from the per-pane journals. Drives the UI's "resume where you left off" cards.
 #[tauri::command]
