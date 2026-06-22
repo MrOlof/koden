@@ -891,6 +891,32 @@ export default function App() {
 
   // Director "run in terminal": open an agent terminal tab and link the
   // orchestration record to it so the dock/topology can activate it.
+  // Prepend the cache-stable Koden Brain gist (project context) to an agent's
+  // system prompt. Gist goes FIRST so the agent's prompt cache stays warm; a blank
+  // intent gives the byte-stable cold-start synthesis. Fail-open: any miss (no
+  // project match, index not ready) returns the base prompt unchanged.
+  const withGist = useCallback(
+    async (
+      cwd: string | null | undefined,
+      basePrompt: string,
+      intent: string,
+    ): Promise<string> => {
+      try {
+        const projectId = cwd ? await resolveProjectForCwd(cwd) : null;
+        if (!projectId) return basePrompt;
+        const gist = await brainBuildGist(projectId, intent, 800);
+        if (gist?.bytes) {
+          toast.success(`Brain: injected gist (${gist.sources.length} files)`);
+          return `${gist.bytes}\n\n${basePrompt}`;
+        }
+      } catch (e) {
+        console.error("brain gist injection failed:", e);
+      }
+      return basePrompt;
+    },
+    [],
+  );
+
   const handleSpawnTerminalAgent = useCallback(
     (req: SpawnTerminalRequest) => {
       // Usage-guard soft gate: near the 5-hour wall, don't start new agents
@@ -924,26 +950,8 @@ export default function App() {
         if (dir && busPath) {
           try {
             // P3: prepend the cache-stable Koden Brain gist as the system-prompt
-            // PREFIX (it must be the first bytes so the agent's prompt cache stays
-            // stable). One writer into the existing agent-<id>.txt channel so the
-            // gist and worker prompt never clobber each other. Fail-open.
-            let combined = workerPrompt;
-            try {
-              const projectId = spawnCwd
-                ? await resolveProjectForCwd(spawnCwd)
-                : null;
-              if (projectId) {
-                const gist = await brainBuildGist(projectId, task, 800);
-                if (gist && gist.bytes) {
-                  combined = `${gist.bytes}\n\n${workerPrompt}`;
-                  toast.success(
-                    `Brain: injected gist (${gist.sources.length} files)`,
-                  );
-                }
-              }
-            } catch (e) {
-              console.error("brain gist injection failed:", e);
-            }
+            // PREFIX so the agent starts knowing the project (gist first = warm cache).
+            const combined = await withGist(spawnCwd, workerPrompt, task);
             const promptPath = `${dir}/agent-${req.agentId}.txt`;
             await native.writeFile(promptPath, combined);
             promptArg = `"$(Get-Content -Raw ${quoteShellArg(promptPath)})"`;
@@ -966,6 +974,7 @@ export default function App() {
       setOrchestrationStatus,
       busPath,
       ensureKodenDir,
+      withGist,
     ],
   );
 
@@ -1418,7 +1427,14 @@ export default function App() {
           await native.writeFile(busPath, "");
           const promptPath = `${dir}/director-prompt.txt`;
           const ps1Path = `${dir}/koden.ps1`;
-          await native.writeFile(promptPath, prompt);
+          // Gist-prefix the Director's system prompt too (blank intent = byte-stable),
+          // so the orchestrator starts with project context instead of running blind.
+          const directorPrompt = await withGist(
+            inheritedCwdForNewTab(),
+            prompt,
+            "",
+          );
+          await native.writeFile(promptPath, directorPrompt);
           // A template defines the team as real session subagents via --agents.
           let agentsPath: string | null = null;
           if (template) {
@@ -1443,7 +1459,7 @@ export default function App() {
       await whenSessionReady(leafId);
       submitToLeaf(leafId, command);
     },
-    [busPath, ensureKodenDir],
+    [busPath, ensureKodenDir, withGist, inheritedCwdForNewTab],
   );
 
   // Right-click Director → start (or open) its live command terminal. An
