@@ -19,6 +19,7 @@ pub mod schema;
 
 use tauri::AppHandle;
 
+use crate::modules::brain::freshness::hash;
 use crate::modules::brain::memory::doctor;
 use crate::modules::brain::memory::proposal::reject_signature;
 use crate::modules::brain::store::{self, SqliteIndex};
@@ -43,6 +44,7 @@ const EST_CHARS_PER_TOKEN: usize = 3;
 #[serde(rename_all = "snake_case")]
 pub enum ReflectReason {
     Ok,
+    Unchanged,          // digest byte-identical to the last pass → delta gate skipped the call ($0)
     Disabled,           // ceiling == 0.0 (default off)
     NoKey,              // keyring koden-ai empty
     OverBudget,         // pre-flight reserve would exceed ceiling
@@ -188,20 +190,12 @@ pub fn reflect_with_client(
     now_date: Option<&str>,
     now_ms: i64,
 ) -> ReflectOutcome {
-    let notes = store::list_notes_with_conn(index.conn(), Some(project_id)).unwrap_or_default();
-    if notes.is_empty() {
-        return ReflectOutcome::noop(ReflectReason::EmptyCorpus);
-    }
-    let records = index.list_note_records(project_id).unwrap_or_default();
-    let indexed = index.indexed_path_set(project_id).unwrap_or_default();
-    let findings = doctor::check(&records, &indexed, now_date);
-
     let system = schema::system_prompt();
-    // Belt-and-suspenders secret gate (§7.1): redact the ENTIRE assembled message
-    // immediately before it can reach the cloud, so no single un-redacted field
-    // (anchors, a finding detail interpolating raw frontmatter, etc.) can leak —
-    // even though anchors/titles are already redacted at scan.
-    let user = crate::modules::brain::secrets::redact(&digest::build_user_message(&notes, &findings)).0;
+    // The corpus digest (notes + structural findings), already secret-redacted —
+    // see build_digest. EmptyCorpus when the project has no notes to reflect on.
+    let Some(user) = build_digest(index, project_id, now_date) else {
+        return ReflectOutcome::noop(ReflectReason::EmptyCorpus);
+    };
     let est = estimate_cost(cfg, &system, &user);
 
     // Pre-flight reserve — the durable, atomic ceiling gate (no call if it fails).
@@ -249,6 +243,48 @@ pub fn reflect_with_client(
     ReflectOutcome { proposals: enqueued, spent_usd: charge, reason: ReflectReason::Ok }
 }
 
+/// Build the exact redacted user digest reflect would send for a project (memory
+/// notes + structural doctor findings), or None for an empty corpus. The
+/// belt-and-suspenders secret gate (§7.1) redacts the ENTIRE assembled message
+/// here, immediately before it could reach the cloud. Shared by [reflect_with_client]
+/// and the autonomous delta gate so the gate's hash matches what's actually sent.
+pub(crate) fn build_digest(index: &SqliteIndex, project_id: &str, now_date: Option<&str>) -> Option<String> {
+    let notes = store::list_notes_with_conn(index.conn(), Some(project_id)).unwrap_or_default();
+    if notes.is_empty() {
+        return None;
+    }
+    let records = index.list_note_records(project_id).unwrap_or_default();
+    let indexed = index.indexed_path_set(project_id).unwrap_or_default();
+    let findings = doctor::check(&records, &indexed, now_date);
+    Some(crate::modules::brain::secrets::redact(&digest::build_user_message(&notes, &findings)).0)
+}
+
+/// Delta-gated reflect core (testable offline): build the digest, and SKIP the model
+/// call when it's byte-identical to `prev_digest_hash` (nothing material changed →
+/// Unchanged, $0). Otherwise run [reflect_with_client]. Returns the current digest
+/// hash (None only on an empty corpus) so the caller can remember it for next time.
+pub fn reflect_auto_with_client(
+    index: &SqliteIndex,
+    client: &dyn ReflectClient,
+    cfg: &ReflectConfig,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+    prev_digest_hash: Option<&str>,
+) -> (ReflectOutcome, Option<String>) {
+    let Some(user) = build_digest(index, project_id, now_date) else {
+        return (ReflectOutcome::noop(ReflectReason::EmptyCorpus), None);
+    };
+    let digest_hash = hash::hash_bytes(user.as_bytes());
+    if prev_digest_hash == Some(digest_hash.as_str()) {
+        return (ReflectOutcome::noop(ReflectReason::Unchanged), Some(digest_hash));
+    }
+    (
+        reflect_with_client(index, client, cfg, project_id, now_date, now_ms),
+        Some(digest_hash),
+    )
+}
+
 /// Reconcile a reservation, logging (not swallowing) a failure. A stranded
 /// 'reserved' row is still counted against the ceiling by the next
 /// [budget::check_and_reserve] and folded by the boot sweep, so a failed reconcile
@@ -260,9 +296,9 @@ pub(crate) fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_
     }
 }
 
-/// Manual-trigger reflect (the real path). Resolves the persisted Librarian model +
-/// ceiling + provider key, builds the right client (Anthropic or OpenAI-compatible),
-/// and runs [reflect_with_client]. Never on a timer.
+/// Manual-trigger reflect (the real path): always builds + sends if the budget/key
+/// gates pass. Thin wrapper over [reflect_auto] with no prior digest, so a manual
+/// click never short-circuits on "unchanged".
 pub fn reflect_once(
     app: &AppHandle,
     index: &SqliteIndex,
@@ -270,6 +306,22 @@ pub fn reflect_once(
     now_date: Option<&str>,
     now_ms: i64,
 ) -> ReflectOutcome {
+    reflect_auto(app, index, project_id, now_date, now_ms, None).0
+}
+
+/// Autonomous-trigger reflect: resolves the persisted Librarian model + ceiling +
+/// provider key, builds the right client, then runs the delta-gated core.
+/// `prev_digest_hash` is the hash of the last digest we reflected on; an unchanged
+/// digest skips the paid call ($0). Returns the current digest hash so the caller
+/// can remember it. Budget/key-gated exactly like [reflect_once].
+pub fn reflect_auto(
+    app: &AppHandle,
+    index: &SqliteIndex,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+    prev_digest_hash: Option<&str>,
+) -> (ReflectOutcome, Option<String>) {
     let cfg = ReflectConfig::from_librarian(&librarian::config(index.conn()));
     let ceiling_usd = budget::ceiling(index.conn());
     let account = librarian::keyring_account_for(&cfg.provider);
@@ -282,10 +334,10 @@ pub fn reflect_once(
     // key gate with no key; everything else needs the provider's keyring entry.
     let key_present = key.is_some() || librarian::is_keyless(&cfg.provider);
     if let Some(reason) = pre_flight(ceiling_usd, key_present) {
-        return ReflectOutcome::noop(reason);
+        return (ReflectOutcome::noop(reason), None);
     }
     let client = build_client(&cfg, key);
-    reflect_with_client(index, client.as_ref(), &cfg, project_id, now_date, now_ms)
+    reflect_auto_with_client(index, client.as_ref(), &cfg, project_id, now_date, now_ms, prev_digest_hash)
 }
 
 #[cfg(test)]

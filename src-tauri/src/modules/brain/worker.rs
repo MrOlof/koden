@@ -23,6 +23,14 @@ use crate::modules::pty::PtyState;
 
 const AGENT_EVENT: &str = "koden:agent-signal";
 const TICK_SECS: u64 = 60;
+/// Autonomous Librarian trigger — a free, non-LLM change counter. Once a project
+/// accrues this many incremental file changes (from the watcher) AND the cooldown
+/// has elapsed, the Librarian runs ONE delta-gated reflect pass. That pass is itself
+/// budget-gated (no ceiling ⇒ no spend) and hash-gated (no material change ⇒ $0), so
+/// these thresholds only decide *how often she looks*, never whether she overspends.
+/// ponytail: fixed constants; lift to user settings if someone wants to tune cadence.
+const LIBRARIAN_CHANGE_THRESHOLD: usize = 20;
+const LIBRARIAN_COOLDOWN_MS: i64 = 15 * 60 * 1000;
 /// Binary sniff window — a NUL byte in the first 8 KiB means "not text".
 const BINARY_SNIFF_BYTES: usize = 8192;
 
@@ -163,6 +171,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     // full Rescan so newly-registered projects get watched too.
     let mut watcher = arm_watcher(&app, &tx);
 
+    // Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
+    // restart, which is fine — the counter only accrues while the app is open).
+    let mut lib_state: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
+
     // 7. Steady-state event loop. Single writer; ingest paths only send events.
     for ev in rx {
         match ev {
@@ -288,6 +300,8 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                             stats.pruned
                         );
                     }
+                    // Accrue the delta toward the autonomous Librarian trigger.
+                    maybe_auto_reflect(&app, &index, &project, stats.indexed + stats.pruned, &mut lib_state);
                 }
             }
         }
@@ -549,6 +563,65 @@ pub fn index_changed(
     IndexStats { indexed, pruned }
 }
 
+/// Per-project autonomous-reflect bookkeeping. `pending` is the accrued change
+/// count since the last pass; `digest_hash` is the hash of the last digest we
+/// actually reflected on (drives the delta gate).
+#[derive(Default)]
+struct LibrarianAuto {
+    pending: usize,
+    last_pass_ms: i64,
+    digest_hash: Option<String>,
+}
+
+/// Pure trigger predicate (testable): enough has changed AND the cooldown is over.
+/// Budget is enforced downstream in [reflect::reflect_auto], so it's not gated here.
+fn should_reflect(pending: usize, last_pass_ms: i64, now_ms: i64) -> bool {
+    pending >= LIBRARIAN_CHANGE_THRESHOLD
+        && now_ms.saturating_sub(last_pass_ms) >= LIBRARIAN_COOLDOWN_MS
+}
+
+/// Accrue a project's incremental changes and, when the trigger fires, run ONE
+/// delta-gated autonomous reflect. End-to-end safe: [reflect::reflect_auto] no-ops
+/// (Disabled) without a budget ceiling, and skips the paid call ($0, Unchanged) when
+/// the digest is byte-identical to the last pass. The network call briefly blocks
+/// this worker — acceptable for a rare, budgeted background action.
+fn maybe_auto_reflect(
+    app: &AppHandle,
+    index: &SqliteIndex,
+    project_id: &str,
+    delta: usize,
+    state: &mut std::collections::HashMap<String, LibrarianAuto>,
+) {
+    if delta == 0 {
+        return; // unchanged no-op passes don't move the counter
+    }
+    let now_ms = now_epoch_ms();
+    let entry = state.entry(project_id.to_string()).or_default();
+    entry.pending += delta;
+    if !should_reflect(entry.pending, entry.last_pass_ms, now_ms) {
+        return;
+    }
+    let prev = entry.digest_hash.clone();
+    let (outcome, digest_hash) =
+        reflect::reflect_auto(app, index, project_id, None, now_ms, prev.as_deref());
+    entry.last_pass_ms = now_ms; // cooldown applies regardless of outcome (no hammering)
+    match outcome.reason {
+        reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
+            entry.pending = 0;
+            entry.digest_hash = digest_hash;
+            log::info!(
+                "brain: auto-reflect '{project_id}' → {:?} ({} proposal(s), ${:.4})",
+                outcome.reason,
+                outcome.proposals.len(),
+                outcome.spent_usd
+            );
+        }
+        // Disabled/NoKey/OverBudget/CallFailed/InvalidOutput: keep `pending` so a
+        // later pass retries after the cooldown; don't store the hash.
+        other => log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}"),
+    }
+}
+
 fn now_epoch_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -654,5 +727,21 @@ fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>)
             }
         }
         _ => {} // working / attention / finished — status only, not tracked in P0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_reflect_needs_both_threshold_and_cooldown() {
+        let cd = LIBRARIAN_COOLDOWN_MS;
+        // Below the change threshold → never, even long after the last pass.
+        assert!(!should_reflect(LIBRARIAN_CHANGE_THRESHOLD - 1, 0, cd * 10));
+        // Enough changes AND the cooldown has fully elapsed → fire.
+        assert!(should_reflect(LIBRARIAN_CHANGE_THRESHOLD, 0, cd));
+        // Enough changes but still inside the cooldown window → hold.
+        assert!(!should_reflect(LIBRARIAN_CHANGE_THRESHOLD, 1_000, 1_000 + cd - 1));
     }
 }

@@ -18,7 +18,8 @@ use koden_lib::modules::brain::curate::contradiction::curate_contradictions_with
 use koden_lib::modules::brain::curate::{curate_act_only, curate_with_client, CurationReason};
 use koden_lib::modules::brain::memory::proposal::ProposalAction;
 use koden_lib::modules::brain::reflect::{
-    reflect_with_client, ReflectClient, ReflectConfig, ReflectReason, ReflectResponse,
+    reflect_auto_with_client, reflect_with_client, ReflectClient, ReflectConfig, ReflectReason,
+    ReflectResponse,
 };
 use koden_lib::modules::brain::resume::{
     gc_resume_dir, record_event, recover_all, resume_command, ResumePlan, ResumeRecord, SessionKey,
@@ -796,6 +797,37 @@ fn reflect_dedups_on_rerun() {
     assert_eq!(fake2.calls(), 1, "still calls the model");
     let props = list_proposals_readonly(&db, Some(PID)).unwrap();
     assert_eq!(props.iter().filter(|p| p.source == "reflect").count(), 1, "queue holds one");
+}
+
+/// Delta gate (the autonomous cost-saver): the first auto pass calls the model and
+/// returns the digest hash; a SECOND pass on the UNCHANGED corpus skips the call
+/// entirely (Unchanged, $0, zero requests). Only a real change re-spends.
+#[test]
+fn reflect_auto_skips_unchanged_digest() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+
+    // Pass 1: no prior hash → the model is called; we get Ok + the digest hash.
+    let fake1 = FakeClient::ok(TWO_PROPOSALS, 1000, 200);
+    let (out1, h1) =
+        reflect_auto_with_client(&idx, &fake1, &ReflectConfig::default(), PID, None, 1000, None);
+    assert!(matches!(out1.reason, ReflectReason::Ok), "{:?}", out1.reason);
+    assert_eq!(fake1.calls(), 1);
+    let h1 = h1.expect("digest hash returned on a real pass");
+    let spent_after_1 = idx.budget_state().1;
+    assert!(spent_after_1 > 0.0, "first pass spent");
+
+    // Pass 2: same corpus ⇒ same digest hash ⇒ skip the call, $0, no spend movement.
+    let fake2 = FakeClient::ok(TWO_PROPOSALS, 1000, 200);
+    let (out2, h2) =
+        reflect_auto_with_client(&idx, &fake2, &ReflectConfig::default(), PID, None, 2000, Some(&h1));
+    assert!(matches!(out2.reason, ReflectReason::Unchanged), "{:?}", out2.reason);
+    assert_eq!(out2.spent_usd, 0.0, "unchanged ⇒ no charge");
+    assert_eq!(fake2.calls(), 0, "unchanged ⇒ zero requests");
+    assert_eq!(h2, Some(h1), "hash is stable across an unchanged pass");
+    assert_eq!(idx.budget_state().1, spent_after_1, "spent_total unchanged on the skip");
 }
 
 // ---------------------------------------------------------------------------
