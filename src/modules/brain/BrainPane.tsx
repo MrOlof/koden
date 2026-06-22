@@ -1,10 +1,11 @@
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
 import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
 import {
+  type BrainStatusReport,
   brainAddProject,
   brainBudgetStatus,
   brainCurate,
@@ -19,7 +20,6 @@ import {
   brainResolveProposal,
   brainSearch,
   brainSetBudget,
-  type BrainStatusReport,
   type Hit,
   type MemoryProposal,
   type NoteSummary,
@@ -87,7 +87,10 @@ export function BrainPane() {
     let alive = true;
     const refresh = async () => {
       try {
-        const [ps, rep] = await Promise.all([brainListProjects(), brainIndexStatus()]);
+        const [ps, rep] = await Promise.all([
+          brainListProjects(),
+          brainIndexStatus(),
+        ]);
         if (alive) {
           setProjects(ps);
           setReport(rep);
@@ -139,7 +142,9 @@ export function BrainPane() {
 
   useEffect(() => {
     if (active && results.length > 0) {
-      const el = scrollRef.current?.querySelector(`[data-index="${selectedIndex}"]`);
+      const el = scrollRef.current?.querySelector(
+        `[data-index="${selectedIndex}"]`,
+      );
       el?.scrollIntoView({ block: "nearest" });
     }
   }, [selectedIndex, results, active]);
@@ -202,7 +207,8 @@ export function BrainPane() {
   };
 
   const removeProject = async () => {
-    const targetId = project ?? (projects.length === 1 ? projects[0]?.id : null);
+    const targetId =
+      project ?? (projects.length === 1 ? projects[0]?.id : null);
     if (!targetId) return;
     const p = projects.find((x) => x.id === targetId);
     const ok = window.confirm(
@@ -275,14 +281,18 @@ export function BrainPane() {
               onClick={() => setMode(m)}
               className={cn(
                 "rounded px-1.5 py-0.5 capitalize",
-                mode === m ? "bg-background text-foreground shadow-sm" : "text-muted-foreground",
+                mode === m
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground",
               )}
             >
               {m}
             </button>
           ))}
         </div>
-        <span className="truncate text-[11px] text-muted-foreground">{statusLabel(report)}</span>
+        <span className="truncate text-[11px] text-muted-foreground">
+          {statusLabel(report)}
+        </span>
         <button
           type="button"
           onClick={() => void brainRescan(project)}
@@ -357,7 +367,9 @@ export function BrainPane() {
         </div>
       ) : null}
       {addError ? (
-        <div className="shrink-0 px-2 pt-1 text-[10px] text-red-500">{addError}</div>
+        <div className="shrink-0 px-2 pt-1 text-[10px] text-red-500">
+          {addError}
+        </div>
       ) : null}
 
       {mode === "search" ? (
@@ -440,7 +452,9 @@ function SearchView({
               } else if (e.key === "ArrowUp") {
                 e.preventDefault();
                 lastKeyboardNavAt.current = Date.now();
-                setSelectedIndex((prev) => (prev - 1 + results.length) % results.length);
+                setSelectedIndex(
+                  (prev) => (prev - 1 + results.length) % results.length,
+                );
               } else if (e.key === "Enter") {
                 e.preventDefault();
                 onCopy(results[selectedIndex].path);
@@ -469,9 +483,13 @@ function SearchView({
               Type to search the indexed workspace.
             </div>
           ) : searching && results.length === 0 ? (
-            <div className="px-3 py-2 text-[11px] text-muted-foreground">Searching…</div>
+            <div className="px-3 py-2 text-[11px] text-muted-foreground">
+              Searching…
+            </div>
           ) : results.length === 0 ? (
-            <div className="px-3 py-2 text-[11px] text-muted-foreground">No matches</div>
+            <div className="px-3 py-2 text-[11px] text-muted-foreground">
+              No matches
+            </div>
           ) : (
             results.map((hit, index) => (
               <button
@@ -493,7 +511,9 @@ function SearchView({
                 title={`${hit.path} — click to copy path`}
               >
                 <span className="truncate">{basename(hit.path)}</span>
-                <span className="ml-auto truncate text-xs text-muted-foreground">{hit.path}</span>
+                <span className="ml-auto truncate text-xs text-muted-foreground">
+                  {hit.path}
+                </span>
               </button>
             ))
           )}
@@ -550,18 +570,25 @@ function MemoryView({
             </button>
           </div>
           {proposals.length === 0 ? (
-            <div className="px-1 py-1 text-[11px] text-muted-foreground">No pending proposals.</div>
+            <div className="px-1 py-1 text-[11px] text-muted-foreground">
+              No pending proposals.
+            </div>
           ) : (
             <div className="flex flex-col gap-1.5">
               {proposals.map((p) => (
-                <div key={`${p.project} ${p.signature}`} className="rounded border p-2 text-xs">
+                <div
+                  key={`${p.project} ${p.signature}`}
+                  className="rounded border p-2 text-xs"
+                >
                   <div className="flex items-center gap-1.5">
                     <span className="rounded bg-muted px-1 py-0.5 text-[10px] uppercase text-muted-foreground">
                       {p.action}
                     </span>
                     <span className="truncate font-medium">{p.title}</span>
                   </div>
-                  <p className="mt-1 text-[11px] text-muted-foreground">{p.detail}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {p.detail}
+                  </p>
                   <div className="mt-1.5 flex gap-1.5">
                     <button
                       type="button"
@@ -591,12 +618,16 @@ function MemoryView({
           </h3>
           {notes.length === 0 ? (
             <div className="px-1 py-1 text-[11px] text-muted-foreground">
-              No memory notes yet. Add markdown to a project's .koden-memory/ folder.
+              No memory notes yet. Add markdown to a project's .koden-memory/
+              folder.
             </div>
           ) : (
             <div className="flex flex-col gap-1">
               {notes.map((n) => (
-                <div key={`${n.id}:${n.path}`} className="rounded border px-2 py-1 text-xs">
+                <div
+                  key={`${n.id}:${n.path}`}
+                  className="rounded border px-2 py-1 text-xs"
+                >
                   <div className="flex items-center gap-1.5">
                     {n.note_type ? (
                       <span className="rounded bg-muted px-1 py-0.5 text-[10px] uppercase text-muted-foreground">
@@ -605,10 +636,14 @@ function MemoryView({
                     ) : null}
                     <span className="truncate font-medium">{n.title}</span>
                     {n.status ? (
-                      <span className="ml-auto text-[10px] text-muted-foreground">{n.status}</span>
+                      <span className="ml-auto text-[10px] text-muted-foreground">
+                        {n.status}
+                      </span>
                     ) : null}
                   </div>
-                  <span className="text-[10px] text-muted-foreground">{n.path}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {n.path}
+                  </span>
                 </div>
               ))}
             </div>
@@ -627,12 +662,17 @@ type LibrarianSectionProps = {
 };
 
 /**
- * The paid librarian (Tier 2) controls: the monthly spend ceiling — which is the
- * ENABLE knob (0 = off) — plus manual Reflect / Curate triggers. Reflect is purely
+ * The paid librarian (Tier 2) controls: the spend ceiling (a cumulative cap, not a
+ * monthly reset) — the ENABLE knob (0 = off) — plus manual Reflect / Curate triggers. Reflect is purely
  * paid so it's disabled until a ceiling is set; Curate still runs its $0 archive
  * proposals (only borderline judgments escalate to budget-gated LLM calls).
  */
-function LibrarianSection({ budget, onSetCeiling, onReflect, onCurate }: LibrarianSectionProps) {
+function LibrarianSection({
+  budget,
+  onSetCeiling,
+  onReflect,
+  onCurate,
+}: LibrarianSectionProps) {
   const [ceiling, spent] = budget ?? [0, 0];
   const enabled = ceiling > 0;
   const [draft, setDraft] = useState("");
@@ -656,13 +696,15 @@ function LibrarianSection({ budget, onSetCeiling, onReflect, onCurate }: Librari
       </h3>
       <div className="rounded border p-2 text-xs">
         <div className="flex items-center gap-1.5">
-          <span className="text-muted-foreground">Monthly spend</span>
+          <span className="text-muted-foreground">Spend</span>
           <span className="ml-auto tabular-nums">
             ${spent.toFixed(4)} / {enabled ? `$${ceiling.toFixed(2)}` : "off"}
           </span>
         </div>
         <div className="mt-1.5 flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground">Ceiling&nbsp;$</span>
+          <span className="text-[10px] text-muted-foreground">
+            Ceiling&nbsp;$
+          </span>
           <Input
             value={draft}
             inputMode="decimal"
@@ -683,15 +725,16 @@ function LibrarianSection({ budget, onSetCeiling, onReflect, onCurate }: Librari
             type="button"
             onClick={save}
             className="rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent"
-            title="Set the monthly USD ceiling (0 disables the paid librarian)"
+            title="Set the USD spending cap (0 disables the paid librarian)"
           >
             Save
           </button>
         </div>
         {!enabled ? (
           <p className="mt-1 text-[10px] text-muted-foreground">
-            Reflect is off. Set a monthly ceiling to enable the paid librarian (reflect +
-            contradiction). Curate still runs its free archive proposals.
+            Reflect is off. Set a spending cap to enable the paid librarian
+            (reflect + contradiction). Curate still runs its free archive
+            proposals.
           </p>
         ) : null}
         <div className="mt-1.5 flex gap-1.5">
@@ -705,7 +748,11 @@ function LibrarianSection({ budget, onSetCeiling, onReflect, onCurate }: Librari
                 ? "hover:bg-accent"
                 : "cursor-not-allowed border-dashed text-muted-foreground/50",
             )}
-            title={enabled ? "Run a budgeted LLM reflect pass" : "Set a budget to enable reflect"}
+            title={
+              enabled
+                ? "Run a budgeted LLM reflect pass"
+                : "Set a budget to enable reflect"
+            }
           >
             Reflect
           </button>
