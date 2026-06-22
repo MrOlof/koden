@@ -149,6 +149,15 @@ export class CommandMarks {
     this.startMark("", "turn");
   }
 
+  // Mint a turn mark carrying the REAL prompt text, delivered by the Claude Code
+  // UserPromptSubmit bus hook (the reliable channel). Once any real turn mark
+  // exists, getMarks() stops merging the lossy scrollback scrape — so this both
+  // captures every turn and shows the actual prompt instead of a scraped line.
+  addTurn(text: string): void {
+    const t = text.trim().slice(0, 400);
+    if (t) this.startMark(t, "turn");
+  }
+
   private startMark(text: string, status: CommandStatus): void {
     const m = this.term.registerMarker(0);
     if (!m) return;
@@ -189,26 +198,28 @@ export class CommandMarks {
   getMarks(): CommandMark[] {
     const buf = this.term.buffer.active;
     const out: CommandMark[] = [];
+    let hasTurnMark = false;
     for (const mk of this.marks) {
       if (mk.marker.isDisposed || mk.marker.line < 0) continue;
+      if (mk.status === "turn") hasTurnMark = true;
       const text =
         mk.status === "turn"
-          ? this.turnText(buf, mk.marker.line)
+          ? mk.text || this.turnText(buf, mk.marker.line)
           : mk.text || this.lineText(buf, mk.marker.line) || "command";
       out.push({ id: mk.id, line: mk.marker.line, text, status: mk.status });
     }
-    // Merge the OSC-133 command marks with the buffer-scanned Claude turns.
-    // The installed Claude Code never emits the OSC 777 turn signal, so the
-    // user's prompts only exist as rendered `>` lines in the scrollback;
-    // scanTurns recovers them. A turn that already has a real OSC-777 mark on
-    // the same line wins (dedupe by line), so reviving OSC 777 later would not
-    // double-count.
-    const seenLines = new Set<number>();
-    for (const m of out) seenLines.add(m.line);
-    for (const t of this.scanTurns()) {
-      if (seenLines.has(t.line)) continue;
-      seenLines.add(t.line);
-      out.push(t);
+    // scanTurns (scraping the rendered `>` lines) is the FALLBACK ONLY. Once a
+    // real turn mark arrives (the UserPromptSubmit bus hook with prompt text),
+    // use those exclusively — the scrape is lossy (Claude's TUI repaints, so it
+    // only catches the first turn) and would double-list or override real text.
+    if (!hasTurnMark) {
+      const seenLines = new Set<number>();
+      for (const m of out) seenLines.add(m.line);
+      for (const t of this.scanTurns()) {
+        if (seenLines.has(t.line)) continue;
+        seenLines.add(t.line);
+        out.push(t);
+      }
     }
     out.sort((a, b) => a.line - b.line);
     return out;
@@ -234,15 +245,15 @@ export class CommandMarks {
     // typing; its `>` line is not a submitted turn yet. The cursor sits inside
     // that box, so skip any matching line at or below the cursor's absolute
     // row (only on the main screen — an alt-screen TUI has no Claude box).
-    const liveInputFloor = this.altScreen
-      ? len
-      : buf.baseY + buf.cursorY;
+    const liveInputFloor = this.altScreen ? len : buf.baseY + buf.cursorY;
 
     const turns: CommandMark[] = [];
     let lastText = "";
     for (let line = 0; line < len; line++) {
       if (line >= liveInputFloor) break;
-      const text = extractTurnPrompt(buf.getLine(line)?.translateToString(true));
+      const text = extractTurnPrompt(
+        buf.getLine(line)?.translateToString(true),
+      );
       if (!text) continue;
       // Skip consecutive duplicates (a repainted box can echo the same prompt
       // on adjacent rows); a genuinely repeated question still shows once.
@@ -260,13 +271,13 @@ export class CommandMarks {
     return turns;
   }
 
-  private lineText(
-    buf: Terminal["buffer"]["active"],
-    line: number,
-  ): string {
+  private lineText(buf: Terminal["buffer"]["active"], line: number): string {
     // The C marker lands on the first output row, so the command echo is the
     // row above. Fall back to the marker row itself if that's blank.
-    const above = buf.getLine(line - 1)?.translateToString(true).trim();
+    const above = buf
+      .getLine(line - 1)
+      ?.translateToString(true)
+      .trim();
     if (above) return above;
     return buf.getLine(line)?.translateToString(true).trim() ?? "";
   }
@@ -276,10 +287,7 @@ export class CommandMarks {
   // line starts with a `>` prompt glyph. Scan a small window down from the
   // marker for that line; if nothing matches (TUI repaint, blank box) fall back
   // to a generic label so the hover is never empty.
-  private turnText(
-    buf: Terminal["buffer"]["active"],
-    line: number,
-  ): string {
+  private turnText(buf: Terminal["buffer"]["active"], line: number): string {
     for (let i = line; i < line + TURN_TEXT_SCAN; i++) {
       const prompt = extractTurnPrompt(buf.getLine(i)?.translateToString(true));
       if (prompt) return prompt;
@@ -337,9 +345,7 @@ export function extractTurnPrompt(raw: string | undefined): string {
   // dashed / half-block verticals a TUI may draw the prompt box with — some
   // Claude builds (notably the GLM / z.ai endpoint) lead the line with one of
   // these instead of a plain space, which previously defeated the match.
-  const trimmed = raw
-    .replace(/^[\s │┃├┠┆┇┊┋╎╏▏▎▍▌▕|‖]+/, "")
-    .trimStart();
+  const trimmed = raw.replace(/^[\s │┃├┠┆┇┊┋╎╏▏▎▍▌▕|‖]+/, "").trimStart();
   const m = /^[>❯›]\s+(.+)$/.exec(trimmed);
   if (!m) return "";
   const text = m[1].trim();

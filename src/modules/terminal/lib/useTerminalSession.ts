@@ -2,10 +2,10 @@ import { clipboardWriteText } from "@/lib/clipboard";
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { revealInFinder } from "@/modules/explorer/lib/contextActions";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { readTerminalTokens } from "@/styles/tokens";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { SearchAddon } from "@xterm/addon-search";
-import { readTerminalTokens } from "@/styles/tokens";
 import type {
   IDecoration,
   ILink,
@@ -20,6 +20,7 @@ import { detectLinks } from "./linkDetect";
 // The hover affordance (badge text + highlight tint) keys off what a click
 // does, not the detection category. "open" reveals/opens; "copy" copies.
 type LinkAct = "copy" | "open";
+
 import {
   BlockDecorations,
   type BlockMatch,
@@ -236,6 +237,13 @@ export function getCommandMarksForLeaf(
     viewport: cm.viewport(),
     altScreen: cm.isAltScreen(),
   };
+}
+
+// Mint a real (text-bearing) Claude user-turn mark on a leaf's CommandMarks —
+// called by the AgentBusBridge when the UserPromptSubmit bus hook delivers a
+// prompt. No-op if the session isn't bound yet.
+export function addTurnForLeaf(leafId: number, text: string): void {
+  sessions.get(leafId)?.commandMarks?.addTurn(text);
 }
 
 export function subscribeCommandsForLeaf(

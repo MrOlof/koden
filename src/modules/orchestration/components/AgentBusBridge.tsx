@@ -1,6 +1,6 @@
 import { native } from "@/modules/ai/lib/native";
-import { leafIdForPty } from "@/modules/terminal";
 import { useTabStatusStore } from "@/modules/tabs";
+import { addTurnForLeaf, leafIdForPty } from "@/modules/terminal";
 import { useEffect, useRef } from "react";
 import { extractSubagentStarts } from "../lib/subagentBus";
 import { AGENT_ROLES, type AgentRole } from "../lib/types";
@@ -32,6 +32,8 @@ type BusEvent = {
   id?: number;
   state?: string;
   parent?: number;
+  // user-turn: the raw Claude Code UserPromptSubmit hook payload (carries `prompt`).
+  data?: { prompt?: string };
 };
 
 /**
@@ -86,6 +88,19 @@ export function AgentBusBridge({ busPath }: { busPath: string | null }) {
         } catch {
           continue;
         }
+        // A Claude user turn: the UserPromptSubmit hook captured the prompt text.
+        // Route it to the pane's CommandMarks so the Inputs list shows every turn
+        // (the reliable path; scanTurns scraping is only the no-signal fallback).
+        if (evt.cmd === "user-turn") {
+          if (evt.id == null) continue;
+          const prompt =
+            typeof evt.data?.prompt === "string" ? evt.data.prompt.trim() : "";
+          if (!prompt) continue;
+          const leafId = leafIdForPty(Number(evt.id));
+          if (leafId !== null) addTurnForLeaf(leafId, prompt);
+          continue;
+        }
+
         const orch = useOrchestrationStore.getState();
 
         if (evt.cmd === "agent-status") {

@@ -50,6 +50,20 @@ fn bus_cat_cmd() -> String {
     )
 }
 
+// UserPromptSubmit: the reliable turn-capture path. Claude Code passes the
+// submitted prompt as JSON on the hook's stdin; we append one bus line
+// {"cmd":"user-turn","id":<KODEN_SESSION>,"data":<raw hook json>} (newlines
+// stripped so the bus stays JSONL) and STILL emit the `working` status sequence
+// on stdout so the dock status is unchanged. The OSC/terminalSequence channel
+// alone isn't honored for this event, hence the bus — the frontend reads
+// data.prompt and mints a text-bearing turn mark for the Inputs list.
+fn user_turn_hook_cmd() -> String {
+    let bus = bus_path_str();
+    format!(
+        r#"[ -n "$KODEN_TERMINAL" ] && {{ p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; printf '{{"terminalSequence":"\\u001b]777;notify;Koden;working\\u0007"}}'; }} || true"#
+    )
+}
+
 fn is_ours(group: &Value) -> bool {
     group
         .get("hooks")
@@ -107,7 +121,15 @@ fn merge_hooks(mut root: Value) -> Value {
     let hooks = hooks.as_object_mut().unwrap();
 
     for (event, marker) in HOOK_EVENTS {
-        add_command_group(hooks, event, None, &hook_cmd(marker));
+        // UserPromptSubmit also captures the prompt text to the bus (the reliable
+        // channel) so Koden's Inputs list shows every turn, not just the first
+        // scraped one; it still emits the `working` status sequence on stdout.
+        let cmd = if event == "UserPromptSubmit" {
+            user_turn_hook_cmd()
+        } else {
+            hook_cmd(marker)
+        };
+        add_command_group(hooks, event, None, &cmd);
     }
     // Subagent lifecycle: surface the orchestrator's Claude Code subagents in
     // Koden in real time by appending to the bus file. PreToolUse needs a Task
@@ -200,6 +222,9 @@ mod tests {
         assert!(command(&out, "Notification", 0).contains("notify;Koden;attention"));
         assert!(command(&out, "Stop", 0).contains("notify;Koden;finished"));
         assert!(command(&out, "UserPromptSubmit", 0).contains("notify;Koden;working"));
+        // UserPromptSubmit also appends the prompt to the bus for the Inputs list.
+        assert!(command(&out, "UserPromptSubmit", 0).contains("user-turn"));
+        assert!(command(&out, "UserPromptSubmit", 0).contains("director-bus.jsonl"));
         assert!(command(&out, "Stop", 0).contains("terminalSequence"));
         assert!(!command(&out, "Stop", 0).contains("/dev/tty"));
     }
