@@ -447,18 +447,25 @@ function computeLayout(graph: BrainGraph): Layout {
   // Most-recently-modified files per project (by accessed_at_ms) — the "recently
   // changed" cue. Empty on a fresh index (all stamped at index time); fills in as the
   // watcher re-stamps edited files.
+  // Only files that genuinely STAND OUT as recently modified pulse. On a fresh
+  // index every file shares ~the index timestamp, so nothing stands out → no pulse
+  // (avoids 8 arbitrary dots blinking in empty space). Once the watcher re-stamps an
+  // edited file, its mtime jumps above the bulk and it qualifies.
   const recent = new Set<string>();
+  const RECENT_WINDOW = 30 * 60 * 1000; // within 30 min of the newest counts as "recent"
   for (const proj of projectNodes) {
-    graph.nodes
-      .filter(
-        (n) =>
-          n.kind === "file" && n.project_id === proj.project_id && n.mtime > 0,
-      )
+    const pf = graph.nodes.filter(
+      (n) =>
+        n.kind === "file" && n.project_id === proj.project_id && n.mtime > 0,
+    );
+    if (pf.length === 0) continue;
+    const maxM = pf.reduce((m, f) => Math.max(m, f.mtime), 0);
+    const fresh = pf.filter((f) => f.mtime >= maxM - RECENT_WINDOW);
+    if (fresh.length === pf.length) continue; // all the same age (fresh index) → nothing is "recent"
+    fresh
       .sort((a, b) => b.mtime - a.mtime)
       .slice(0, 8)
-      .forEach((f) => {
-        recent.add(f.id);
-      });
+      .forEach((f) => recent.add(f.id));
   }
 
   return {
@@ -1086,7 +1093,10 @@ export function BrainMapPane() {
                       stroke="#34d399"
                       strokeWidth={1.6}
                       className="motion-safe:animate-ping"
-                      style={{ transformOrigin: "center" }}
+                      style={{
+                        transformOrigin: "center",
+                        transformBox: "fill-box",
+                      }}
                     />
                     <circle cx={0} cy={0} r={3.4} fill="#34d399" />
                   </g>
