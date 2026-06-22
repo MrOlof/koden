@@ -400,6 +400,8 @@ export default function App() {
   // at launch), so existing sessions need a relaunch.
   useEffect(() => {
     void invoke("agent_enable_claude_hooks").catch(() => {});
+    // Codex sibling: no-op if Codex isn't installed (~/.codex absent).
+    void invoke("agent_enable_codex_hooks").catch(() => {});
     void ensureKodenDir();
   }, [ensureKodenDir]);
 

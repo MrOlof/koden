@@ -1,6 +1,8 @@
 pub mod modules;
 
-use modules::{agent, brain, fs, git, history, net, pty, secrets, shell, usage, workspace};
+use modules::{
+    agent, agent_codex, brain, fs, git, history, net, pty, secrets, shell, usage, workspace,
+};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
@@ -276,6 +278,7 @@ pub fn run() {
             open_settings_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
+            agent_codex::agent_enable_codex_hooks,
             secrets::secrets_get,
             secrets::secrets_set,
             secrets::secrets_delete,

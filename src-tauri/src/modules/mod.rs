@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_codex;
 pub mod brain;
 pub mod fs;
 pub mod git;
