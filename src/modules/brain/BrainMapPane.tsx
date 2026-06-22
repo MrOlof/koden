@@ -19,7 +19,7 @@ const W = 1600;
 const H = 1000;
 const R_HUB = 150; // project-hub ring radius
 const RING = 60; // radial gap between directory-tree depths
-const SPREAD_TO = 2.7; // angular multiplier a project fans to when focused
+const SPREAD_TO = 3.1; // angular multiplier a project fans to when focused
 
 const PALETTE = [
   "#2f6df6",
@@ -344,8 +344,10 @@ function computeLayout(graph: BrainGraph): Layout {
   // spreads out and uses the canvas instead of clogging near the core (the ring
   // is capped so the fit-to-view zoom stays readable). `ringStep` pushes each
   // directory depth further out, so blooms reach into the empty real estate.
-  const hubR = Math.max(R_HUB, Math.min(280, Math.round(P * 13)));
-  const ringStep = RING + 4;
+  const hubR = Math.max(R_HUB, Math.min(300, Math.round(P * 14)));
+  // Big radial gap per depth so blooms reach out into the empty canvas instead of
+  // mushing together near the hub — the dominant "use more space" lever.
+  const ringStep = RING + 32;
   let maxR = hubR;
 
   // depth d sits at radius hubR + d*ringStep; `pang` is the project's spine angle, and we
@@ -412,7 +414,7 @@ function computeLayout(graph: BrainGraph): Layout {
 
     // COMPACT base cone (capped) so the overview reads as tidy blooms with gaps —
     // focus then spreads the cone to SPREAD_TO× for the readable tree.
-    const sector = Math.min(1.05, ((2 * Math.PI) / P) * 0.85);
+    const sector = Math.min(1.2, ((2 * Math.PI) / P) * 0.9);
     const kids = [...root.children.values()];
     const total = kids.reduce((s, k) => s + Math.sqrt(k.leaf), 0) || 1;
     let cursor = a - sector / 2;

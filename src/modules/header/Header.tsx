@@ -2,12 +2,14 @@ import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
+import { useChatStore } from "@/modules/ai";
 import { BrainHeaderMenu } from "@/modules/brain";
 import type { SpaceMeta } from "@/modules/spaces";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import {
   CommandIcon,
+  RoboticIcon,
   Settings01Icon,
   SidebarLeftIcon,
 } from "@hugeicons/core-free-icons";
@@ -106,6 +108,7 @@ export function Header({
 }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
+  const openPanel = useChatStore((s) => s.openPanel);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -184,33 +187,44 @@ export function Header({
       >
         {spaceSwitcher}
         {hideTabs ? null : (
-        <TabBar
-          tabs={tabs}
-          activeId={activeId}
-          onSelect={onSelect}
-          onNew={onNew}
-          onNewGrid={onNewGrid}
-          onNewBlock={onNewBlock}
-          onNewPrivate={onNewPrivate}
-          onNewPreview={onNewPreview}
-          onNewEditor={onNewEditor}
-          onNewGitGraph={onNewGitGraph}
-          onNewNotes={onNewNotes}
-          onNewBoard={onNewBoard}
-          onNewTasks={onNewTasks}
-          onOpenDirector={onOpenDirector}
-          onClose={onClose}
-          onDuplicate={onDuplicate}
-          onCloseOthers={onCloseOthers}
-          onPin={onPin}
-          onRename={onRename}
-          spaces={spaces}
-          onMoveToSpace={onMoveToSpace}
-          compact={compact}
-        />
+          <TabBar
+            tabs={tabs}
+            activeId={activeId}
+            onSelect={onSelect}
+            onNew={onNew}
+            onNewGrid={onNewGrid}
+            onNewBlock={onNewBlock}
+            onNewPrivate={onNewPrivate}
+            onNewPreview={onNewPreview}
+            onNewEditor={onNewEditor}
+            onNewGitGraph={onNewGitGraph}
+            onNewNotes={onNewNotes}
+            onNewBoard={onNewBoard}
+            onNewTasks={onNewTasks}
+            onOpenDirector={onOpenDirector}
+            onClose={onClose}
+            onDuplicate={onDuplicate}
+            onCloseOthers={onCloseOthers}
+            onPin={onPin}
+            onRename={onRename}
+            spaces={spaces}
+            onMoveToSpace={onMoveToSpace}
+            compact={compact}
+          />
         )}
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
+
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={openPanel}
+        title="Koden AI — chat & ask anything"
+        className="h-7 shrink-0 gap-1.5 rounded-md px-2 text-[12px]"
+      >
+        <HugeiconsIcon icon={RoboticIcon} size={14} strokeWidth={1.75} />
+        {compact ? null : "Koden AI"}
+      </Button>
 
       <SearchInline ref={searchRef} target={searchTarget} compact={compact} />
 

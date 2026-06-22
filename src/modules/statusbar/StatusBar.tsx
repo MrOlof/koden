@@ -1,19 +1,16 @@
-import { useChatStore } from "@/modules/ai";
-import { AgentStatusPill } from "@/modules/ai/components/AgentStatusPill";
-import {
-  AiOpenButton,
-  AiStatusBarControls,
-} from "@/modules/ai/components/AiStatusBarControls";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useChatStore } from "@/modules/ai";
+import { AgentStatusPill } from "@/modules/ai/components/AgentStatusPill";
+import { AiStatusBarControls } from "@/modules/ai/components/AiStatusBarControls";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { IncognitoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
-import type { WorkspaceEnv } from "@/modules/workspace";
 
 type Props = {
   cwd: string | null;
@@ -38,7 +35,6 @@ export function StatusBar({
   privateActive,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
-  const openPanel = useChatStore((s) => s.openPanel);
 
   return (
     <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-border/60 bg-card/60 px-3 text-[11px]">
@@ -53,7 +49,10 @@ export function StatusBar({
                 <span>Private: hidden from AI</span>
               </span>
             </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-64 text-[11px] leading-relaxed">
+            <TooltipContent
+              side="top"
+              className="max-w-64 text-[11px] leading-relaxed"
+            >
               AI can't see this terminal's output. Use it for secrets, SSH, or
               anything you don't want sent to the model.
             </TooltipContent>
@@ -62,11 +61,9 @@ export function StatusBar({
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <AgentStatusPill onClick={onOpenMini} />
-        {panelOpen && hasComposer ? (
-          <AiStatusBarControls />
-        ) : (
-          <AiOpenButton onOpen={openPanel} />
-        )}
+        {/* The launcher moved to the header ("Koden AI" button); the status bar only
+            shows the inline controls while the panel is open. */}
+        {panelOpen && hasComposer ? <AiStatusBarControls /> : null}
       </div>
     </footer>
   );
