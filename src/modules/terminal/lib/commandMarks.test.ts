@@ -209,6 +209,22 @@ describe("CommandMarks.addTurn", () => {
     expect(cm.getMarks().map((m) => m.text)).toEqual(["the real prompt"]);
   });
 
+  it("surfaces EVERY turn in arrival order, not just the first", () => {
+    // Regression: the old impl anchored each turn to registerMarker(0); a
+    // repainting agent TUI drove those marker lines to -1 so getMarks filtered
+    // all but one out. Bus turns are marker-free now, so all must survive.
+    const cm = new CommandMarks(makeFakeTerm(["plain output"]));
+    cm.addTurn("hi");
+    cm.addTurn("What's up ?");
+    cm.addTurn("505");
+    const turns = cm.getMarks().filter((m) => m.status === "turn");
+    expect(turns.map((t) => t.text)).toEqual(["hi", "What's up ?", "505"]);
+    // Distinct, stable ids for React keys; ascending so they sort in arrival order.
+    expect(new Set(turns.map((t) => t.id)).size).toBe(3);
+    expect(turns[0].line).toBeLessThan(turns[1].line);
+    expect(turns[1].line).toBeLessThan(turns[2].line);
+  });
+
   it("ignores empty/whitespace and caps very long prompts", () => {
     const cm = new CommandMarks(makeFakeTerm(["x"]));
     cm.addTurn("   ");

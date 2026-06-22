@@ -56,10 +56,16 @@ export function AgentBusBridge({ busPath }: { busPath: string | null }) {
   // non-atomic hook's doubled wrapper, and duplicated fragments never
   // double-spawn. Reset alongside `processed` when the bus path changes/clears.
   const seenToolUse = useRef<Set<string>>(new Set());
+  // The bus is append-only and never cleared, so on (re)mount we adopt its
+  // current end as the baseline instead of replaying it — otherwise turns and
+  // subagent events from PREVIOUS app runs flood into this run's panes (e.g. an
+  // old claude session's prompts showing up in a new codex pane on the same pty).
+  const primed = useRef(false);
 
   useEffect(() => {
     if (!busPath) return;
     processed.current = 0;
+    primed.current = false;
     seenToolUse.current = new Set();
     let stopped = false;
 
@@ -75,6 +81,13 @@ export function AgentBusBridge({ busPath }: { busPath: string | null }) {
       const lines = res.content.split("\n");
       // The trailing element is a partial line until its newline arrives.
       const complete = Math.max(0, lines.length - 1);
+      // First successful read after (re)mount: skip the pre-existing backlog (a
+      // previous run's events) and only process what's appended from now on.
+      if (!primed.current) {
+        primed.current = true;
+        processed.current = complete;
+        return;
+      }
       if (complete < processed.current) {
         processed.current = 0; // file cleared/rotated — re-read from the top
         seenToolUse.current = new Set();

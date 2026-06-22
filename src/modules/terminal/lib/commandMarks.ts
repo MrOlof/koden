@@ -59,6 +59,11 @@ const TURN_TEXT_SCAN = 4;
 // hundred-thousand-line scrollback stays well under MAX_SAFE_INTEGER.
 const SCAN_ID_BASE = 1_000_000_000;
 
+// Bus-delivered turns (addTurn) live in their own high band, above scan ids, so
+// they sort after real command marks (small buffer lines) in arrival order and
+// never collide with either. They are NOT xterm markers — see addTurn/busTurns.
+const TURN_LINE_BASE = 2_000_000_000;
+
 export type CommandMarksOptions = {
   onChange?: () => void;
 };
@@ -77,6 +82,13 @@ export class CommandMarks {
   // first scan.
   private scanCache: CommandMark[] = [];
   private scanCacheLen = -1;
+  // Turns delivered by the UserPromptSubmit bus hook (addTurn). Stored as plain
+  // {id,text} — NOT xterm markers — because a repainting agent TUI (claude/codex)
+  // redraws/scrolls so registerMarker lines go to -1 and getMarks would filter
+  // all but the latest out (the "only the first turn shows" bug). They carry
+  // their own prompt text, so no buffer anchor is needed.
+  private readonly busTurns: { id: number; text: string }[] = [];
+  private turnSeq = 0;
 
   constructor(
     private readonly term: Terminal,
@@ -149,13 +161,18 @@ export class CommandMarks {
     this.startMark("", "turn");
   }
 
-  // Mint a turn mark carrying the REAL prompt text, delivered by the Claude Code
-  // UserPromptSubmit bus hook (the reliable channel). Once any real turn mark
+  // Record a turn carrying the REAL prompt text, delivered by the Claude/Codex
+  // UserPromptSubmit bus hook (the reliable channel). Stored as a plain entry,
+  // NOT an xterm marker: an agent TUI repaints, which invalidates marker lines so
+  // marker-backed turns vanish from getMarks() after the first. Once any turn
   // exists, getMarks() stops merging the lossy scrollback scrape — so this both
-  // captures every turn and shows the actual prompt instead of a scraped line.
+  // captures EVERY turn and shows the actual prompt instead of a scraped line.
   addTurn(text: string): void {
     const t = text.trim().slice(0, 400);
-    if (t) this.startMark(t, "turn");
+    if (!t) return;
+    this.busTurns.push({ id: TURN_LINE_BASE + ++this.turnSeq, text: t });
+    while (this.busTurns.length > MAX_MARKS) this.busTurns.shift();
+    this.scheduleNotify();
   }
 
   private startMark(text: string, status: CommandStatus): void {
@@ -208,10 +225,19 @@ export class CommandMarks {
           : mk.text || this.lineText(buf, mk.marker.line) || "command";
       out.push({ id: mk.id, line: mk.marker.line, text, status: mk.status });
     }
+    // Bus-delivered turns (the reliable UserPromptSubmit channel): append in
+    // arrival order with synthetic high-band lines so they sort after the real
+    // command marks. Marker-free, so a repainting agent TUI can't drop them.
+    if (this.busTurns.length > 0) {
+      hasTurnMark = true;
+      for (const t of this.busTurns) {
+        out.push({ id: t.id, line: t.id, text: t.text, status: "turn" });
+      }
+    }
     // scanTurns (scraping the rendered `>` lines) is the FALLBACK ONLY. Once a
-    // real turn mark arrives (the UserPromptSubmit bus hook with prompt text),
-    // use those exclusively — the scrape is lossy (Claude's TUI repaints, so it
-    // only catches the first turn) and would double-list or override real text.
+    // real turn arrives (the UserPromptSubmit bus hook with prompt text), use
+    // those exclusively — the scrape is lossy (the TUI repaints, so it only
+    // catches the first turn) and would double-list or override real text.
     if (!hasTurnMark) {
       const seenLines = new Set<number>();
       for (const m of out) seenLines.add(m.line);
@@ -312,6 +338,7 @@ export class CommandMarks {
       } catch {}
     }
     this.marks.length = 0;
+    this.busTurns.length = 0;
     for (const d of this.disposers) {
       try {
         d();
