@@ -1,14 +1,23 @@
+import { listenFsChanged } from "@/modules/explorer/lib/watch";
+import { useOrchestrationStore } from "@/modules/orchestration/store/orchestrationStore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BrainGraph, brainGraph, type GraphNode } from "./lib/bindings";
+import {
+  type BrainGraph,
+  brainGraph,
+  brainProposals,
+  type GraphNode,
+} from "./lib/bindings";
 
 // ── Koden Observatory ────────────────────────────────────────────────────────
 // A canvas radial map of the whole brain (design handoff "Koden Observatory",
 // adapted to MULTI-HUB: the BRAIN core at center, every indexed project as its
 // own sub-hub with its OWN recency rings + module wedges). Files are placed by
 // (module = top-level dir → angle) and (recency band → ring), colored + glowed
-// by how recently they changed. Phase 1: static map + chrome + pan/zoom/pick.
-// Phase 2/3 (not yet wired): live agent drones, blast-radius mode, fs:changed
-// timeline. Dark by design — this view is intentionally not theme-following.
+// by how recently they changed. Live: agent drones (orchestration roster) orbit
+// the brain's hottest files; blast-radius arcs follow the AST import graph; risk
+// halos come from the review-inbox proposals; the bottom timeline streams real
+// fs:changed events and the changed files light up. Dark by design — this view is
+// intentionally not theme-following.
 
 const BG_TOP = "#0a0e18";
 const BG_MID = "#06070d";
@@ -93,6 +102,8 @@ type OLayout = {
   files: FNode[];
   byId: Map<string, FNode>;
   hubById: Map<string, Hub>;
+  adj: Map<string, string[]>; // import/anchor edges → blast radius
+  hotGlobal: string[]; // freshest file ids across the brain → drone targets
   now: number;
   edits24h: number;
   maxR: number;
@@ -196,20 +207,80 @@ function buildObservatory(graph: BrainGraph, now: number): OLayout {
     hubById.set(proj.project_id, hub);
   });
 
-  return { hubs, files, byId, hubById, now, edits24h, maxR };
+  // Import/anchor edges (not the tree "contains") → undirected blast-radius graph.
+  const adj = new Map<string, string[]>();
+  const link = (a: string, b: string) => {
+    const cur = adj.get(a);
+    if (cur) cur.push(b);
+    else adj.set(a, [b]);
+  };
+  for (const e of graph.edges) {
+    if (e.kind === "contains") continue;
+    if (byId.has(e.a) && byId.has(e.b)) {
+      link(e.a, e.b);
+      link(e.b, e.a);
+    }
+  }
+
+  // Freshest files across the brain → where the live agent drones hover.
+  const hotGlobal = [...byId.values()]
+    .filter((f) => !f.isMemory && f.mtime > 0)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, 12)
+    .map((f) => f.id);
+
+  return { hubs, files, byId, hubById, adj, hotGlobal, now, edits24h, maxR };
 }
 
 type Pick =
   | { type: "file"; id: string }
   | { type: "hub"; id: string }
+  | { type: "agent"; id: string }
   | { type: "brain" }
   | null;
+
+// A live agent drone (orbits the brain's hottest files; re-targets periodically).
+type Drone = {
+  id: string;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
+  targetId: string | null;
+  trail: { x: number; y: number }[];
+  hopAt: number;
+  sx: number; // last screen pos (for picking)
+  sy: number;
+};
+
+// Orchestration status → drone/agent color.
+const STATUS_COLOR: Record<string, string> = {
+  working: "#4d8dff",
+  spawning: "#22d3ee",
+  waiting: "#f5c518",
+  ready: "#2fe08a",
+  done: "#2fe08a",
+  error: "#ff5a5f",
+};
+const droneColor = (status: string) => STATUS_COLOR[status] ?? "#9fb2c9";
 
 export function BrainMapPane() {
   const [graph, setGraph] = useState<BrainGraph | null>(null);
   const [hover, setHover] = useState<Pick>(null);
   const [sel, setSel] = useState<Pick>(null);
   const [focusPid, setFocusPid] = useState<string | null>(null);
+  const [blast, setBlast] = useState(false);
+  const [risk, setRisk] = useState<{ files: Set<string>; count: number }>({
+    files: new Set(),
+    count: 0,
+  });
+  const [ticks, setTicks] = useState<
+    { t: number; color: string; id: number }[]
+  >([]);
+
+  // Live agents from the orchestration roster → drones (Object identity is stable
+  // per render; we reconcile into dronesRef so positions persist across renders).
+  const agentMap = useOrchestrationStore((s) => s.agents);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -227,6 +298,11 @@ export function BrainMapPane() {
   const hoverRef = useRef<Pick>(null);
   const selRef = useRef<Pick>(null);
   const focusRef = useRef<string | null>(null);
+  const blastRef = useRef(false);
+  const riskRef = useRef<Set<string>>(new Set());
+  const dronesRef = useRef<Drone[]>([]);
+  const liveMtimeRef = useRef<Map<string, number>>(new Map());
+  const tickSeq = useRef(0);
   const [tip, setTip] = useState<{
     x: number;
     y: number;
@@ -255,6 +331,100 @@ export function BrainMapPane() {
   hoverRef.current = hover;
   selRef.current = sel;
   focusRef.current = focusPid;
+  blastRef.current = blast;
+  riskRef.current = risk.files;
+
+  const agents = useMemo(() => Object.values(agentMap), [agentMap]);
+
+  // Risk = the review inbox (pending proposals). The badge is the count; we also
+  // best-effort-halo any indexed node a proposal targets (mostly memory notes).
+  useEffect(() => {
+    if (!layout) return;
+    let alive = true;
+    brainProposals(null)
+      .then((props) => {
+        if (!alive) return;
+        const pending = props.filter((p) => p.status === "pending");
+        const files = new Set<string>();
+        for (const p of pending) {
+          if (!p.target_id) continue;
+          const t = p.target_id.replace(/\\/g, "/").toLowerCase();
+          for (const f of layout.files) {
+            if (
+              f.id === p.target_id ||
+              f.path.replace(/\\/g, "/").toLowerCase().endsWith(t)
+            ) {
+              files.add(f.id);
+              break;
+            }
+          }
+        }
+        setRisk({ files, count: pending.length });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [layout]);
+
+  // Reconcile drones from the live agent roster; positions persist across renders.
+  useEffect(() => {
+    const prev = new Map(dronesRef.current.map((d) => [d.id, d]));
+    const hot = layout?.hotGlobal ?? [];
+    dronesRef.current = agents.map((a, i) => {
+      const ex = prev.get(a.id);
+      const color = droneColor(a.status);
+      if (ex) {
+        ex.name = a.name;
+        ex.color = color;
+        return ex;
+      }
+      return {
+        id: a.id,
+        name: a.name,
+        color,
+        x: 0,
+        y: 0,
+        targetId: hot.length ? hot[i % hot.length] : null,
+        trail: [],
+        hopAt: 0,
+        sx: -1,
+        sy: -1,
+      };
+    });
+  }, [agents, layout]);
+
+  // Live file changes (fs:changed): light up the file's recency + push a timeline
+  // tick. The draw loop reads liveMtimeRef each frame, so no re-render is needed
+  // for the canvas — only the (throttled) tick list re-renders the timeline.
+  useEffect(() => {
+    if (!layout) return;
+    let un: (() => void) | null = null;
+    let disposed = false;
+    listenFsChanged((paths) => {
+      const now = Date.now();
+      const fresh: { t: number; color: string; id: number }[] = [];
+      for (const path of paths) {
+        const norm = path.replace(/\\/g, "/").toLowerCase();
+        for (const f of layout.files) {
+          if (norm.endsWith(f.path.replace(/\\/g, "/").toLowerCase())) {
+            liveMtimeRef.current.set(f.id, now);
+            fresh.push({ t: now, color: f.color, id: tickSeq.current++ });
+          }
+        }
+      }
+      if (fresh.length) setTicks((prev) => [...prev, ...fresh].slice(-120));
+    })
+      .then((u) => {
+        if (disposed) u();
+        else un = u;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      if (un) un();
+    };
+  }, [layout]);
 
   const w2s = useCallback((x: number, y: number) => {
     const c = cam.current;
@@ -296,6 +466,12 @@ export function BrainMapPane() {
   const pickAt = useCallback(
     (sx: number, sy: number): Pick => {
       if (!layout) return null;
+      // drones first (they sit above files)
+      for (const d of dronesRef.current) {
+        if (d.sx < 0) continue;
+        if ((d.sx - sx) ** 2 + (d.sy - sy) ** 2 < 13 * 13)
+          return { type: "agent", id: d.id };
+      }
       let best: Pick = null;
       let bd = Infinity;
       for (const f of layout.files) {
@@ -398,21 +574,48 @@ export function BrainMapPane() {
         }
       }
 
+      // blast-radius arcs (selected file → its import/anchor neighbors)
+      if (blastRef.current && sel2?.type === "file") {
+        const sf = layout.byId.get(sel2.id);
+        const rel = layout.adj.get(sel2.id);
+        if (sf && rel) {
+          const sp = w2s(sf.x, sf.y);
+          for (const rid of rel) {
+            const o = layout.byId.get(rid);
+            if (!o) continue;
+            const op = w2s(o.x, o.y);
+            const mx = (sp.x + op.x) / 2;
+            const my = (sp.y + op.y) / 2 - 34;
+            ctx.beginPath();
+            ctx.moveTo(sp.x, sp.y);
+            ctx.quadraticCurveTo(mx, my, op.x, op.y);
+            ctx.strokeStyle = "rgba(255,138,61,.5)";
+            ctx.lineWidth = 1.3;
+            ctx.stroke();
+          }
+        }
+      }
+
       // files
       for (const f of layout.files) {
         const dim = focus && f.projectId !== focus;
         const p = w2s(f.x, f.y);
         const emph = sel2?.type === "file" && sel2.id === f.id;
-        const recent = f.band <= 1 && !f.isMemory;
+        const lm = liveMtimeRef.current.get(f.id);
+        const justChanged = lm ? Date.now() - lm < 90_000 : false;
+        const isRisk = riskRef.current.has(f.id);
+        const recent = (f.band <= 1 || justChanged) && !f.isMemory;
         let col = f.isMemory
           ? "#f5c518"
-          : f.band === 0
-            ? "#8fe7ff"
-            : f.band === 1
-              ? f.color
-              : f.band === 2
-                ? "#5c6678"
-                : "#3f4756";
+          : justChanged
+            ? "#2fe08a"
+            : f.band === 0
+              ? "#8fe7ff"
+              : f.band === 1
+                ? f.color
+                : f.band === 2
+                  ? "#5c6678"
+                  : "#3f4756";
         if (emph) col = "#ffffff";
         const r = f.r * (emph ? 1.9 : 1) * c.s;
         ctx.globalAlpha = dim ? 0.1 : 1;
@@ -422,7 +625,7 @@ export function BrainMapPane() {
           ctx.beginPath();
           ctx.arc(p.x, p.y, pr, 0, 6.2832);
           ctx.strokeStyle =
-            f.band === 0
+            f.band === 0 || justChanged
               ? `rgba(47,224,138,${0.32 + 0.18 * Math.sin(time * 3 + f.x)})`
               : "rgba(77,141,255,.2)";
           ctx.lineWidth = 1.1;
@@ -438,6 +641,15 @@ export function BrainMapPane() {
           ctx.arc(p.x, p.y, r + 4.5, 0, 6.2832);
           ctx.fill();
           ctx.restore();
+        }
+        // risk halo (a pending review-inbox proposal targets this node)
+        if (isRisk && !dim) {
+          const pr = r + 6 + 3 * Math.sin(time * 4);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, pr, 0, 6.2832);
+          ctx.strokeStyle = `rgba(255,90,95,${0.5 + 0.3 * Math.sin(time * 4)})`;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
         }
         ctx.beginPath();
         ctx.arc(p.x, p.y, Math.max(1.1, r), 0, 6.2832);
@@ -464,6 +676,84 @@ export function BrainMapPane() {
           ctx.lineWidth = 1.4;
           ctx.stroke();
         }
+      }
+
+      // live agent drones — orbit the brain's hottest files, beam to the target
+      const nowMs = Date.now();
+      for (const d of dronesRef.current) {
+        let target = d.targetId ? layout.byId.get(d.targetId) : null;
+        if ((!target || nowMs - d.hopAt > 4200) && layout.hotGlobal.length) {
+          const hot = layout.hotGlobal;
+          d.targetId =
+            hot[(Math.floor(nowMs / 4200) + d.name.length) % hot.length];
+          target = layout.byId.get(d.targetId) ?? null;
+          d.hopAt = nowMs;
+        }
+        const orbit = nowMs / 900 + d.name.length;
+        const ox = target
+          ? target.x + Math.cos(orbit) * 26
+          : Math.cos(orbit) * 64;
+        const oy = target
+          ? target.y + Math.sin(orbit) * 26
+          : Math.sin(orbit) * 64;
+        d.x += (ox - d.x) * 0.05;
+        d.y += (oy - d.y) * 0.05;
+        d.trail.push({ x: d.x, y: d.y });
+        if (d.trail.length > 22) d.trail.shift();
+        const dp = w2s(d.x, d.y);
+        d.sx = dp.x;
+        d.sy = dp.y;
+        if (target) {
+          const tp = w2s(target.x, target.y);
+          ctx.save();
+          ctx.globalAlpha = 0.8;
+          ctx.strokeStyle = d.color;
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([4, 5]);
+          ctx.lineDashOffset = -time * 22;
+          ctx.beginPath();
+          ctx.moveTo(dp.x, dp.y);
+          ctx.lineTo(tp.x, tp.y);
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (let i = 0; i < d.trail.length; i++) {
+          const tpp = w2s(d.trail[i].x, d.trail[i].y);
+          const fr = i / d.trail.length;
+          ctx.globalAlpha = fr * 0.5;
+          ctx.fillStyle = d.color;
+          ctx.beginPath();
+          ctx.arc(tpp.x, tpp.y, fr * 3.5, 0, 6.2832);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = d.color;
+        ctx.beginPath();
+        ctx.arc(dp.x, dp.y, 10, 0, 6.2832);
+        ctx.fill();
+        ctx.restore();
+        ctx.beginPath();
+        ctx.arc(dp.x, dp.y, 5, 0, 6.2832);
+        ctx.fillStyle = d.color;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(dp.x, dp.y, 2.2, 0, 6.2832);
+        ctx.fillStyle = "#fff";
+        ctx.fill();
+        if (sel2?.type === "agent" && sel2.id === d.id) {
+          ctx.beginPath();
+          ctx.arc(dp.x, dp.y, 12, 0, 6.2832);
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 1.4;
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#e8eaed";
+        ctx.font = "700 10px Manrope, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(d.name, dp.x, dp.y - 15);
       }
 
       // project sub-hubs
@@ -584,7 +874,16 @@ export function BrainMapPane() {
     }
     const hit = pickAt(sx, sy);
     setHover(hit);
-    if (hit?.type === "file" && layout) {
+    if (hit?.type === "agent") {
+      const d = dronesRef.current.find((x) => x.id === hit.id);
+      if (d)
+        setTip({
+          x: e.clientX,
+          y: e.clientY,
+          title: d.name,
+          sub: "live agent",
+        });
+    } else if (hit?.type === "file" && layout) {
       const f = layout.byId.get(hit.id);
       if (f)
         setTip({
@@ -634,6 +933,10 @@ export function BrainMapPane() {
       }
       return;
     }
+    if (hit.type === "agent") {
+      setSel(hit); // drones move; don't fly the camera to them
+      return;
+    }
     const f = layout?.byId.get(hit.id);
     setSel(hit);
     if (f) {
@@ -669,6 +972,33 @@ export function BrainMapPane() {
     sel?.type === "file" && layout ? layout.byId.get(sel.id) : null;
   const selHub =
     sel?.type === "hub" && layout ? layout.hubById.get(sel.id) : null;
+  const selAgentRec = sel?.type === "agent" ? (agentMap[sel.id] ?? null) : null;
+  const related =
+    selFile && layout
+      ? (layout.adj.get(selFile.id) ?? [])
+          .map((id) => layout.byId.get(id))
+          .filter((f): f is FNode => !!f)
+          .slice(0, 8)
+      : [];
+  const drawerAccent = selFile
+    ? selFile.color
+    : selHub
+      ? selHub.color
+      : selAgentRec
+        ? droneColor(selAgentRec.status)
+        : "#333";
+  const drawerKind = selFile
+    ? selFile.isMemory
+      ? "memory"
+      : "file"
+    : selHub
+      ? "project"
+      : "agent";
+  const drawerTitle = selFile
+    ? selFile.name
+    : selHub
+      ? selHub.name
+      : (selAgentRec?.name ?? "");
 
   if (!layout) {
     return (
@@ -756,23 +1086,51 @@ export function BrainMapPane() {
             </span>
           </div>
         </div>
-        <div className="flex items-center gap-2 font-mono text-[11px]">
+        <div className="pointer-events-auto flex items-center gap-2 font-mono text-[11px]">
+          {agents.length > 0 ? (
+            <Badge
+              color="#9fe6d4"
+              bg="rgba(45,224,138,.1)"
+              border="rgba(45,224,138,.25)"
+              dot="#2fe08a"
+            >
+              {agents.length} agents
+            </Badge>
+          ) : null}
           <Badge
             color="#bcd6ff"
             bg="rgba(77,141,255,.1)"
             border="rgba(77,141,255,.25)"
             dot="#4d8dff"
           >
-            {layout.files.filter((f) => !f.isMemory).length} files
-          </Badge>
-          <Badge
-            color="#9fe6d4"
-            bg="rgba(45,224,138,.1)"
-            border="rgba(45,224,138,.25)"
-            dot="#2fe08a"
-          >
             {layout.edits24h} edits · 24h
           </Badge>
+          {risk.count > 0 ? (
+            <Badge
+              color="#ffb3b5"
+              bg="rgba(255,90,95,.1)"
+              border="rgba(255,90,95,.25)"
+              dot="#ff5a5f"
+            >
+              {risk.count} risks
+            </Badge>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setBlast((b) => !b)}
+            className="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-bold"
+            style={{
+              borderColor: blast
+                ? "rgba(255,138,61,.5)"
+                : "rgba(255,255,255,.1)",
+              background: blast
+                ? "rgba(255,138,61,.16)"
+                : "rgba(255,255,255,.05)",
+              color: blast ? "#ffc299" : "#aab2c0",
+            }}
+          >
+            ◎ blast radius
+          </button>
         </div>
       </header>
 
@@ -827,10 +1185,39 @@ export function BrainMapPane() {
         >
           streaming
         </span>
-        <div
-          className="relative h-[3px] flex-1 rounded-full"
-          style={{ background: "rgba(255,255,255,.08)" }}
-        />
+        <div className="relative h-[34px] flex-1">
+          <div
+            className="absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full"
+            style={{ background: "rgba(255,255,255,.08)" }}
+          />
+          {ticks.map((tk) => {
+            const span = 10 * 60 * 1000;
+            const end = ticks[ticks.length - 1]?.t ?? layout.now;
+            const left = Math.max(
+              0,
+              Math.min(100, ((tk.t - (end - span)) / span) * 100),
+            );
+            return (
+              <div
+                key={tk.id}
+                className="absolute top-1/2 w-[2px] -translate-x-1/2 -translate-y-1/2 rounded-[1px]"
+                style={{
+                  height: 14,
+                  left: `${left}%`,
+                  background: tk.color,
+                  opacity: 0.85,
+                }}
+              />
+            );
+          })}
+          <div
+            className="absolute top-1/2 right-0 h-[26px] w-[3px] -translate-y-1/2 rounded-[1px]"
+            style={{
+              background: "#fff",
+              boxShadow: "0 0 10px rgba(255,255,255,.7)",
+            }}
+          />
+        </div>
         <span
           className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 font-mono text-[11px] font-bold"
           style={{
@@ -848,7 +1235,7 @@ export function BrainMapPane() {
       </div>
 
       {/* detail drawer */}
-      {selFile || selHub ? (
+      {selFile || selHub || selAgentRec ? (
         <aside
           className="absolute right-3.5 top-16 z-20 flex w-[280px] flex-col overflow-hidden rounded-2xl border"
           style={{
@@ -867,27 +1254,25 @@ export function BrainMapPane() {
               <div
                 className="flex size-8 flex-none items-center justify-center rounded-[9px] text-[12px] font-extrabold"
                 style={{
-                  background: selFile
-                    ? selFile.color
-                    : (selHub?.color ?? "#333"),
+                  background: drawerAccent,
                   color: "#06070d",
-                  boxShadow: `0 0 14px ${selFile ? selFile.color : (selHub?.color ?? "#333")}`,
+                  boxShadow: `0 0 14px ${drawerAccent}`,
                 }}
               >
-                {initials(selFile ? selFile.name : (selHub?.name ?? "?"))}
+                {initials(drawerTitle || "?")}
               </div>
               <div className="flex min-w-0 flex-col leading-tight">
                 <span
                   className="font-mono text-[9px] uppercase tracking-wide"
                   style={{ color: "#5b6373" }}
                 >
-                  {selFile ? (selFile.isMemory ? "memory" : "file") : "project"}
+                  {drawerKind}
                 </span>
                 <span
                   className="break-all text-[14px] font-bold"
                   style={{ color: "#eef1f6" }}
                 >
-                  {selFile ? selFile.name : selHub?.name}
+                  {drawerTitle}
                 </span>
               </div>
             </div>
@@ -915,6 +1300,76 @@ export function BrainMapPane() {
                 <DrawerRow
                   label="Recency"
                   value={BANDS[selFile.band].label.toLowerCase()}
+                />
+                {related.length ? (
+                  <div className="flex flex-col gap-1.5">
+                    <span
+                      className="font-mono text-[9px] uppercase tracking-wide"
+                      style={{ color: "#5b6373" }}
+                    >
+                      Related · blast radius
+                    </span>
+                    <div className="flex flex-col gap-1">
+                      {related.map((o) => (
+                        <button
+                          key={o.id}
+                          type="button"
+                          onClick={() => {
+                            setSel({ type: "file", id: o.id });
+                            setBlast(true);
+                          }}
+                          className="flex items-center gap-2 rounded-[7px] px-2 py-1.5 text-left"
+                          style={{ background: "rgba(255,255,255,.03)" }}
+                        >
+                          <i
+                            className="size-[7px] flex-none rounded-full"
+                            style={{ background: o.color }}
+                          />
+                          <span
+                            className="truncate font-mono text-[11px]"
+                            style={{ color: "#c8cdd6" }}
+                          >
+                            {o.name}
+                          </span>
+                          <span
+                            className="ml-auto font-mono text-[9px]"
+                            style={{ color: "#5b6373" }}
+                          >
+                            {topDirOf(o.path)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : selAgentRec ? (
+              <>
+                <div
+                  className="flex items-center gap-2 rounded-[10px] border px-3 py-2.5"
+                  style={{
+                    background: `${droneColor(selAgentRec.status)}1f`,
+                    borderColor: `${droneColor(selAgentRec.status)}4d`,
+                  }}
+                >
+                  <span
+                    className="size-2 rounded-full"
+                    style={{
+                      background: droneColor(selAgentRec.status),
+                      boxShadow: `0 0 8px ${droneColor(selAgentRec.status)}`,
+                    }}
+                  />
+                  <span
+                    className="text-[12.5px] font-bold"
+                    style={{ color: "#e8eaed" }}
+                  >
+                    {selAgentRec.status}
+                  </span>
+                </div>
+                <DrawerRow label="Role" value={selAgentRec.role} />
+                <DrawerRow
+                  label="Note"
+                  value="Drones orbit the brain's hottest files (project→file attribution is approximate)."
                 />
               </>
             ) : selHub ? (
