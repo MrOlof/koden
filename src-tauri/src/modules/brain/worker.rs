@@ -23,15 +23,16 @@ use crate::modules::pty::PtyState;
 
 const AGENT_EVENT: &str = "koden:agent-signal";
 const TICK_SECS: u64 = 60;
-/// How often the autonomous Librarian does a "round": at most one delta-gated
-/// reflect per project per this interval, and only when something changed since the
-/// last round. Deliberately NOT a fixed change COUNT — a count is a bad proxy (20
-/// edits means nothing in a huge repo, a lot in a tiny one). The digest hash inside
-/// [reflect::reflect_auto] is the real "is there anything new to reflect on" signal;
-/// this interval only sets *cadence*. The round is budget-gated (no ceiling ⇒ no
-/// spend) and hash-gated (digest unchanged ⇒ $0), so it never decides overspend.
-/// ponytail: fixed interval; lift to a user setting if someone wants to tune it.
-const LIBRARIAN_ROUNDS_MS: i64 = 15 * 60 * 1000;
+/// Autonomous Librarian cadence — EVENT-DRIVEN, not clock-driven. A dirty project
+/// triggers a round when it either (a) goes QUIET for `LIBRARIAN_IDLE_SETTLE_MS`
+/// (she works in the gaps, never interrupting active edits) or (b) an AI session
+/// just EXITED in it (tidy right after the assistant wraps). `LIBRARIAN_MIN_GAP_MS`
+/// caps how close two rounds can land (anti-hammer). Deliberately NO fixed change
+/// count and NO fixed clock — the digest-hash gate inside [reflect::reflect_auto] is
+/// the real "is there anything new" signal and keeps an unchanged round at $0; these
+/// only pick the *moment*. ponytail: fixed intervals; lift to user settings to tune.
+const LIBRARIAN_IDLE_SETTLE_MS: i64 = 3 * 60 * 1000;
+const LIBRARIAN_MIN_GAP_MS: i64 = 5 * 60 * 1000;
 /// Binary sniff window — a NUL byte in the first 8 KiB means "not text".
 const BINARY_SNIFF_BYTES: usize = 8192;
 
@@ -179,7 +180,17 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     // 7. Steady-state event loop. Single writer; ingest paths only send events.
     for ev in rx {
         match ev {
-            BrainEvent::Agent { pty_id, kind, agent } => handle_agent(&app, pty_id, &kind, agent),
+            BrainEvent::Agent { pty_id, kind, agent } => {
+                let project = handle_agent(&app, pty_id, &kind, agent);
+                // An AI session exiting is a natural "settle now" boundary: if that
+                // project already has pending changes, let the Librarian tidy right
+                // after, without waiting out the idle-settle.
+                if kind == "exited" {
+                    if let Some(st) = project.and_then(|p| lib_state.get_mut(&p)) {
+                        st.boundary = true;
+                    }
+                }
+            }
             BrainEvent::Rescan { .. } => {
                 warm_population(&app, &index); // full reconcile (add/change/delete)
                 drop(watcher.take()); // drop the old watcher first → no double-watch window
@@ -303,9 +314,12 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                             stats.indexed,
                             stats.pruned
                         );
-                        // Mark dirty; the periodic Librarian round (Tick) decides via
-                        // the digest hash whether there's anything new to reflect on.
-                        lib_state.entry(project.clone()).or_default().dirty = true;
+                        // Record the change (dirty + when). The Librarian settles in
+                        // after a quiet spell, deciding via the digest hash whether
+                        // there's actually anything new to reflect on.
+                        let st = lib_state.entry(project.clone()).or_default();
+                        st.dirty = true;
+                        st.last_change_ms = now_epoch_ms();
                     }
                 }
             }
@@ -568,22 +582,37 @@ pub fn index_changed(
     IndexStats { indexed, pruned }
 }
 
-/// Per-project autonomous-reflect bookkeeping. `dirty` = something changed since the
-/// last round; `digest_hash` = the hash of the last digest we reflected on (drives
-/// the delta gate). Worker-thread-local; resets on restart (fine — only matters
-/// while the app is open).
+/// Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
+/// restart, fine — only matters while the app is open).
 #[derive(Default)]
 struct LibrarianAuto {
+    /// Something was indexed/pruned here since the last round.
     dirty: bool,
+    /// An AI session exited here since the last round — a "settle now" boundary.
+    boundary: bool,
+    /// Epoch ms of the last indexed change (drives the idle-settle wait).
+    last_change_ms: i64,
+    /// Epoch ms of the last round (drives the anti-hammer min-gap).
     last_pass_ms: i64,
+    /// Hash of the last digest we reflected on (drives the delta gate).
     digest_hash: Option<String>,
 }
 
-/// Pure round predicate (testable): something changed AND a full round interval has
-/// passed. No change COUNT — the digest hash inside [reflect::reflect_auto] is the
-/// real "is there anything new" signal; this only decides cadence.
-fn due_for_round(dirty: bool, last_pass_ms: i64, now_ms: i64) -> bool {
-    dirty && now_ms.saturating_sub(last_pass_ms) >= LIBRARIAN_ROUNDS_MS
+/// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
+/// that has EITHER settled into idle OR just had an AI session exit. No change count,
+/// no fixed clock — the digest hash inside [reflect::reflect_auto] is the real
+/// "anything new" signal; this only picks the *moment*.
+fn due_for_round(
+    dirty: bool,
+    boundary: bool,
+    last_change_ms: i64,
+    last_pass_ms: i64,
+    now_ms: i64,
+) -> bool {
+    if !dirty || now_ms.saturating_sub(last_pass_ms) < LIBRARIAN_MIN_GAP_MS {
+        return false;
+    }
+    boundary || now_ms.saturating_sub(last_change_ms) >= LIBRARIAN_IDLE_SETTLE_MS
 }
 
 /// One Librarian sweep (driven by the periodic Tick): for each project that changed
@@ -599,10 +628,11 @@ fn run_librarian_rounds(
 ) {
     let now_ms = now_epoch_ms();
     for (project_id, st) in state.iter_mut() {
-        if !due_for_round(st.dirty, st.last_pass_ms, now_ms) {
+        if !due_for_round(st.dirty, st.boundary, st.last_change_ms, st.last_pass_ms, now_ms) {
             continue;
         }
         st.dirty = false;
+        st.boundary = false;
         st.last_pass_ms = now_ms; // gate the next round regardless of outcome
         let prev = st.digest_hash.clone();
         let (outcome, digest_hash) =
@@ -683,10 +713,10 @@ fn resume_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
 /// the event for crash-resume (P4). Resolves pty → cwd (B1/B3 accessor) → project
 /// (registry longest-prefix) for EVERY kind. cwd is remembered on the session so an
 /// `exited` signal can still derive its key after the pty session map has dropped.
-fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>) {
-    let Some(brain) = app.try_state::<BrainState>() else {
-        return;
-    };
+/// Returns the resolved project id (if any) so the caller can mark a Librarian
+/// boundary on an `exited` signal.
+fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>) -> Option<String> {
+    let brain = app.try_state::<BrainState>()?;
     // The agent name + cwd arrive only on the 'started' signal (agent_detect sets
     // agent=None on working/attention/finished/exited), so remember both on the
     // session and reuse them for every later signal — otherwise each kind would
@@ -702,6 +732,7 @@ fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>)
     let cwd = live_cwd.or(remembered_cwd);
     let effective_agent = agent.clone().or(remembered_agent);
     let project = cwd.as_deref().and_then(|c| brain.registry.resolve(c)).map(|p| p.id);
+    let resolved = project.clone(); // returned to the caller (the `started` arm moves `project`)
 
     // Journal the lifecycle event (fail-open). pane_uuid is None until P4-a wires a
     // restart-stable uuid; the key falls back to cwd+agent (spec-sanctioned).
@@ -733,6 +764,7 @@ fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>)
         }
         _ => {} // working / attention / finished — status only, not tracked in P0
     }
+    resolved
 }
 
 #[cfg(test)]
@@ -740,13 +772,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn due_for_round_needs_dirty_and_interval() {
-        let g = LIBRARIAN_ROUNDS_MS;
-        // Not dirty → never, however long it's been.
-        assert!(!due_for_round(false, 0, g * 10));
-        // Dirty AND a full interval elapsed → due.
-        assert!(due_for_round(true, 0, g));
-        // Dirty but still inside the interval → hold.
-        assert!(!due_for_round(true, 1_000, 1_000 + g - 1));
+    fn due_for_round_fires_on_idle_or_boundary_past_min_gap() {
+        let gap = LIBRARIAN_MIN_GAP_MS;
+        let settle = LIBRARIAN_IDLE_SETTLE_MS;
+        let now = 100 * gap; // comfortably past any min-gap from last_pass = 0
+        // Not dirty → never, even with a boundary.
+        assert!(!due_for_round(false, true, now, 0, now));
+        // Dirty but still inside the min-gap since the last round → hold.
+        assert!(!due_for_round(true, true, now, now - 1, now));
+        // Dirty, past min-gap, but still actively changing (not settled, no boundary) → hold.
+        assert!(!due_for_round(true, false, now, 0, now));
+        // Dirty, past min-gap, settled into idle → fire.
+        assert!(due_for_round(true, false, now - settle, 0, now));
+        // Dirty, past min-gap, an AI session just exited → fire even though not idle.
+        assert!(due_for_round(true, true, now, 0, now));
     }
 }
