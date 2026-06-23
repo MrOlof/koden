@@ -23,14 +23,15 @@ use crate::modules::pty::PtyState;
 
 const AGENT_EVENT: &str = "koden:agent-signal";
 const TICK_SECS: u64 = 60;
-/// Autonomous Librarian trigger — a free, non-LLM change counter. Once a project
-/// accrues this many incremental file changes (from the watcher) AND the cooldown
-/// has elapsed, the Librarian runs ONE delta-gated reflect pass. That pass is itself
-/// budget-gated (no ceiling ⇒ no spend) and hash-gated (no material change ⇒ $0), so
-/// these thresholds only decide *how often she looks*, never whether she overspends.
-/// ponytail: fixed constants; lift to user settings if someone wants to tune cadence.
-const LIBRARIAN_CHANGE_THRESHOLD: usize = 20;
-const LIBRARIAN_COOLDOWN_MS: i64 = 15 * 60 * 1000;
+/// How often the autonomous Librarian does a "round": at most one delta-gated
+/// reflect per project per this interval, and only when something changed since the
+/// last round. Deliberately NOT a fixed change COUNT — a count is a bad proxy (20
+/// edits means nothing in a huge repo, a lot in a tiny one). The digest hash inside
+/// [reflect::reflect_auto] is the real "is there anything new to reflect on" signal;
+/// this interval only sets *cadence*. The round is budget-gated (no ceiling ⇒ no
+/// spend) and hash-gated (digest unchanged ⇒ $0), so it never decides overspend.
+/// ponytail: fixed interval; lift to a user setting if someone wants to tune it.
+const LIBRARIAN_ROUNDS_MS: i64 = 15 * 60 * 1000;
 /// Binary sniff window — a NUL byte in the first 8 KiB means "not text".
 const BINARY_SNIFF_BYTES: usize = 8192;
 
@@ -172,7 +173,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     let mut watcher = arm_watcher(&app, &tx);
 
     // Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
-    // restart, which is fine — the counter only accrues while the app is open).
+    // restart, which is fine — dirty flags only matter while the app is open).
     let mut lib_state: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
 
     // 7. Steady-state event loop. Single writer; ingest paths only send events.
@@ -199,7 +200,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     s.registry.save_to(&cfg_path); // persist the updated project list
                 }
             }
-            BrainEvent::Tick => index.checkpoint(),
+            BrainEvent::Tick => {
+                index.checkpoint();
+                run_librarian_rounds(&app, &index, &mut lib_state);
+            }
             BrainEvent::Doctor { project, now_date } => {
                 let now_ms = now_epoch_ms();
                 let pids: Vec<String> = match &project {
@@ -299,9 +303,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                             stats.indexed,
                             stats.pruned
                         );
+                        // Mark dirty; the periodic Librarian round (Tick) decides via
+                        // the digest hash whether there's anything new to reflect on.
+                        lib_state.entry(project.clone()).or_default().dirty = true;
                     }
-                    // Accrue the delta toward the autonomous Librarian trigger.
-                    maybe_auto_reflect(&app, &index, &project, stats.indexed + stats.pruned, &mut lib_state);
                 }
             }
         }
@@ -563,62 +568,62 @@ pub fn index_changed(
     IndexStats { indexed, pruned }
 }
 
-/// Per-project autonomous-reflect bookkeeping. `pending` is the accrued change
-/// count since the last pass; `digest_hash` is the hash of the last digest we
-/// actually reflected on (drives the delta gate).
+/// Per-project autonomous-reflect bookkeeping. `dirty` = something changed since the
+/// last round; `digest_hash` = the hash of the last digest we reflected on (drives
+/// the delta gate). Worker-thread-local; resets on restart (fine — only matters
+/// while the app is open).
 #[derive(Default)]
 struct LibrarianAuto {
-    pending: usize,
+    dirty: bool,
     last_pass_ms: i64,
     digest_hash: Option<String>,
 }
 
-/// Pure trigger predicate (testable): enough has changed AND the cooldown is over.
-/// Budget is enforced downstream in [reflect::reflect_auto], so it's not gated here.
-fn should_reflect(pending: usize, last_pass_ms: i64, now_ms: i64) -> bool {
-    pending >= LIBRARIAN_CHANGE_THRESHOLD
-        && now_ms.saturating_sub(last_pass_ms) >= LIBRARIAN_COOLDOWN_MS
+/// Pure round predicate (testable): something changed AND a full round interval has
+/// passed. No change COUNT — the digest hash inside [reflect::reflect_auto] is the
+/// real "is there anything new" signal; this only decides cadence.
+fn due_for_round(dirty: bool, last_pass_ms: i64, now_ms: i64) -> bool {
+    dirty && now_ms.saturating_sub(last_pass_ms) >= LIBRARIAN_ROUNDS_MS
 }
 
-/// Accrue a project's incremental changes and, when the trigger fires, run ONE
-/// delta-gated autonomous reflect. End-to-end safe: [reflect::reflect_auto] no-ops
-/// (Disabled) without a budget ceiling, and skips the paid call ($0, Unchanged) when
-/// the digest is byte-identical to the last pass. The network call briefly blocks
-/// this worker — acceptable for a rare, budgeted background action.
-fn maybe_auto_reflect(
+/// One Librarian sweep (driven by the periodic Tick): for each project that changed
+/// since its last round and is past the round interval, run ONE delta-gated reflect.
+/// End-to-end safe: [reflect::reflect_auto] no-ops (Disabled) without a budget
+/// ceiling and skips the paid call ($0, Unchanged) when the digest is byte-identical
+/// to the last round. The network call briefly blocks this worker — acceptable for a
+/// rare, budgeted background action.
+fn run_librarian_rounds(
     app: &AppHandle,
     index: &SqliteIndex,
-    project_id: &str,
-    delta: usize,
     state: &mut std::collections::HashMap<String, LibrarianAuto>,
 ) {
-    if delta == 0 {
-        return; // unchanged no-op passes don't move the counter
-    }
     let now_ms = now_epoch_ms();
-    let entry = state.entry(project_id.to_string()).or_default();
-    entry.pending += delta;
-    if !should_reflect(entry.pending, entry.last_pass_ms, now_ms) {
-        return;
-    }
-    let prev = entry.digest_hash.clone();
-    let (outcome, digest_hash) =
-        reflect::reflect_auto(app, index, project_id, None, now_ms, prev.as_deref());
-    entry.last_pass_ms = now_ms; // cooldown applies regardless of outcome (no hammering)
-    match outcome.reason {
-        reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
-            entry.pending = 0;
-            entry.digest_hash = digest_hash;
-            log::info!(
-                "brain: auto-reflect '{project_id}' → {:?} ({} proposal(s), ${:.4})",
-                outcome.reason,
-                outcome.proposals.len(),
-                outcome.spent_usd
-            );
+    for (project_id, st) in state.iter_mut() {
+        if !due_for_round(st.dirty, st.last_pass_ms, now_ms) {
+            continue;
         }
-        // Disabled/NoKey/OverBudget/CallFailed/InvalidOutput: keep `pending` so a
-        // later pass retries after the cooldown; don't store the hash.
-        other => log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}"),
+        st.dirty = false;
+        st.last_pass_ms = now_ms; // gate the next round regardless of outcome
+        let prev = st.digest_hash.clone();
+        let (outcome, digest_hash) =
+            reflect::reflect_auto(app, index, project_id, None, now_ms, prev.as_deref());
+        match outcome.reason {
+            reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
+                st.digest_hash = digest_hash;
+                log::info!(
+                    "brain: auto-reflect '{project_id}' → {:?} ({} proposal(s), ${:.4})",
+                    outcome.reason,
+                    outcome.proposals.len(),
+                    outcome.spent_usd
+                );
+            }
+            // Disabled/NoKey/OverBudget/CallFailed/InvalidOutput: re-arm so the next
+            // round retries (recovers once a budget is set / a transient error clears).
+            other => {
+                st.dirty = true;
+                log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}");
+            }
+        }
     }
 }
 
@@ -735,13 +740,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_reflect_needs_both_threshold_and_cooldown() {
-        let cd = LIBRARIAN_COOLDOWN_MS;
-        // Below the change threshold → never, even long after the last pass.
-        assert!(!should_reflect(LIBRARIAN_CHANGE_THRESHOLD - 1, 0, cd * 10));
-        // Enough changes AND the cooldown has fully elapsed → fire.
-        assert!(should_reflect(LIBRARIAN_CHANGE_THRESHOLD, 0, cd));
-        // Enough changes but still inside the cooldown window → hold.
-        assert!(!should_reflect(LIBRARIAN_CHANGE_THRESHOLD, 1_000, 1_000 + cd - 1));
+    fn due_for_round_needs_dirty_and_interval() {
+        let g = LIBRARIAN_ROUNDS_MS;
+        // Not dirty → never, however long it's been.
+        assert!(!due_for_round(false, 0, g * 10));
+        // Dirty AND a full interval elapsed → due.
+        assert!(due_for_round(true, 0, g));
+        // Dirty but still inside the interval → hold.
+        assert!(!due_for_round(true, 1_000, 1_000 + g - 1));
     }
 }
