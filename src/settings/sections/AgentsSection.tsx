@@ -22,7 +22,7 @@ import {
   type AgentIconId,
   BUILTIN_AGENTS,
 } from "@/modules/ai/lib/agents";
-import { getAllKeys } from "@/modules/ai/lib/keyring";
+import { getAllKeys, setKey } from "@/modules/ai/lib/keyring";
 import {
   isValidHandle,
   normalizeHandle,
@@ -597,6 +597,26 @@ function BrainLibrarianBlock() {
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [activity, setActivity] = useState<LibrarianActivity | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [keySaving, setKeySaving] = useState(false);
+
+  const saveKey = async () => {
+    const k = apiKey.trim();
+    if (!k) return;
+    setKeySaving(true);
+    setErr(null);
+    try {
+      await setKey(provider, k);
+      setKeyed((prev) =>
+        prev.includes(provider) ? prev : [...prev, provider],
+      );
+      setApiKey("");
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setKeySaving(false);
+    }
+  };
 
   // Poll the read-only activity snapshot so the panel reflects real LLM calls as
   // they land (the Librarian is autonomous — this is how you watch it work).
@@ -758,6 +778,36 @@ function BrainLibrarianBlock() {
           </div>
         )}
       </div>
+
+      {!local ? (
+        <div className="flex items-end gap-2">
+          <div className="flex flex-1 flex-col gap-1">
+            <Label>
+              {getProvider(provider).label} API key
+              {keyed.includes(provider) ? " · saved" : ""}
+            </Label>
+            <Input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={
+                keyed.includes(provider)
+                  ? "•••• saved — paste to replace"
+                  : "Paste API key (stored securely)"
+              }
+              className="h-8 text-[12px]"
+            />
+          </div>
+          <Button
+            size="sm"
+            disabled={keySaving || !apiKey.trim()}
+            onClick={() => void saveKey()}
+            className="h-8"
+          >
+            {keySaving ? "Saving…" : "Save key"}
+          </Button>
+        </div>
+      ) : null}
 
       {local ? (
         <div className="flex flex-col gap-1">
