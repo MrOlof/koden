@@ -384,6 +384,54 @@ pub fn brain_librarian_status(state: State<BrainState>) -> LibrarianStatus {
     }
 }
 
+/// One Librarian LLM call from the budget ledger. `cost_usd` is the actual reported
+/// cost once reconciled, else the conservative estimate (a still-`reserved` row).
+#[derive(serde::Serialize)]
+pub struct LedgerCall {
+    pub status: String, // "reserved" | "spent"
+    pub cost_usd: f64,
+    pub model: String,
+    pub at_ms: i64,
+}
+
+/// Read-only "is the Librarian actually working?" snapshot for the UI: the budget
+/// meter, the pending-proposal count, and the most recent real LLM calls — so a
+/// user can see activity without devtools or sqlite. Empty meter + no calls = it
+/// has not spent (no key / no corpus / not triggered yet).
+#[derive(serde::Serialize)]
+pub struct LibrarianActivity {
+    pub ceiling_usd: f64,
+    pub spent_usd: f64,
+    pub pending_proposals: i64,
+    pub calls: Vec<LedgerCall>,
+}
+
+#[tauri::command]
+pub fn brain_librarian_activity(state: State<BrainState>) -> LibrarianActivity {
+    let empty = LibrarianActivity {
+        ceiling_usd: 0.0,
+        spent_usd: 0.0,
+        pending_proposals: 0,
+        calls: Vec::new(),
+    };
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return empty;
+    };
+    let (ceiling_usd, spent_usd) = store::budget_state_readonly(&db).unwrap_or((0.0, 0.0));
+    let pending_proposals = store::pending_proposals_readonly(&db).unwrap_or(0);
+    let calls = store::librarian_ledger_readonly(&db, 12)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(status, est, actual, model, at_ms)| LedgerCall {
+            cost_usd: actual.unwrap_or(est),
+            status,
+            model,
+            at_ms,
+        })
+        .collect();
+    LibrarianActivity { ceiling_usd, spent_usd, pending_proposals, calls }
+}
+
 /// Panes recoverable from the previous session (P4 crash-resume), computed at boot
 /// from the per-pane journals. Drives the UI's "resume where you left off" cards.
 #[tauri::command]

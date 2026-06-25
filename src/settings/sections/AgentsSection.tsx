@@ -35,9 +35,11 @@ import {
 } from "@/modules/ai/store/snippetsStore";
 import {
   brainBudgetStatus,
+  brainLibrarianActivity,
   brainLibrarianStatus,
   brainSetBudget,
   brainSetLibrarian,
+  type LibrarianActivity,
 } from "@/modules/brain/lib/bindings";
 import {
   cheapestLibModel,
@@ -594,6 +596,23 @@ function BrainLibrarianBlock() {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [activity, setActivity] = useState<LibrarianActivity | null>(null);
+
+  // Poll the read-only activity snapshot so the panel reflects real LLM calls as
+  // they land (the Librarian is autonomous — this is how you watch it work).
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      brainLibrarianActivity()
+        .then((a) => alive && setActivity(a))
+        .catch(() => {});
+    tick();
+    const id = window.setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -785,7 +804,104 @@ function BrainLibrarianBlock() {
           : `≈ $${rates.inRate} / $${rates.outRate} per 1M tokens. A few dollars is plenty.`}
       </span>
       {err ? <span className="text-[10px] text-destructive">{err}</span> : null}
+
+      <LibrarianActivityPanel
+        activity={activity}
+        capOn={Number.parseFloat(cap) > 0}
+        needsKey={
+          Number.parseFloat(cap) > 0 && !local && !keyed.includes(provider)
+        }
+      />
     </section>
+  );
+}
+
+function fmtAgoMs(ms: number): string {
+  const d = Date.now() - ms;
+  if (d < 60_000) return "just now";
+  const m = Math.floor(d / 60_000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function LibrarianActivityPanel({
+  activity,
+  capOn,
+  needsKey,
+}: {
+  activity: LibrarianActivity | null;
+  capOn: boolean;
+  needsKey: boolean;
+}) {
+  return (
+    <div className="mt-1 flex flex-col gap-1.5 rounded-md border bg-muted/20 p-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[10.5px] font-medium tracking-tight text-muted-foreground">
+          Librarian activity
+        </span>
+        {activity ? (
+          <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+            ${activity.spent_usd.toFixed(4)}
+            {activity.ceiling_usd > 0
+              ? ` / $${activity.ceiling_usd.toFixed(2)}`
+              : ""}
+          </span>
+        ) : null}
+      </div>
+
+      {!capOn ? (
+        <span className="text-[10.5px] text-muted-foreground">
+          Off — set a spending cap above to enable it.
+        </span>
+      ) : needsKey ? (
+        <span className="text-[10.5px] text-amber-500">
+          Enabled, but no API key for this provider — reflect can't call. Add a
+          key for it above.
+        </span>
+      ) : (
+        <span className="text-[10.5px] text-muted-foreground">
+          Enabled · {activity?.pending_proposals ?? 0} pending proposal
+          {activity?.pending_proposals === 1 ? "" : "s"} in the review inbox.
+        </span>
+      )}
+
+      {activity && activity.calls.length > 0 ? (
+        <div className="mt-0.5 flex flex-col gap-0.5">
+          {activity.calls.slice(0, 6).map((c) => (
+            <div
+              key={`${c.at_ms}-${c.status}-${c.model}`}
+              className="flex items-center gap-2 font-mono text-[10px]"
+            >
+              <span
+                className={
+                  c.status === "spent"
+                    ? "text-emerald-500"
+                    : "text-muted-foreground"
+                }
+              >
+                ●
+              </span>
+              <span className="flex-1 truncate text-foreground/80">
+                {c.model}
+              </span>
+              <span className="text-muted-foreground tabular-nums">
+                ${c.cost_usd.toFixed(4)}
+              </span>
+              <span className="w-14 text-right text-muted-foreground">
+                {fmtAgoMs(c.at_ms)}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <span className="text-[10px] text-muted-foreground/70">
+          No LLM calls yet. It runs after you've worked in a project that has
+          memory notes (and a key is set).
+        </span>
+      )}
+    </div>
   );
 }
 

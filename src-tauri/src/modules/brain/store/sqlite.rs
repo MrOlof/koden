@@ -1129,6 +1129,40 @@ pub fn librarian_config_readonly(
         }))
 }
 
+/// Recent Librarian LLM calls (the budget ledger) via a read-only connection:
+/// `(status, est_cost_usd, actual_cost_usd, model, reserved_at_ms)`, newest first.
+/// Each row is a real reflect/curate call (reserved before the call, spent after).
+pub fn librarian_ledger_readonly(
+    db_path: &Path,
+    limit: i64,
+) -> rusqlite::Result<Vec<(String, f64, Option<f64>, String, i64)>> {
+    let conn = open_readonly(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT status, est_cost_usd, actual_cost_usd, model, reserved_at \
+         FROM brain_budget_ledger ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, f64>(1)?,
+            r.get::<_, Option<f64>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+        ))
+    })?;
+    rows.collect()
+}
+
+/// Count of unresolved (pending) review-inbox proposals via a read-only connection.
+pub fn pending_proposals_readonly(db_path: &Path) -> rusqlite::Result<i64> {
+    let conn = open_readonly(db_path)?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM proposals WHERE status='pending'",
+        [],
+        |r| r.get(0),
+    )
+}
+
 /// The semantic `embedderId` header `(embedder_id, dims)` via a read-only
 /// connection. Empty `("", 0)` in v1 (no embedder); set at enablement. P5.
 ///

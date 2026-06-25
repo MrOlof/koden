@@ -191,6 +191,29 @@ export function brainLibrarianStatus(): Promise<LibrarianStatus> {
   return invoke<LibrarianStatus>("brain_librarian_status", {});
 }
 
+/** One real Librarian LLM call from the budget ledger. `cost_usd` is the actual
+ *  reconciled cost, or the conservative estimate for a still-`reserved` row. */
+export type LedgerCall = {
+  status: string; // "reserved" | "spent"
+  cost_usd: number;
+  model: string;
+  at_ms: number;
+};
+
+/** Read-only "is the Librarian actually working?" snapshot: budget meter, pending
+ *  proposal count, and the most recent real LLM calls. Empty calls + $0 spent =
+ *  it hasn't run a paid reflect yet (no key / no corpus / not triggered). */
+export type LibrarianActivity = {
+  ceiling_usd: number;
+  spent_usd: number;
+  pending_proposals: number;
+  calls: LedgerCall[];
+};
+
+export function brainLibrarianActivity(): Promise<LibrarianActivity> {
+  return invoke<LibrarianActivity>("brain_librarian_activity", {});
+}
+
 /** A pane recoverable from the previous session (P4 crash-resume). Field names
  *  mirror the Rust `RecoveredPane` serde struct (snake_case). */
 export type RecoveredPane = {
