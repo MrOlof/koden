@@ -271,6 +271,69 @@ fn deleted_note_is_pruned() {
     assert!(list_notes_readonly(&db, Some(PID)).unwrap().iter().all(|n| n.id != "n2"));
 }
 
+/// ADR-010 (reconcile-delete safety): an absent/unreadable project root is
+/// UNKNOWN, not "everything deleted" — an unmounted drive or permission blip
+/// must keep the last-good index AND the structured notes intact.
+#[test]
+fn absent_root_keeps_last_good_index_and_notes() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path().join("proj");
+    write(&root, "src/app.ts", b"export function keepMe() {}");
+    write(&root, ".koden-memory/n1.md", b"---\nid: n1\ntitle: Keep\n---\nx\n");
+
+    let idx = open_index(store.path());
+    index_dir(&idx, PID, &root);
+    scan_project_memory(&idx, PID, &root);
+    assert_eq!(idx.file_count(PID).unwrap(), 2, "code + note file indexed");
+    assert_eq!(idx.note_count(PID).unwrap(), 1);
+
+    // The root vanishes (unmounted drive / permission blip stand-in).
+    std::fs::remove_dir_all(&root).unwrap();
+    let stats = index_dir(&idx, PID, &root);
+    scan_project_memory(&idx, PID, &root);
+
+    assert_eq!(stats.pruned, 0, "absent root must not prune the index");
+    assert_eq!(idx.file_count(PID).unwrap(), 2, "last-good index kept");
+    assert_eq!(idx.note_count(PID).unwrap(), 1, "last-good notes kept");
+}
+
+/// ADR-010: a transiently unreadable note (Windows AV/editor lock stand-in: a
+/// same-named directory makes `read_to_string` fail with a non-NotFound error)
+/// must NOT be reconcile-deleted — that would destroy its pending (paid)
+/// proposals in the same txn. Positive absence (NotFound) still prunes.
+#[test]
+fn unreadable_note_keeps_note_and_pending_proposals() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, ".koden-memory/n1.md", b"---\nid: n1\nanchors:\n  - src/gone.rs\n---\n# One\nx\n");
+    let db = store.path().join("index.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    scan_project_memory(&idx, PID, root);
+    assert_eq!(idx.note_count(PID).unwrap(), 1);
+    // Doctor queues pending proposals against the note (no type + broken anchor).
+    assert!(run_doctor(&idx, PID, Some("2026-06-20"), 1000) >= 1);
+    let pending = list_proposals_readonly(&db, Some(PID)).unwrap().len();
+    assert!(pending >= 1, "doctor queued pending proposals");
+
+    // Make the note unreadable (non-NotFound read error), then rescan.
+    std::fs::remove_file(root.join(".koden-memory/n1.md")).unwrap();
+    std::fs::create_dir(root.join(".koden-memory/n1.md")).unwrap();
+    scan_project_memory(&idx, PID, root);
+    assert_eq!(idx.note_count(PID).unwrap(), 1, "unreadable note must NOT be pruned");
+    assert_eq!(
+        list_proposals_readonly(&db, Some(PID)).unwrap().len(),
+        pending,
+        "pending proposals must survive an unreadable note"
+    );
+
+    // Positive absence — the entry is truly gone — DOES prune (note + proposals).
+    std::fs::remove_dir(root.join(".koden-memory/n1.md")).unwrap();
+    scan_project_memory(&idx, PID, root);
+    assert_eq!(idx.note_count(PID).unwrap(), 0, "a truly deleted note is pruned");
+}
+
 /// P1 gate: a doctor finding becomes a proposal the user can approve/reject, and
 /// a rejected proposal does not reappear on the next doctor pass.
 #[test]

@@ -423,26 +423,60 @@ pub struct IndexStats {
     pub pruned: usize,
 }
 
-/// Read → binary-sniff → blake3 → secrets-redact → index one file. Returns true
-/// iff present (indexed OR an unchanged no-op; false on read error / binary / store
-/// error). Shared by the full walk (`index_dir`) and the incremental watcher
-/// (`index_changed`). On a REAL content change (index_file → Ok(true)) it stamps the
-/// temporal recency via `record_access(now_ms)`; an unchanged no-op (Ok(false)) does
-/// NOT re-stamp — so a warm pass over an unchanged index leaves accessed_at_ms fixed,
-/// preserving the gist byte-identity gate ([DP-12]).
+/// Outcome of indexing one file. Reconcile-delete (ADR-010) must distinguish
+/// "positively absent" from "unknown": only NotFound is evidence of deletion —
+/// a read/store error means the file's state is UNKNOWN and any last-good index
+/// row must be kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileOutcome {
+    /// Indexed (real change) or an unchanged no-op — present and in the index.
+    Indexed,
+    /// Present on disk but deliberately not indexable (binary, over the size
+    /// cap) — a stale index row SHOULD be pruned (matches a full rebuild).
+    NotIndexable,
+    /// Positive evidence the file is gone (NotFound at open time).
+    Absent,
+    /// Read or store error — state UNKNOWN; never treat as absence.
+    Unknown,
+}
+
+/// Read → binary-sniff → blake3 → secrets-redact → index one file. Shared by the
+/// full walk (`index_dir`) and the incremental watcher (`index_changed`). On a
+/// REAL content change (index_file → Ok(true)) it stamps the temporal recency via
+/// `record_access(now_ms)`; an unchanged no-op (Ok(false)) does NOT re-stamp — so
+/// a warm pass over an unchanged index leaves accessed_at_ms fixed, preserving the
+/// gist byte-identity gate ([DP-12]).
 fn index_one_file(
     index: &SqliteIndex,
     project_id: &str,
     rel: &str,
     path: &std::path::Path,
     now_ms: i64,
-) -> bool {
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
+) -> FileOutcome {
+    // Bounded read (ADR-010 TOCTOU): the walker's stat-time size check can be
+    // minutes stale, so re-enforce the cap at read time with a take()-bounded
+    // reader — a file that grew past the cap can never balloon memory.
+    use std::io::Read as _;
+    let mut bytes: Vec<u8> = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(f) => {
+            if let Err(e) = f.take(walk::MAX_INDEX_FILE_BYTES + 1).read_to_end(&mut bytes) {
+                log::debug!("brain: read failed for {rel}: {e}");
+                return FileOutcome::Unknown;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FileOutcome::Absent,
+        Err(e) => {
+            log::debug!("brain: open failed for {rel}: {e}");
+            return FileOutcome::Unknown;
+        }
+    }
+    if bytes.len() as u64 > walk::MAX_INDEX_FILE_BYTES {
+        return FileOutcome::NotIndexable; // grew past the cap since the stat
+    }
     // Binary sniff — skip files with a NUL in the first window.
     if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
-        return false;
+        return FileOutcome::NotIndexable;
     }
     // Freshness hash is over the RAW bytes (any change reindexes).
     let file_hash = hash::hash_bytes(&bytes);
@@ -456,12 +490,12 @@ fn index_one_file(
         Ok(true) => {
             // Real change → advance recency (only here, so unchanged passes don't move it).
             let _ = index.record_access(project_id, rel, now_ms);
-            true
+            FileOutcome::Indexed
         }
-        Ok(false) => true, // unchanged no-op — present, but recency unchanged
+        Ok(false) => FileOutcome::Indexed, // unchanged no-op — present, recency unchanged
         Err(e) => {
             log::debug!("brain: index_file failed for {rel}: {e}");
-            false
+            FileOutcome::Unknown
         }
     }
 }
@@ -471,27 +505,69 @@ fn index_one_file(
 /// and integration tests drive the **real** pipeline (BUILD-PROMPT §6.5). `root`
 /// is the absolute project root; `project_id` the id the rows are keyed under.
 pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) -> IndexStats {
-    let files = walk::walk_files(root);
+    // ADR-010: an unreadable/absent root is UNKNOWN, not "everything deleted" —
+    // an unmounted drive or a permission blip must never wipe the last-good index
+    // (temporal state + pending paid proposals are not rebuildable). Skip the pass.
+    if let Err(e) = std::fs::read_dir(root) {
+        log::warn!(
+            "brain: project root {} unreadable ({e}); keeping last-good index",
+            root.display()
+        );
+        return IndexStats::default();
+    }
+    index_walked(index, project_id, root, walk::walk_files(root))
+}
+
+/// Pipeline body, parametrized over the walk outcome so tests can drive the
+/// reconcile gate directly (a real >MAX_SCANNED repo is too heavy for CI).
+fn index_walked(
+    index: &SqliteIndex,
+    project_id: &str,
+    root: &std::path::Path,
+    walked: walk::Walked,
+) -> IndexStats {
     let now_ms = now_epoch_ms(); // one recency stamp for everything changed in this pass
     let mut indexed = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in files {
+    for path in walked.files {
         let rel = rel_path(root, &path);
-        if index_one_file(index, project_id, &rel, &path, now_ms) {
-            seen.insert(rel);
-            indexed += 1;
+        match index_one_file(index, project_id, &rel, &path, now_ms) {
+            FileOutcome::Indexed => {
+                seen.insert(rel);
+                indexed += 1;
+            }
+            // Unknown (read/store error): the file may well exist — keep any
+            // last-good row out of the deletion set (ADR-010 positive evidence).
+            FileOutcome::Unknown => {
+                seen.insert(rel);
+            }
+            // NotIndexable: present but excluded (binary/oversize) — a stale row
+            // is pruned, matching a full rebuild. Absent: positively gone.
+            FileOutcome::NotIndexable | FileOutcome::Absent => {}
         }
     }
     // Reconcile deletions: prune index rows for files no longer present on disk
     // (CONCEPT Flow B delta; EXECUTION_PLAN §3 SearchIndex::remove). Without this,
-    // a deleted/moved file would match searches forever.
+    // a deleted/moved file would match searches forever. ONLY when the walk was
+    // complete — a truncated/errored walk is a partial view, not evidence of
+    // absence (ADR-010: files past the cap would otherwise oscillate every pass).
     let mut pruned = 0usize;
-    if let Ok(existing) = index.existing_paths(project_id) {
-        for rel in existing {
-            if !seen.contains(&rel) && index.remove_file(project_id, &rel).unwrap_or(false) {
-                pruned += 1;
+    if walked.complete {
+        if let Ok(existing) = index.existing_paths(project_id) {
+            for rel in existing {
+                if !seen.contains(&rel) && index.remove_file(project_id, &rel).unwrap_or(false) {
+                    pruned += 1;
+                }
             }
         }
+    } else {
+        // ponytail: a partial walk skips reconcile-delete for the WHOLE project, so a
+        // permanently-capped (>MAX_SCANNED) repo only prunes via watcher events; upgrade
+        // path = track which subtrees were fully walked and reconcile inside those only.
+        log::warn!(
+            "brain: walk of {} was partial; additions/updates only, reconcile-delete skipped",
+            root.display()
+        );
     }
     // Rebuild resolved import edges once (pure fn of imports + file set).
     let _ = index.rebuild_edges(project_id);
@@ -537,23 +613,27 @@ pub fn index_changed(
                 if m.len() > walk::MAX_INDEX_FILE_BYTES {
                     continue;
                 }
-                if index_one_file(index, project_id, &rel, path, now_ms) {
+                if index_one_file(index, project_id, &rel, path, now_ms) == FileOutcome::Indexed {
                     indexed += 1;
                 }
             }
             Ok(_) => {
                 // A directory event (e.g. an atomic move-in of an existing tree)
                 // whose children weren't individually reported — index them so the
-                // incremental graph converges with a full rebuild.
-                for child in walk::walk_files(path) {
+                // incremental graph converges with a full rebuild. Additions only,
+                // so a partial child walk is harmless here.
+                for child in walk::walk_files(path).files {
                     let crel = rel_path(root, &child);
-                    if !crel.is_empty() && index_one_file(index, project_id, &crel, &child, now_ms) {
+                    if !crel.is_empty()
+                        && index_one_file(index, project_id, &crel, &child, now_ms)
+                            == FileOutcome::Indexed
+                    {
                         indexed += 1;
                     }
                 }
             }
-            Err(_) => {
-                // gone (deleted / moved away) — prune the stale row + FTS doc.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Positively gone (deleted / moved away) — prune the stale row + FTS doc.
                 if index.remove_file(project_id, &rel).unwrap_or(false) {
                     pruned += 1;
                 }
@@ -569,6 +649,12 @@ pub fn index_changed(
                         }
                     }
                 }
+            }
+            Err(e) => {
+                // Unreadable stat (AV/editor lock, permission blip) — state UNKNOWN,
+                // not absence (ADR-010): keep the last-good row; a later event or
+                // full pass re-syncs it.
+                log::debug!("brain: stat failed for {rel} ({e}); keeping last-good row");
             }
         }
     }
@@ -786,5 +872,29 @@ mod tests {
         assert!(due_for_round(true, false, now - settle, 0, now));
         // Dirty, past min-gap, an AI session just exited → fire even though not idle.
         assert!(due_for_round(true, true, now, 0, now));
+    }
+
+    /// ADR-010: a PARTIAL walk (scan cap hit / unreadable subtree) must never feed
+    /// reconcile-delete; the same disk state with a COMPLETE walk does prune.
+    #[test]
+    fn partial_walk_never_feeds_reconcile_delete() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        index.index_file("p", "a.ts", "alpha", "h1", 5).unwrap();
+        index.index_file("p", "b.ts", "bravo", "h2", 5).unwrap();
+        let root = tempfile::tempdir().unwrap(); // nothing on disk
+
+        let stats = index_walked(&index, "p", root.path(), walk::Walked {
+            files: Vec::new(),
+            complete: false,
+        });
+        assert_eq!(stats.pruned, 0, "partial walk must not prune");
+        assert_eq!(index.existing_paths("p").unwrap().len(), 2, "last-good rows kept");
+
+        let stats = index_walked(&index, "p", root.path(), walk::Walked {
+            files: Vec::new(),
+            complete: true,
+        });
+        assert_eq!(stats.pruned, 2, "complete walk over empty disk prunes");
     }
 }

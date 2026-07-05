@@ -48,11 +48,27 @@ fn in_skip_dir(path: &Path, root: &Path) -> bool {
     false
 }
 
+/// Outcome of a bounded walk. `complete == false` means the view is PARTIAL —
+/// the scan cap truncated traversal or a directory was unreadable — and MUST
+/// never feed reconcile-delete (ADR-010: deletion needs positive evidence of
+/// absence, never inference from a truncated walk or a read failure; otherwise
+/// files past the cap oscillate: pruned each full pass, re-indexed by the watcher).
+pub struct Walked {
+    pub files: Vec<PathBuf>,
+    pub complete: bool,
+}
+
 /// Walk a project root and return indexable candidate files. Honors
 /// `.gitignore`/`.kodenignore`, skips base-denied dirs + secret-denylisted files
-/// + oversized files, and stops after `MAX_SCANNED` entries.
-pub fn walk_files(root: &Path) -> Vec<PathBuf> {
+/// + oversized files, and stops after `MAX_SCANNED` entries (flagged as
+/// incomplete on the returned [Walked]).
+pub fn walk_files(root: &Path) -> Walked {
+    walk_files_capped(root, MAX_SCANNED)
+}
+
+fn walk_files_capped(root: &Path, cap: usize) -> Walked {
     let mut out: Vec<PathBuf> = Vec::new();
+    let mut complete = true;
     let mut scanned = 0usize;
     let walker = WalkBuilder::new(root)
         .standard_filters(true)
@@ -75,11 +91,24 @@ pub fn walk_files(root: &Path) -> Vec<PathBuf> {
         .build();
     for entry in walker {
         scanned += 1;
-        if scanned > MAX_SCANNED {
-            log::warn!("brain: walk hit MAX_SCANNED ({MAX_SCANNED}) at {}", root.display());
+        if scanned > cap {
+            log::warn!("brain: walk hit scan cap ({cap}) at {}", root.display());
+            complete = false;
             break;
         }
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                // An IO error (unreadable dir/entry) hides an unknown subtree —
+                // the walk is PARTIAL. Non-IO errors (e.g. a malformed ignore
+                // glob) don't hide files, so they don't taint completeness.
+                if err.io_error().is_some() {
+                    log::warn!("brain: walk error under {} ({err}); pass is partial", root.display());
+                    complete = false;
+                }
+                continue;
+            }
+        };
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
@@ -90,13 +119,34 @@ pub fn walk_files(root: &Path) -> Vec<PathBuf> {
         if secrets::is_denylisted_path(&path.to_string_lossy()) {
             continue;
         }
-        if std::fs::metadata(&path)
-            .map(|m| m.len() > MAX_INDEX_FILE_BYTES)
-            .unwrap_or(true)
-        {
-            continue;
+        match std::fs::metadata(&path) {
+            Ok(m) if m.len() > MAX_INDEX_FILE_BYTES => continue, // oversized — present but not indexable
+            Ok(_) => {}
+            // Stat failed (lock/permission blip): state UNKNOWN, not absent —
+            // yield it and let the bounded read path classify it (ADR-010).
+            Err(_) => {}
         }
         out.push(path);
     }
-    out
+    Walked { files: out, complete }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_walk_is_flagged_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let full = walk_files_capped(dir.path(), MAX_SCANNED);
+        assert!(full.complete, "an uncapped walk is complete");
+        assert_eq!(full.files.len(), 5);
+        // A cap smaller than the entry count (root dir + 5 files) truncates.
+        let partial = walk_files_capped(dir.path(), 3);
+        assert!(!partial.complete, "a cap-hit walk must be flagged PARTIAL");
+        assert!(partial.files.len() < 5, "truncated walk yields fewer files");
+    }
 }

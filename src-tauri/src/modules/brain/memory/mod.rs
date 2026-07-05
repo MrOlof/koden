@@ -165,41 +165,87 @@ pub fn scan_project_memory(index: &SqliteIndex, project_id: &str, root: &Path) -
     let dir = root.join(MEMORY_DIR);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut count = 0usize;
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
-            let mut note = parse(&raw, stem);
-            // Secrets gate: the notes table is a form of indexing — redact the
-            // user-controlled free-text (title + anchors) before it is stored/shown
-            // or fed to the reflect digest (CONCEPT §7.1). Redacting a normal path
-            // anchor is a no-op; only a secret-shaped anchor changes (and is then
-            // correctly flagged broken by the doctor).
-            note.title = secrets::redact(&note.title).0;
-            note.anchors = note.anchors.iter().map(|a| secrets::redact(a).0).collect();
-            let hash = crate::modules::brain::freshness::hash::hash_bytes(raw.as_bytes());
-            let rel = format!(
-                "{MEMORY_DIR}/{}",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("")
-            );
-            if index.upsert_note(project_id, &note, &rel, &hash).is_ok() {
+    // ADR-010: deletion needs POSITIVE evidence (NotFound). Any other failure
+    // (Windows AV/editor lock, permission blip) leaves a note's state UNKNOWN —
+    // the scan is then PARTIAL and must not feed reconcile-delete, or a transient
+    // read error would destroy notes AND their pending paid proposals (removed in
+    // the same txn by `remove_note`).
+    let mut complete = true;
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    complete = false; // unreadable dir entry — unknown, not absent
+                    continue;
+                };
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let raw = match std::fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    // Vanished between read_dir and read — positively gone.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        // ponytail: one unreadable note skips the whole project's note
+                        // reconcile this pass (an unreadable file can't be mapped to its
+                        // note id); upgrade path = resolve the id via the note's rel path
+                        // in the notes table and exclude just that one from deletion.
+                        log::debug!(
+                            "brain: note {} unreadable ({e}); reconcile skipped this pass",
+                            path.display()
+                        );
+                        complete = false;
+                        continue;
+                    }
+                };
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
+                let mut note = parse(&raw, stem);
+                // Secrets gate: the notes table is a form of indexing — redact the
+                // user-controlled free-text (title + anchors) before it is stored/shown
+                // or fed to the reflect digest (CONCEPT §7.1). Redacting a normal path
+                // anchor is a no-op; only a secret-shaped anchor changes (and is then
+                // correctly flagged broken by the doctor).
+                note.title = secrets::redact(&note.title).0;
+                note.anchors = note.anchors.iter().map(|a| secrets::redact(a).0).collect();
+                let hash = crate::modules::brain::freshness::hash::hash_bytes(raw.as_bytes());
+                let rel = format!(
+                    "{MEMORY_DIR}/{}",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("")
+                );
+                if index.upsert_note(project_id, &note, &rel, &hash).is_ok() {
+                    count += 1;
+                }
+                // Even on a store error the note EXISTS on disk — keep it out of
+                // the deletion set (ADR-010).
                 seen.insert(note.id.clone());
-                count += 1;
             }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // No memory folder — positive evidence every note is gone ONLY if the
+            // project root itself is still there; an absent/unreadable root
+            // (unmounted drive) makes the whole scan UNKNOWN.
+            if !root.is_dir() {
+                complete = false;
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "brain: memory dir {} unreadable ({e}); keeping last-good notes",
+                dir.display()
+            );
+            complete = false;
         }
     }
     // Reconcile-delete: drop notes (and their pending proposals) no longer on disk
     // — mirrors the `files` reconcile so a deleted/renamed note doesn't linger.
-    if let Ok(existing) = index.existing_note_ids(project_id) {
-        for id in existing {
-            if !seen.contains(&id) {
-                let _ = index.remove_note(project_id, &id);
+    // ONLY on a complete scan (positive evidence of absence).
+    if complete {
+        if let Ok(existing) = index.existing_note_ids(project_id) {
+            for id in existing {
+                if !seen.contains(&id) {
+                    let _ = index.remove_note(project_id, &id);
+                }
             }
         }
     }
