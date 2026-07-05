@@ -107,6 +107,74 @@ pub struct SqliteIndex {
     conn: Connection,
 }
 
+/// Boot busy-retry budget: transient SQLITE_BUSY/LOCKED at startup (another Koden
+/// instance mid-checkpoint, AV scan) is waited out briefly instead of declaring the
+/// brain Degraded for the whole session.
+/// ponytail: fixed budget blocks the worker thread up to ~2.5s at boot; upgrade
+/// path = event-driven re-open (or exponential backoff) if real boots contend longer.
+const BOOT_BUSY_RETRIES: u32 = 10;
+const BOOT_BUSY_DELAY_MS: u64 = 250;
+
+/// How an open/migrate failure is handled by the boot recovery ladder.
+enum OpenFailure {
+    /// Transient lock contention — retry briefly.
+    Busy,
+    /// The cache file itself is unusable — rename aside + rebuild fresh.
+    Corrupt,
+    /// Anything else (I/O, permissions, …) — propagate; the worker degrades.
+    Other,
+}
+
+fn classify_open_failure(e: &rusqlite::Error) -> OpenFailure {
+    match e {
+        rusqlite::Error::SqliteFailure(f, _) => match f.code {
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                OpenFailure::Busy
+            }
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+                OpenFailure::Corrupt
+            }
+            _ => OpenFailure::Other,
+        },
+        // migrate()'s version-stamp read: a stamp that exists but can't parse means
+        // the meta content is garbage — a corrupt cache, rebuild it.
+        rusqlite::Error::FromSqlConversionFailure(..) => OpenFailure::Corrupt,
+        _ => OpenFailure::Other,
+    }
+}
+
+/// Move a corrupt cache db (and its WAL/SHM siblings, so a later salvage-ATTACH of
+/// the moved file sees the same last-committed state) aside under a unique
+/// `<name>.corrupt-<pid>-<n>` suffix. No wall clock needed — pid+counter is unique
+/// within the one directory these files live in.
+fn rename_corrupt_aside(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("index.sqlite")
+        .to_string();
+    let pid = std::process::id();
+    for n in 0..100u32 {
+        let aside = path.with_file_name(format!("{name}.corrupt-{pid}-{n}"));
+        if aside.exists() {
+            continue;
+        }
+        std::fs::rename(path, &aside)?;
+        for suffix in ["-wal", "-shm"] {
+            let src = path.with_file_name(format!("{name}{suffix}"));
+            if src.exists() {
+                let dst = path.with_file_name(format!("{name}.corrupt-{pid}-{n}{suffix}"));
+                let _ = std::fs::rename(&src, &dst); // best-effort — main file already aside
+            }
+        }
+        return Ok(aside);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no free corrupt-aside slot",
+    ))
+}
+
 impl SqliteIndex {
     /// Open (or create) the writer connection and run migrations.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -116,6 +184,113 @@ impl SqliteIndex {
         let conn = Connection::open(path)?;
         super::migrate::migrate(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Open with the boot recovery ladder (ADR-006: the index is a REBUILDABLE
+    /// cache — a bad cache file must never brick the brain for every session):
+    /// transient BUSY/LOCKED → bounded retry with a short sleep; CORRUPT/NOTADB →
+    /// rename the cache aside, reopen fresh exactly ONCE, best-effort salvage of
+    /// the CANONICAL tables from the moved file. Any other failure propagates
+    /// unchanged (worker → Degraded, as before).
+    pub fn open_with_recovery(path: &Path) -> rusqlite::Result<Self> {
+        Self::open_with_recovery_at(
+            path,
+            BOOT_BUSY_RETRIES,
+            std::time::Duration::from_millis(BOOT_BUSY_DELAY_MS),
+        )
+    }
+
+    /// Recovery body with an injectable busy-retry budget (tests use a tiny one).
+    fn open_with_recovery_at(
+        path: &Path,
+        busy_retries: u32,
+        busy_delay: std::time::Duration,
+    ) -> rusqlite::Result<Self> {
+        let mut busy_left = busy_retries;
+        loop {
+            let err = match Self::open(path) {
+                Ok(i) => return Ok(i),
+                Err(e) => e,
+            };
+            match classify_open_failure(&err) {
+                OpenFailure::Busy if busy_left > 0 => {
+                    busy_left -= 1;
+                    log::debug!("brain: store busy at boot ({err}); retrying ({busy_left} left)");
+                    std::thread::sleep(busy_delay);
+                }
+                OpenFailure::Corrupt => {
+                    // Keep the corrupt file (salvage source + forensics), never delete.
+                    let aside = match rename_corrupt_aside(path) {
+                        Ok(p) => p,
+                        Err(io) => {
+                            log::warn!(
+                                "brain: corrupt store {} could not be moved aside ({io})",
+                                path.display()
+                            );
+                            return Err(err);
+                        }
+                    };
+                    log::warn!(
+                        "brain: corrupt store detected ({err}); moved aside to {} — rebuilding fresh",
+                        aside.display()
+                    );
+                    // Exactly one fresh retry: a failure HERE is disk-level, not
+                    // cache-level, and propagates (no rename loop).
+                    let fresh = Self::open(path)?;
+                    fresh.salvage_canonical(&aside);
+                    return Ok(fresh);
+                }
+                _ => return Err(err),
+            }
+        }
+    }
+
+    /// Best-effort copy of the CANONICAL tables (human decisions + spend state —
+    /// the only rows a cache rebuild cannot re-derive from disk, see
+    /// `migrate::CANONICAL_TABLES`) out of a corrupt store that was moved aside.
+    /// Per-table: a page-level read error or schema drift loses THAT table's rows
+    /// (logged loudly), never the whole salvage. Losing them entirely is acceptable
+    /// (ADR-006) — but never silent.
+    fn salvage_canonical(&self, corrupt: &Path) {
+        if let Err(e) = self
+            .conn
+            .execute("ATTACH DATABASE ?1 AS salvage", [corrupt.to_string_lossy().as_ref()])
+        {
+            log::warn!(
+                "brain: SALVAGE FAILED — cannot attach corrupt store {} ({e}); \
+                 proposals / reject history / budget spend are LOST (rebuilt store starts clean)",
+                corrupt.display()
+            );
+            return;
+        }
+        match self.conn.unchecked_transaction() {
+            Ok(tx) => {
+                let mut salvaged = 0usize;
+                for t in super::migrate::CANONICAL_TABLES {
+                    // OR REPLACE: the fresh DDL seeds singleton rows (brain_budget
+                    // id=1, …) that the salvaged row must win over.
+                    let sql = format!("INSERT OR REPLACE INTO main.{t} SELECT * FROM salvage.{t}");
+                    match tx.execute(&sql, []) {
+                        Ok(n) => salvaged += n,
+                        Err(e) => log::warn!(
+                            "brain: salvage of canonical table '{t}' failed ({e}); its rows are LOST"
+                        ),
+                    }
+                }
+                match tx.commit() {
+                    Ok(()) => log::info!(
+                        "brain: salvaged {salvaged} canonical row(s) from the corrupt store"
+                    ),
+                    Err(e) => log::warn!(
+                        "brain: SALVAGE COMMIT FAILED ({e}); canonical rows are LOST"
+                    ),
+                }
+            }
+            Err(e) => {
+                log::warn!("brain: SALVAGE FAILED — no transaction ({e}); canonical rows are LOST")
+            }
+        }
+        let _ = self.conn.execute_batch("DETACH DATABASE salvage");
     }
 
     /// The single writer connection, for same-crate writers that need raw access
@@ -1281,6 +1456,93 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
         (dir, path)
+    }
+
+    /// ADR-010 cluster 4: a NOTADB cache file (garbage bytes) must not brick the
+    /// brain — it is moved aside (kept, never deleted) and a fresh store rebuilt.
+    #[test]
+    fn open_with_recovery_rebuilds_a_notadb_cache() {
+        let (_dir, path) = temp_db();
+        std::fs::write(&path, b"definitely not a sqlite database, sorry").unwrap();
+        let idx = SqliteIndex::open_with_recovery(&path).expect("recovery open");
+        idx.index_file("p", "a.rs", "fn a() {}", "h", 9).unwrap();
+        assert_eq!(idx.existing_paths("p").unwrap().len(), 1, "rebuilt store works");
+        let aside: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "corrupt original moved aside, not deleted");
+    }
+
+    /// ADR-010 cluster 4: the corrupt-rebuild path must best-effort carry the
+    /// CANONICAL rows (human decisions + spend state) into the fresh store —
+    /// including singletons whose fresh-DDL seed row must lose to the salvaged one.
+    #[test]
+    fn recovery_salvages_canonical_tables_from_the_old_store() {
+        let (_dir, path) = temp_db();
+        {
+            let old = SqliteIndex::open(&path).unwrap();
+            old.conn
+                .execute(
+                    "INSERT INTO proposals(project_id,signature,action,target_id,title,detail,source,status,created_ms)
+                     VALUES('p','sig','archive','n','t','d','curate','rejected',1)",
+                    [],
+                )
+                .unwrap();
+            old.conn
+                .execute("INSERT INTO reject_signatures(project_id,reject_sig) VALUES('p','rj')", [])
+                .unwrap();
+            old.conn
+                .execute("UPDATE brain_budget SET ceiling_usd=2.0, spent_total_usd=0.42 WHERE id=1", [])
+                .unwrap();
+        } // closed → WAL checkpointed into the main file
+        let aside = path.with_file_name("index.sqlite.corrupt-test-0");
+        std::fs::rename(&path, &aside).unwrap();
+        let fresh = SqliteIndex::open(&path).unwrap();
+        fresh.salvage_canonical(&aside);
+        let props: i64 = fresh
+            .conn
+            .query_row("SELECT COUNT(*) FROM proposals WHERE status='rejected'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(props, 1, "rejected proposal salvaged (declined stays declined)");
+        let rejects: i64 = fresh
+            .conn
+            .query_row("SELECT COUNT(*) FROM reject_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rejects, 1, "reject history salvaged");
+        let (ceiling, spent): (f64, f64) = fresh
+            .conn
+            .query_row("SELECT ceiling_usd, spent_total_usd FROM brain_budget WHERE id=1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((ceiling, spent), (2.0, 0.42), "budget spend replaces the fresh seed row");
+    }
+
+    /// ADR-010 cluster 4: transient BUSY at boot is retried (bounded) and NEVER
+    /// misclassified as corruption — the cache file stays exactly where it is.
+    #[test]
+    fn boot_busy_is_retried_bounded_and_never_treated_as_corruption() {
+        let (_dir, path) = temp_db();
+        // A pre-WAL (rollback-journal) db whose EXCLUSIVE lock blocks even the
+        // `journal_mode=WAL` pragma → the immediate-BUSY shape of a boot race.
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("CREATE TABLE keepme(x); BEGIN EXCLUSIVE").unwrap();
+        let res =
+            SqliteIndex::open_with_recovery_at(&path, 2, std::time::Duration::from_millis(10));
+        assert!(res.is_err(), "still-locked store fails after the bounded retries");
+        let no_aside = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(no_aside, "BUSY must never move the cache aside");
+        assert!(path.exists(), "cache file untouched by a busy boot");
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        let idx = SqliteIndex::open_with_recovery(&path).expect("opens once the lock clears");
+        let n: i64 = idx.conn.query_row("SELECT COUNT(*) FROM keepme", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "pre-existing data intact after the lock clears");
     }
 
     #[test]

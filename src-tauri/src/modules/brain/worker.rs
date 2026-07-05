@@ -64,7 +64,11 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             return;
         }
     };
-    let index = match SqliteIndex::open(&db_path) {
+    // `open_with_recovery` (ADR-006 rebuildable cache): transient BUSY at boot is
+    // retried briefly; a CORRUPT/NOTADB cache is moved aside + rebuilt fresh (with
+    // best-effort canonical salvage) instead of bricking every launch until the
+    // user finds and deletes an app-data file. Only genuine failures degrade.
+    let index = match SqliteIndex::open_with_recovery(&db_path) {
         Ok(i) => i,
         Err(e) => {
             log::warn!("brain: store open failed ({e}); degraded");

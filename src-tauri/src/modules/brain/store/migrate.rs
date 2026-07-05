@@ -6,6 +6,27 @@ use rusqlite::Connection;
 
 use super::schema::{DDL, SCHEMA_VERSION};
 
+/// DERIVED-from-disk tables (rebuilt by the next warm walk / memory scan): dropped
+/// on ANY schema-version change so the DDL recreates them at THIS build's schema.
+/// This is a drop-list, not a keep-list — NEVER add a canonical table here.
+/// (`every_table_is_classified_derived_or_canonical` enforces that each DDL table is
+/// classified in exactly one of the two lists.)
+pub(crate) const DERIVED_TABLES: &[&str] =
+    &["code_fts", "code_nodes", "code_imports", "code_edges", "notes", "files"];
+
+/// Truly CANONICAL tables — human decisions + spend state, NOT re-derivable from
+/// disk. Preserved across migrations purely by being ABSENT from [DERIVED_TABLES],
+/// and best-effort salvaged out of a corrupt cache file by
+/// `SqliteIndex::open_with_recovery`.
+pub(crate) const CANONICAL_TABLES: &[&str] = &[
+    "proposals",
+    "reject_signatures",
+    "brain_budget",
+    "brain_budget_ledger",
+    "brain_librarian",
+    "brain_semantic_meta",
+];
+
 /// Apply pragmas + base DDL and reconcile the stored `schema_version`.
 /// Returns the version now in force.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
@@ -19,15 +40,26 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
 
     // Read the stored version BEFORE (re)creating tables, so an upgrade can drop
     // derived tables whose schema changed. `brain_meta` must exist to read it.
+    // ONLY a positively-missing row means "fresh store"; a read/parse ERROR must
+    // propagate — treating it as fresh would skip the derived rebuild and then
+    // stamp the current version over tables of unknown shape (ADR-010 cluster 4).
+    // (An unparseable stamp surfaces as FromSqlConversionFailure, which the boot
+    // recovery ladder classifies as a corrupt cache → rename aside + rebuild.)
     conn.execute_batch("CREATE TABLE IF NOT EXISTS brain_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
-    let current: Option<i64> = conn
-        .query_row(
-            "SELECT value FROM brain_meta WHERE key='schema_version'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| s.parse().ok());
+    let current: Option<i64> = match conn.query_row(
+        "SELECT value FROM brain_meta WHERE key='schema_version'",
+        [],
+        |r| {
+            let raw: String = r.get(0)?;
+            raw.parse::<i64>().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+            })
+        },
+    ) {
+        Ok(v) => Some(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e),
+    };
 
     if matches!(current, Some(v) if v == SCHEMA_VERSION) {
         // Already current: just ensure the (idempotent) DDL is present and return.
@@ -40,25 +72,25 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     // cleanly and re-runs, never leaving a half-dropped schema or an out-of-step
     // version row. (PRAGMAs above must stay OUTSIDE the txn.)
     let tx = conn.unchecked_transaction()?;
-    // On any upgrade, drop the DERIVED tables so the DDL recreates them at the
-    // current schema and the next warm pass rebuilds them — backfills new columns
+    // On ANY version change — upgrade OR DOWNGRADE (an older build opening a newer
+    // store) — drop the DERIVED tables so the DDL recreates them at THIS build's
+    // schema and the next warm pass rebuilds them — backfills new columns
     // (incl. the AST-fed `symbols`, `notes.supersedes`, and `files.accessed_*`).
+    // A downgrade MUST rebuild too: silently stamping the version down would leave
+    // derived tables shaped by a FUTURE schema under this build's queries.
     // DERIVED = rebuildable from disk: the code index (code_fts/code_nodes/
     // code_imports/code_edges + the `files` manifest — DROPped, not just DELETEd, so
     // added columns backfill) AND `notes` (re-scanned from the `.md` files by
     // `scan_project_memory` on the next warm pass). Truly CANONICAL data — proposals,
     // reject_signatures (human decisions), brain_budget(+ledger) (spend state),
-    // brain_semantic_meta — is preserved PURELY by being absent from this DROP batch.
-    // This is a drop-list, not a keep-list, so NEVER add a canonical table here.
-    if matches!(current, Some(v) if v < SCHEMA_VERSION) {
-        tx.execute_batch(
-            "DROP TABLE IF EXISTS code_fts;
-             DROP TABLE IF EXISTS code_nodes;
-             DROP TABLE IF EXISTS code_imports;
-             DROP TABLE IF EXISTS code_edges;
-             DROP TABLE IF EXISTS notes;
-             DROP TABLE IF EXISTS files;",
-        )?;
+    // brain_semantic_meta — is preserved PURELY by being absent from this DROP batch
+    // ([DERIVED_TABLES] is a drop-list, not a keep-list — NEVER add a canonical
+    // table to it). `current` here is Some(v != SCHEMA_VERSION) or None (fresh —
+    // nothing to drop).
+    if current.is_some() {
+        for t in DERIVED_TABLES {
+            tx.execute_batch(&format!("DROP TABLE IF EXISTS {t};"))?;
+        }
     }
     tx.execute_batch(DDL)?;
     tx.execute(
@@ -198,6 +230,90 @@ mod tests {
         let spent: f64 = conn.query_row("SELECT spent_total_usd FROM brain_budget WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(spent, 0.5, "CANONICAL budget spend must survive");
         assert_eq!(count("notes"), 0, "DERIVED notes is dropped + rebuilt by the next scan");
+    }
+
+    #[test]
+    fn downgrade_rebuilds_derived_and_preserves_canonical() {
+        // ADR-010 cluster 4: an older build opening a NEWER store must not silently
+        // stamp the version down — the derived tables may carry a future schema this
+        // build's queries don't understand. They are dropped + rebuilt; canonical
+        // rows survive exactly as on an upgrade.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files(project_id,path,hash,size,fts_rowid) VALUES('p','x.rs','h',1,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO proposals(project_id,signature,action,target_id,title,detail,source,status,created_ms)
+             VALUES('p','sig','archive','n','t','d','curate','rejected',1)",
+            [],
+        )
+        .unwrap();
+        // Simulate a store written by a FUTURE build.
+        conn.execute(
+            "UPDATE brain_meta SET value=?1 WHERE key='schema_version'",
+            [(SCHEMA_VERSION + 1).to_string()],
+        )
+        .unwrap();
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+        let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(files, 0, "downgrade rebuilds derived tables");
+        let props: i64 = conn.query_row("SELECT COUNT(*) FROM proposals", [], |r| r.get(0)).unwrap();
+        assert_eq!(props, 1, "canonical rows survive a downgrade");
+        let v: String = conn
+            .query_row("SELECT value FROM brain_meta WHERE key='schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION.to_string(), "version stamped back to this build");
+    }
+
+    #[test]
+    fn unparseable_version_stamp_is_an_error_not_fresh() {
+        // ADR-010 cluster 4: a version stamp that exists but cannot be read as an
+        // integer must FAIL migrate — treating it as "fresh" would skip the derived
+        // rebuild and stamp the current version over tables of unknown shape. (The
+        // boot recovery ladder then classifies this as a corrupt cache and rebuilds.)
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute("UPDATE brain_meta SET value='not-a-number' WHERE key='schema_version'", [])
+            .unwrap();
+        assert!(migrate(&conn).is_err(), "garbage schema_version must not read as a fresh store");
+    }
+
+    #[test]
+    fn every_table_is_classified_derived_or_canonical() {
+        // The rebuild contract's completeness gate: every table the DDL creates must
+        // be EXPLICITLY classified — DERIVED (dropped + rebuilt on any version
+        // change) or CANONICAL (preserved + salvaged on corrupt-cache rebuild). An
+        // unclassified new table would silently survive upgrades with a stale schema.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .unwrap();
+        let tables: Vec<String> =
+            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        for t in &tables {
+            let classified = t == "brain_meta" // the version stamp — the migration gate itself
+                || DERIVED_TABLES.contains(&t.as_str())
+                || CANONICAL_TABLES.contains(&t.as_str())
+                // FTS5 shadow tables (code_fts_data/_idx/…) drop with their vtable.
+                || DERIVED_TABLES.iter().any(|d| t.starts_with(&format!("{d}_")));
+            assert!(
+                classified,
+                "table '{t}' must be added to DERIVED_TABLES (dropped+rebuilt on version change) \
+                 or CANONICAL_TABLES (preserved + salvaged)"
+            );
+        }
+        // Both lists must name REAL tables (a typo would silently skip a drop/salvage)…
+        for t in DERIVED_TABLES.iter().chain(CANONICAL_TABLES) {
+            assert!(tables.iter().any(|x| x == t), "listed table '{t}' does not exist in the DDL");
+        }
+        // …and never overlap.
+        for t in DERIVED_TABLES {
+            assert!(!CANONICAL_TABLES.contains(t), "'{t}' cannot be both derived and canonical");
+        }
     }
 
     #[test]
