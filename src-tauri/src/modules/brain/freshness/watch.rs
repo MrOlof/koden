@@ -69,7 +69,8 @@ fn drain_loop(
             Err(_) => return,
         };
         let mut paths: HashSet<PathBuf> = HashSet::new();
-        collect(&mut paths, first);
+        let mut reconcile = Reconcile::default();
+        collect(&mut paths, &mut reconcile, first);
 
         // Coalesce a burst: quiet-gap of DEBOUNCE, capped at MAX_WINDOW — so a
         // save-all / git pull collapses into one delta per project.
@@ -77,7 +78,7 @@ fn drain_loop(
         loop {
             let timeout = DEBOUNCE.min(deadline.saturating_duration_since(Instant::now()));
             match rx.recv_timeout(timeout) {
-                Ok(e) => collect(&mut paths, e),
+                Ok(e) => collect(&mut paths, &mut reconcile, e),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -85,19 +86,70 @@ fn drain_loop(
                 break;
             }
         }
-        if paths.is_empty() {
-            continue;
-        }
         for (project, changed) in group_by_project(&projects, paths) {
             if tx.send(BrainEvent::Fs { project, changed }).is_err() {
+                return; // worker gone
+            }
+        }
+        // Missed events (a notify error / the Rescan overflow flag) are never
+        // dropped: a targeted Rescan makes the worker re-sweep the affected
+        // project(s) — the blake3 hash-skip keeps an unchanged sweep cheap.
+        for project in reconcile.targets(&projects) {
+            log::warn!("brain: watch gap → full sweep of '{project}'");
+            if tx.send(BrainEvent::Rescan { project: Some(project) }).is_err() {
                 return; // worker gone
             }
         }
     }
 }
 
-fn collect(set: &mut HashSet<PathBuf>, ev: notify::Result<Event>) {
-    let Ok(ev) = ev else { return };
+/// Missed-event bookkeeping for one coalesce window. notify signals loss two
+/// ways — an `Err` result or the `Rescan` flag on an event — and either may or
+/// may not name paths. Pathless loss has unknown scope, so it sweeps every
+/// watched project.
+#[derive(Default)]
+struct Reconcile {
+    all: bool,
+    paths: Vec<PathBuf>,
+}
+
+impl Reconcile {
+    fn mark(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            self.all = true;
+        } else {
+            self.paths.extend_from_slice(paths);
+        }
+    }
+
+    /// Project ids needing a full sweep (longest-prefix over the roots, deduped).
+    fn targets(self, projects: &[(ProjectId, String)]) -> Vec<ProjectId> {
+        if self.all {
+            return projects.iter().map(|(id, _)| id.clone()).collect();
+        }
+        group_by_project(projects, self.paths.into_iter().collect())
+            .into_keys()
+            .collect()
+    }
+}
+
+fn collect(set: &mut HashSet<PathBuf>, reconcile: &mut Reconcile, ev: notify::Result<Event>) {
+    let ev = match ev {
+        Ok(ev) => ev,
+        Err(e) => {
+            // A watch error hides an unknown number of lost events — never drop
+            // it silently. Its paths (when present) bound the damage.
+            log::warn!("brain: watch error ({e}); scheduling reconcile");
+            reconcile.mark(&e.paths);
+            return;
+        }
+    };
+    // The Rescan flag = the OS event queue overflowed (or the backend lost
+    // track): events were dropped and must be reconciled, not ignored.
+    if ev.need_rescan() {
+        log::warn!("brain: watch overflow/rescan flagged; scheduling reconcile");
+        reconcile.mark(&ev.paths);
+    }
     // Access (reads) never change content.
     if matches!(ev.kind, EventKind::Access(_)) {
         return;
@@ -130,6 +182,38 @@ pub fn group_by_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-010 cluster 2: notify loss signals (Err results, the Rescan flag)
+    /// schedule a reconcile instead of being dropped — pathless loss sweeps
+    /// every project, pathed loss sweeps only the owning project(s).
+    #[test]
+    fn loss_signals_schedule_reconcile() {
+        let projects = vec![("p".to_string(), "/work/repo".to_string())];
+        let mut set = HashSet::new();
+
+        // Pathless watch error → unknown scope → every watched project.
+        let mut rec = Reconcile::default();
+        collect(&mut set, &mut rec, Err(notify::Error::generic("overflow")));
+        assert!(rec.all);
+        assert_eq!(rec.targets(&projects), vec!["p".to_string()]);
+
+        // Rescan-flagged event naming a path → just the owning project; the
+        // path still joins the normal delta set.
+        let mut rec = Reconcile::default();
+        let ev = Event::new(EventKind::Any)
+            .add_path(PathBuf::from("/work/repo/src/x.rs"))
+            .set_flag(notify::event::Flag::Rescan);
+        collect(&mut set, &mut rec, Ok(ev));
+        assert!(!rec.all);
+        assert!(set.contains(&PathBuf::from("/work/repo/src/x.rs")));
+        assert_eq!(rec.targets(&projects), vec!["p".to_string()]);
+
+        // An errored path OUTSIDE every project reconciles nothing.
+        let mut rec = Reconcile::default();
+        let err = notify::Error::generic("boom").add_path(PathBuf::from("/elsewhere/y.rs"));
+        collect(&mut set, &mut rec, Err(err));
+        assert!(rec.targets(&projects).is_empty());
+    }
 
     #[test]
     fn groups_by_longest_prefix_and_drops_outsiders() {

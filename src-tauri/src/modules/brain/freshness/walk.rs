@@ -22,14 +22,14 @@ const BASE_SKIP_DIRS: &[&str] = &[
     "coverage", ".venv", "venv", "vendor", "generated", ".cache", ".svelte-kit",
 ];
 
-/// True if any component of `path` is a base-skip dir. Used by the incremental
-/// watcher path, which gets absolute changed paths with no project-relative
-/// context (the full walk uses `in_skip_dir` with the root).
-pub fn under_skip_dir(path: &Path) -> bool {
-    path.components().any(|c| {
-        matches!(c, std::path::Component::Normal(os)
-            if os.to_str().is_some_and(|s| BASE_SKIP_DIRS.contains(&s)))
-    })
+/// True if any `/`-separated component of a PROJECT-RELATIVE path (as produced
+/// by the worker's `rel_path`) is a base-skip dir. Used by the incremental
+/// watcher path. Deliberately takes the RELATIVE form: checking the ABSOLUTE
+/// path would skip every update for a project that itself lives under a dir
+/// named e.g. `build/` or `vendor/` (the full walk uses `in_skip_dir` with the
+/// root for the same reason).
+pub fn rel_under_skip_dir(rel: &str) -> bool {
+    rel.split('/').any(|c| BASE_SKIP_DIRS.contains(&c))
 }
 
 fn in_skip_dir(path: &Path, root: &Path) -> bool {
@@ -134,6 +134,18 @@ fn walk_files_capped(root: &Path, cap: usize) -> Walked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-010 cluster 2: the skip gate is over PROJECT-RELATIVE components —
+    /// a skip-named dir in the part of the path ABOVE the project root (which
+    /// `rel_under_skip_dir` never sees) must not blank out updates.
+    #[test]
+    fn skip_gate_is_project_relative() {
+        assert!(rel_under_skip_dir("node_modules/pkg/index.js"));
+        assert!(rel_under_skip_dir("src/dist/bundle.js")); // nested skip dir
+        assert!(!rel_under_skip_dir("src/main.rs"));
+        assert!(!rel_under_skip_dir("distx/main.rs")); // component match, not substring
+        assert!(!rel_under_skip_dir(""));
+    }
 
     #[test]
     fn capped_walk_is_flagged_partial() {

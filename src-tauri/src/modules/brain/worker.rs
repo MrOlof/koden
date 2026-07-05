@@ -162,16 +162,21 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
         seed_registry(&app, launch_dir.as_deref());
     }
 
-    // 6. Warm population — project by project so the first is searchable early.
+    // 6. Arm the recursive watcher over each seeded project root (P1 freshness)
+    // BEFORE the warm walk: an edit made while the initial index runs fires an
+    // event that buffers in the worker channel and replays through the normal
+    // delta path once the loop starts (the blake3 hash-skip makes replay
+    // idempotent). Armed after, such edits would be missed forever — no event,
+    // hash already recorded. Held for the worker's lifetime — dropping it stops
+    // watching. Re-armed on a full Rescan so newly-registered projects get
+    // watched too.
+    let mut watcher = arm_watcher(&app, &tx);
+
+    // 6b. Warm population — project by project so the first is searchable early.
     warm_population(&app, &index);
     // Seed the review inbox with structural doctor findings (no date check yet).
     run_doctor_all(&app, &index, None);
     set_status(&app, BrainStatus::Ready);
-
-    // 6b. Arm the recursive watcher over each seeded project root (P1 freshness).
-    // Held for the worker's lifetime — dropping it stops watching. Re-armed on a
-    // full Rescan so newly-registered projects get watched too.
-    let mut watcher = arm_watcher(&app, &tx);
 
     // Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
     // restart, which is fine — dirty flags only matter while the app is open).
@@ -191,22 +196,47 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     }
                 }
             }
-            BrainEvent::Rescan { .. } => {
-                warm_population(&app, &index); // full reconcile (add/change/delete)
-                drop(watcher.take()); // drop the old watcher first → no double-watch window
-                watcher = arm_watcher(&app, &tx); // pick up any new project roots
-                if let Some(s) = app.try_state::<BrainState>() {
-                    s.registry.save_to(&cfg_path); // persist the project list
+            BrainEvent::Rescan { project } => match project {
+                // Targeted reconcile — a full blake3 sweep of ONE project (the
+                // watcher's missed-event recovery, or a single-project
+                // brain_rescan). The watched root set is unchanged, so the
+                // watcher is left alone.
+                Some(pid) => {
+                    let proj = app
+                        .try_state::<BrainState>()
+                        .and_then(|s| s.registry.projects().into_iter().find(|p| p.id == pid));
+                    match proj {
+                        Some(p) => index_project(&index, &p),
+                        None => log::debug!("brain: rescan for unknown project '{pid}' ignored"),
+                    }
                 }
-            }
+                None => {
+                    // Arm the NEW watcher (covering any newly-registered roots)
+                    // BEFORE the walk and before retiring the old one: a brief
+                    // double-watch only duplicates events (idempotent via the
+                    // hash-skip), whereas walk-then-arm misses edits made during
+                    // the walk.
+                    let old = watcher.take();
+                    watcher = arm_watcher(&app, &tx);
+                    drop(old);
+                    warm_population(&app, &index); // full reconcile (add/change/delete)
+                    if let Some(s) = app.try_state::<BrainState>() {
+                        s.registry.save_to(&cfg_path); // persist the project list
+                    }
+                }
+            },
             BrainEvent::RemoveProject { project } => {
                 if let Err(e) = index.remove_project(&project) {
                     log::warn!("brain: remove_project '{project}' prune failed ({e})");
                 } else {
                     log::info!("brain: removed project '{project}' (unregistered + pruned)");
                 }
-                drop(watcher.take());
-                watcher = arm_watcher(&app, &tx); // stop watching the removed root
+                // Arm-then-drop (same rationale as the full Rescan): the removed
+                // root stops being watched when the OLD watcher retires; its
+                // in-flight events resolve to an unregistered project and no-op.
+                let old = watcher.take();
+                watcher = arm_watcher(&app, &tx);
+                drop(old);
                 if let Some(s) = app.try_state::<BrainState>() {
                     s.registry.save_to(&cfg_path); // persist the updated project list
                 }
@@ -601,11 +631,14 @@ pub fn index_changed(
     let mut indexed = 0usize;
     let mut pruned = 0usize;
     for path in changed {
-        if walk::under_skip_dir(path) || secrets::is_denylisted_path(&to_canon(path)) {
-            continue;
-        }
         let rel = rel_path(root, path);
         if rel.is_empty() {
+            continue;
+        }
+        // Skip-dir gate on the PROJECT-RELATIVE path: an absolute-path check
+        // would zero out incremental updates for a project that itself lives
+        // under a dir named e.g. `build/` or `vendor/` (ADR-010 cluster 2).
+        if walk::rel_under_skip_dir(&rel) || secrets::is_denylisted_path(&to_canon(path)) {
             continue;
         }
         match std::fs::metadata(path) {
@@ -872,6 +905,28 @@ mod tests {
         assert!(due_for_round(true, false, now - settle, 0, now));
         // Dirty, past min-gap, an AI session just exited → fire even though not idle.
         assert!(due_for_round(true, true, now, 0, now));
+    }
+
+    /// ADR-010 cluster 2: the incremental skip-dir gate must be PROJECT-RELATIVE.
+    /// A project that itself lives under a dir named `build` still gets its
+    /// incremental updates; a `dist/` INSIDE the project stays skipped.
+    #[test]
+    fn index_changed_skip_dirs_are_project_relative() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("build").join("proj"); // root UNDER a skip-named dir
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("src").join("main.ts"), "alpha").unwrap();
+        std::fs::write(root.join("dist").join("bundle.js"), "bravo").unwrap();
+
+        let changed = vec![root.join("src").join("main.ts"), root.join("dist").join("bundle.js")];
+        let stats = index_changed(&index, "p", &root, &changed);
+        assert_eq!(stats.indexed, 1, "src file indexed despite 'build' in the ABSOLUTE path");
+        let paths = index.existing_paths("p").unwrap();
+        assert!(paths.contains(&"src/main.ts".to_string()));
+        assert!(!paths.iter().any(|p| p.starts_with("dist/")), "in-project dist stays skipped");
     }
 
     /// ADR-010: a PARTIAL walk (scan cap hit / unreadable subtree) must never feed
