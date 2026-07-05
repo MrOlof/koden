@@ -165,6 +165,14 @@ pub fn brain_build_gist(
     Some(gist::build_gist_auto(&db, &project, &name, &intent, budget.unwrap_or(800)))
 }
 
+/// Allowlist for ids spliced into a filename: `[A-Za-z0-9_-]{1,64}`. Rejects path
+/// traversal (`..`, separators) and shell metachars by construction.
+fn valid_agent_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Build the gist (cold-start-synthesized if `intent` is blank) and write it to
 /// the agent's `--append-system-prompt` file (`~/.koden/agent-<agent_id>.txt`) so
 /// a launching agent gets project context. Returns the gist for the toast.
@@ -176,6 +184,10 @@ pub fn brain_write_gist(
     agent_id: String,
     budget: Option<usize>,
 ) -> Result<Gist, String> {
+    // `agent_id` becomes a filename component under ~/.koden — reject, never sanitize.
+    if !valid_agent_id(&agent_id) {
+        return Err("invalid agent_id: expected [A-Za-z0-9_-]{1,64}".to_string());
+    }
     let db = state
         .db_path
         .read()
@@ -236,6 +248,25 @@ pub fn brain_graph(state: State<BrainState>, max_files: Option<usize>) -> store:
     let projects: Vec<(String, String)> =
         state.registry.projects().into_iter().map(|p| (p.id, p.name)).collect();
     store::graph_readonly(&db, &projects, max_files.unwrap_or(80).clamp(1, 2000)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_agent_id;
+
+    #[test]
+    fn agent_id_allowlist_rejects_traversal_and_metachars() {
+        // The shape the UI actually generates (`uid("ag")`).
+        assert!(valid_agent_id("ag-lx3k2j-a1b2c3"));
+        assert!(valid_agent_id("Agent_01"));
+        // Rejections: empty, traversal, separators, shell metachars, over-long.
+        assert!(!valid_agent_id(""));
+        assert!(!valid_agent_id("../../.ssh/authorized_keys"));
+        assert!(!valid_agent_id("..\\..\\evil"));
+        assert!(!valid_agent_id("a/b"));
+        assert!(!valid_agent_id("a b; rm -rf ~"));
+        assert!(!valid_agent_id(&"a".repeat(65)));
+    }
 }
 
 /// Structured memory notes (review inbox / cards). `project = None` = all.
