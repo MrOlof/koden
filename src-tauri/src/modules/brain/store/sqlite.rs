@@ -1493,6 +1493,68 @@ pub fn list_notes_readonly(
     list_notes_with_conn(&open_readonly(db_path)?, project)
 }
 
+/// A note as the GIST memory layer needs it — `NoteSummary`'s display fields plus
+/// the per-claim freshness-label inputs (ADR-011): `created`, the supersession
+/// edges, and anchors. All note-file-derived state (note files are indexed), so
+/// it is covered by the gist cache key's content fingerprint.
+#[derive(Clone, Debug)]
+pub struct GistNote {
+    pub id: String,
+    pub title: String,
+    pub note_type: Option<String>,
+    pub created: Option<String>,
+    pub supersedes: Option<String>,
+    pub superseded_by: Option<String>,
+    pub anchors: Vec<String>,
+}
+
+/// Notes for the gist memory layer over a caller-supplied (pinned-snapshot)
+/// connection. ORDER BY id — deterministic (the gist byte-identity gate).
+pub fn gist_notes_with_conn(
+    conn: &Connection,
+    project_id: &str,
+) -> rusqlite::Result<Vec<GistNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,title,note_type,created,supersedes,superseded_by,COALESCE(anchors,'[]')
+         FROM notes WHERE project_id=?1 ORDER BY id",
+    )?;
+    let it = stmt.query_map([project_id], |r| {
+        let anchors: Vec<String> =
+            serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default();
+        Ok(GistNote {
+            id: r.get(0)?,
+            title: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            note_type: r.get(2)?,
+            created: r.get(3)?,
+            supersedes: r.get(4)?,
+            superseded_by: r.get(5)?,
+            anchors,
+        })
+    })?;
+    let mut v = Vec::new();
+    for x in it {
+        v.push(x?);
+    }
+    Ok(v)
+}
+
+/// Temporal touch state `(accessed_at_ms, accessed_count)` of one indexed file,
+/// `None` when the path isn't indexed. Input to the gist's per-claim freshness
+/// labels (ADR-011) — covered by the gist cache key via the temporal digest.
+pub fn file_touch_with_conn(
+    conn: &Connection,
+    project_id: &str,
+    path: &str,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT accessed_at_ms, accessed_count FROM files WHERE project_id=?1 AND path=?2",
+        (project_id, path),
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    )
+    .optional()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

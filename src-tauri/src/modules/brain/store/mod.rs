@@ -10,14 +10,15 @@ pub use graph::{graph_readonly, BrainGraph};
 
 pub use sqlite::{
     budget_state_readonly, code_impact_readonly, file_count_readonly, file_count_with_conn,
-    get_symbol_readonly, librarian_config_readonly, librarian_ledger_readonly,
+    file_touch_with_conn, get_symbol_readonly, gist_notes_with_conn, librarian_config_readonly,
+    librarian_ledger_readonly,
     list_notes_readonly, list_notes_with_conn,
     list_proposals_readonly, open_readonly_snapshot, pending_proposals_readonly,
     project_fingerprint_readonly,
     project_fingerprint_with_conn,
     project_temporal_digest_with_conn, search_readonly, search_with_conn, search_with_weights,
     semantic_meta_readonly,
-    symbols_for_path_readonly, symbols_for_path_with_conn, SearchWeights, SqliteIndex,
+    symbols_for_path_readonly, symbols_for_path_with_conn, GistNote, SearchWeights, SqliteIndex,
     SEARCH_LEG_LABELS,
 };
 

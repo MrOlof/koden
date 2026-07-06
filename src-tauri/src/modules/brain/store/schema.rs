@@ -36,7 +36,13 @@
 ///     forces the rebuild that re-derives them cleanly — and rotates the gist cache
 ///     key so a gist never mixes pre- and post-anchor ranking (the byte-identity
 ///     gate holds per key).
-pub const SCHEMA_VERSION: i64 = 10;
+/// v11: no DDL change — gist LAYOUT changed (ADR-011 gist upgrades): a
+///     known-unknowns section (empty retrieval legs stated explicitly) and
+///     per-claim freshness labels on memory notes (current / possibly-stale /
+///     historical(superseded)). The bump rotates every gist cache key (see the
+///     v6 note) so one key never mixes pre- and post-layout bytes — one-time
+///     post-upgrade agent-prompt-cache miss, expected.
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"

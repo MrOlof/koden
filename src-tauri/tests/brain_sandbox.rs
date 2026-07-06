@@ -530,6 +530,92 @@ fn gist_cache_key_stable_under_concurrent_writes() {
     assert!(seen.len() >= 2, "expected to observe >1 index state, saw {}", seen.len());
 }
 
+/// ADR-011 gist upgrade 1 (known unknowns): an EMPTY retrieval leg is stated
+/// explicitly instead of silently omitted — but only over a ready, non-empty
+/// index (thin over wrong, [DP-22]), and never when every leg hit.
+#[test]
+fn gist_known_unknowns_names_empty_legs() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+
+    // Not-yet-indexed project (empty index): NO absence claims — the gist stays
+    // freshness-only, exactly as before (retrieval never ran over real state).
+    let g0 = build_gist(&db, PID, "proj", "login", 400);
+    assert!(!g0.bytes.contains("Known unknowns"), "empty index must not claim absence: {}", g0.bytes);
+
+    index_dir(&idx, PID, root);
+
+    // Code leg hits, memory leg empty → only the memory unknown is stated.
+    let g1 = build_gist(&db, PID, "proj", "login", 400);
+    assert!(g1.bytes.contains("## Known unknowns"), "{}", g1.bytes);
+    assert!(g1.bytes.contains("No memory notes in this project"), "{}", g1.bytes);
+    assert!(!g1.bytes.contains("No code hits"), "code leg hit — no false unknown: {}", g1.bytes);
+    assert!(g1.bytes.contains("## Relevant files"), "hit sections still render");
+
+    // Both legs empty → both stated; deterministic (byte-identical twice).
+    let g2a = build_gist(&db, PID, "proj", "quantumflux telemetry", 400);
+    let g2b = build_gist(&db, PID, "proj", "quantumflux telemetry", 400);
+    assert_eq!(g2a.bytes, g2b.bytes, "known-unknowns gist must stay byte-identical");
+    assert!(g2a.bytes.contains("- No code hits for \"quantumflux telemetry\"."), "{}", g2a.bytes);
+    assert!(g2a.bytes.contains("- No memory notes in this project."), "{}", g2a.bytes);
+
+    // Every leg hits → the section disappears entirely (no padding).
+    write(root, ".koden-memory/n.md", b"---\nid: n\ntype: decision\ntitle: Login approach\n---\nbody");
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    let g3 = build_gist(&db, PID, "proj", "login", 400);
+    assert!(!g3.bytes.contains("Known unknowns"), "all legs hit → no section: {}", g3.bytes);
+}
+
+/// ADR-011 gist upgrade 2 (per-claim freshness labels): a note whose ANCHORED
+/// file content-changed after the note's `created` date is marked possibly-stale;
+/// supersession edges (either direction) mark historical(superseded); everything
+/// else is current. The initial index stamp must NOT count as a code change.
+#[test]
+fn gist_note_freshness_labels() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    // n1: anchored to the login file, created long ago.
+    write(
+        root,
+        ".koden-memory/n1.md",
+        b"---\nid: n1\ntype: decision\ntitle: Auth approach\ncreated: 2020-01-01\nanchors:\n  - src/auth/login.ts\n---\nbody",
+    );
+    // n2: superseded via n3's FORWARD edge; n4: superseded via its OWN back-edge.
+    write(root, ".koden-memory/n2.md", b"---\nid: n2\ntitle: Old auth plan\n---\nbody");
+    write(root, ".koden-memory/n3.md", b"---\nid: n3\ntitle: New auth plan\nsupersedes: n2\n---\nbody");
+    write(root, ".koden-memory/n4.md", b"---\nid: n4\ntitle: Retired ADR\nsuperseded_by: n3\n---\nbody");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+
+    // Initial index: the anchor's first stamp is INDEX time, not a code change —
+    // n1 must not be flagged stale off it (else every pre-Brain note reads stale).
+    let g1 = build_gist(&db, PID, "proj", "login", 800);
+    assert!(g1.bytes.contains("- Auth approach (decision) [current]"), "{}", g1.bytes);
+    assert!(g1.bytes.contains("- Old auth plan [historical(superseded)]"), "forward edge: {}", g1.bytes);
+    assert!(g1.bytes.contains("- Retired ADR [historical(superseded)]"), "back edge: {}", g1.bytes);
+    assert!(g1.bytes.contains("- New auth plan [current]"), "{}", g1.bytes);
+
+    // A REAL content change to the anchored file after the note's created date
+    // (a live reindex, count >= 2) → possibly-stale. Still byte-stable per key.
+    std::fs::write(root.join("src/auth/login.ts"), b"export function loginHandlerV2() {}").unwrap();
+    index_changed(&idx, PID, root, &[root.join("src/auth/login.ts")]);
+    let g2 = build_gist(&db, PID, "proj", "login", 800);
+    let g3 = build_gist(&db, PID, "proj", "login", 800);
+    assert_eq!(g2.bytes, g3.bytes, "labeled gist must stay byte-identical");
+    assert!(g2.bytes.contains("- Auth approach (decision) [possibly-stale]"), "{}", g2.bytes);
+    assert!(g2.bytes.contains("- New auth plan [current]"), "unanchored note unaffected: {}", g2.bytes);
+    assert_ne!(g2.fingerprint, g1.fingerprint, "content change rotated the key");
+}
+
 fn ts_chain(root: &Path) {
     write(root, "src/a.ts", b"export function alpha() {}");
     write(root, "src/b.ts", b"import { alpha } from './a';\nexport function bravo() { alpha(); }");

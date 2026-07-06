@@ -20,8 +20,12 @@
 //! note titles are redacted at scan, symbols/paths are identifiers. No raw source
 //! is re-read here. Snippet-text enrichment is a P3 refinement.
 //!
-//! Layered + fail-open: the freshness line is always kept; relevant files + their
-//! top symbols, then top memory notes, are added while the char budget allows.
+//! Layered + fail-open: the freshness line is always kept; a known-unknowns
+//! section (ADR-011 — empty retrieval legs stated explicitly, only over a ready
+//! non-empty index) sits right after it (trimmed last-but-one); relevant files +
+//! their top symbols, then top memory notes — each carrying a per-claim
+//! freshness label (current / possibly-stale / historical(superseded)) — are
+//! added while the char budget allows.
 
 pub mod synth;
 
@@ -29,6 +33,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::modules::brain::memory::doctor::path_anchor;
 use crate::modules::brain::store;
 use crate::modules::brain::store::schema::SCHEMA_VERSION;
 
@@ -37,6 +42,9 @@ const MAX_SYMS_PER_FILE: usize = 6;
 const MAX_NOTES: usize = 8;
 /// chars-per-token heuristic ([DP-21]) — no exact cross-vendor tokenizer.
 const CHARS_PER_TOKEN: usize = 4;
+/// Char bound for the intent excerpt in the known-unknowns line (ADR-011).
+const EXCERPT_CHARS: usize = 64;
+const DAY_MS: i64 = 86_400_000;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Gist {
@@ -122,10 +130,39 @@ fn build_gist_on_conn(
     let mut out = freshness;
     let mut sources: Vec<String> = Vec::new();
 
-    // Code layer: relevant files + their top symbols.
+    // Both retrieval legs run up-front so the known-unknowns section can name
+    // exactly which came back empty (ADR-011).
     let hits = conn
         .and_then(|c| store::search_with_conn(c, Some(project_id), intent, MAX_FILES).ok())
         .unwrap_or_default();
+    let notes = conn
+        .and_then(|c| store::gist_notes_with_conn(c, project_id).ok())
+        .unwrap_or_default();
+
+    // Known-unknowns (ADR-011): an empty retrieval leg is stated explicitly so an
+    // agent can tell "the Brain looked and found nothing" from "the Brain wasn't
+    // consulted". Gated on a ready, NON-EMPTY index — an unready or empty index
+    // still yields the freshness-only gist, exactly as before (thin over wrong,
+    // [DP-22]: an absence claim is only honest when retrieval actually ran over
+    // real state). Rendered right after the always-kept freshness line, which in
+    // this sequential renderer makes it trimmed last-but-one (only the freshness
+    // line outranks it); pushed as ONE block so a tight budget can't strand a
+    // dangling header. Derives only from key-covered state (hits/notes off the
+    // pinned snapshot + the intent, all folded into the cache key) → byte-stable.
+    if conn.is_some() && file_count > 0 {
+        let mut unknowns: Vec<String> = Vec::new();
+        if hits.is_empty() && !intent.trim().is_empty() {
+            unknowns.push(format!("- No code hits for \"{}\".", intent_excerpt(intent)));
+        }
+        if notes.is_empty() {
+            unknowns.push("- No memory notes in this project.".to_string());
+        }
+        if !unknowns.is_empty() {
+            push_line(&mut out, max_chars, &format!("## Known unknowns\n{}", unknowns.join("\n")));
+        }
+    }
+
+    // Code layer: relevant files + their top symbols.
     if !hits.is_empty() && push_line(&mut out, max_chars, "## Relevant files") {
         for h in hits.iter().take(MAX_FILES) {
             let syms = conn
@@ -146,15 +183,21 @@ fn build_gist_on_conn(
         }
     }
 
-    // Memory layer: top notes (titles already redacted at scan).
-    let notes = conn
-        .and_then(|c| store::list_notes_with_conn(c, Some(project_id)).ok())
-        .unwrap_or_default();
+    // Memory layer: top notes (titles already redacted at scan), each carrying a
+    // per-claim freshness label (ADR-011) so a possibly-outdated note is visibly
+    // hedged instead of only silently downranked.
     if !notes.is_empty() && push_line(&mut out, max_chars, "## Memory") {
+        // A note is superseded via its own back-edge OR another note's forward edge.
+        let superseding: std::collections::HashSet<&str> = notes
+            .iter()
+            .filter_map(|n| n.supersedes.as_deref())
+            .filter(|s| !s.is_empty())
+            .collect();
         for n in notes.iter().take(MAX_NOTES) {
+            let label = note_freshness_label(conn, project_id, n, &superseding);
             let line = match &n.note_type {
-                Some(t) => format!("- {} ({t})", n.title),
-                None => format!("- {}", n.title),
+                Some(t) => format!("- {} ({t}) [{label}]", n.title),
+                None => format!("- {} [{label}]", n.title),
             };
             if !push_line(&mut out, max_chars, &line) {
                 break;
@@ -163,6 +206,86 @@ fn build_gist_on_conn(
     }
 
     Gist { bytes: out, fingerprint: key, sources }
+}
+
+/// Per-claim freshness label for one memory note (ADR-011): `current` /
+/// `possibly-stale` / `historical(superseded)`. CACHE-STABILITY IS THE HARD
+/// CONSTRAINT: labels derive ONLY from key-covered state — supersession edges +
+/// `created` live in the note files (indexed → the content fingerprint) and the
+/// anchors' touch state lives in `files.accessed_*` (the temporal digest) — so
+/// one cache key always renders the same bytes (the P3 byte-identity gate).
+///
+/// possibly-stale = some path anchor's file content-changed on a LATER day than
+/// the note's `created` date, observed by a live reindex (`accessed_count >= 2`:
+/// the FIRST stamp is the initial index walk, which timestamps indexing — not
+/// the code's last change — so counting it would mark every pre-Brain note stale).
+// ponytail: two deliberate ceilings. (1) `revalidate_after` is EXCLUDED from
+// labels: it compares against TODAY, so an unchanged cache key would yield
+// different bytes as wall-clock time passes — the byte-identity gate forbids
+// that. Chosen over folding a day-granularity date into the cache key (which
+// stays deterministic but busts every agent's prompt cache once per day); the
+// doctor already surfaces overdue notes as proposals. Upgrade path: fold
+// `today(day)` into the key and label from it. (2) A schema-bump rebuild resets
+// `accessed_count` to 1, forgetting prior staleness until the next real change
+// — fails toward `current`, never a false stale claim (thin over wrong).
+fn note_freshness_label(
+    conn: Option<&Connection>,
+    project_id: &str,
+    n: &store::GistNote,
+    superseding: &std::collections::HashSet<&str>,
+) -> &'static str {
+    if matches!(n.superseded_by.as_deref(), Some(s) if !s.is_empty())
+        || superseding.contains(n.id.as_str())
+    {
+        return "historical(superseded)";
+    }
+    let Some(created_ms) = n.created.as_deref().and_then(iso_date_to_epoch_ms) else {
+        return "current"; // no (parseable) created date → nothing to compare against
+    };
+    if let Some(c) = conn {
+        for a in &n.anchors {
+            let Some(p) = path_anchor(a) else { continue };
+            if let Ok(Some((touch_ms, count))) = store::file_touch_with_conn(c, project_id, &p) {
+                // Strictly after the created DAY — frontmatter dates are day-granular,
+                // so a same-day touch is not evidence the code moved past the note.
+                if count >= 2 && touch_ms >= created_ms + DAY_MS {
+                    return "possibly-stale";
+                }
+            }
+        }
+    }
+    "current"
+}
+
+/// Parse the `YYYY-MM-DD` (day-granular) prefix of an ISO date/datetime to epoch
+/// milliseconds (UTC midnight). Pure integer civil-date arithmetic
+/// (days-from-civil) — deterministic, no wall clock, no date dependency.
+fn iso_date_to_epoch_ms(s: &str) -> Option<i64> {
+    let date = s.trim().split(['T', ' ']).next().unwrap_or("");
+    let mut it = date.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if !(1..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * DAY_MS)
+}
+
+/// Deterministic bounded excerpt of the intent for the known-unknowns line —
+/// synthesized cold-start intents (project name + note titles) can run long.
+fn intent_excerpt(intent: &str) -> String {
+    let t = intent.trim();
+    if t.chars().count() <= EXCERPT_CHARS {
+        return t.to_string();
+    }
+    let cut: String = t.chars().take(EXCERPT_CHARS).collect();
+    format!("{}…", cut.trim_end())
 }
 
 /// Build the gist (cold-start-synthesized if `intent` is blank) and write its
@@ -193,5 +316,43 @@ fn push_line(out: &mut String, max_chars: usize, line: &str) -> bool {
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{intent_excerpt, iso_date_to_epoch_ms, DAY_MS};
+
+    /// The label comparison hinges on this pure date math — pin its anchor points
+    /// (epoch, day step, leap-day step, datetime tolerance, garbage → None).
+    #[test]
+    fn iso_date_math_is_correct_and_tolerant() {
+        assert_eq!(iso_date_to_epoch_ms("1970-01-01"), Some(0));
+        assert_eq!(iso_date_to_epoch_ms("1970-01-02"), Some(DAY_MS));
+        // Consecutive days differ by exactly one day, across a leap day.
+        assert_eq!(
+            iso_date_to_epoch_ms("2000-03-01").unwrap() - iso_date_to_epoch_ms("2000-02-29").unwrap(),
+            DAY_MS
+        );
+        // A full ISO datetime parses by its date prefix (day granularity).
+        assert_eq!(
+            iso_date_to_epoch_ms("2026-06-20T12:34:56Z"),
+            iso_date_to_epoch_ms("2026-06-20")
+        );
+        // Ordering sanity for the actual comparison the label uses.
+        assert!(iso_date_to_epoch_ms("2026-06-21") > iso_date_to_epoch_ms("2026-06-20"));
+        for bad in ["", "yesterday", "2026-13-01", "2026-00-10", "2026-01-32", "20260620"] {
+            assert_eq!(iso_date_to_epoch_ms(bad), None, "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn intent_excerpt_is_bounded_and_stable() {
+        assert_eq!(intent_excerpt("  login flow  "), "login flow");
+        let long = "x".repeat(200);
+        let e = intent_excerpt(&long);
+        assert!(e.chars().count() <= super::EXCERPT_CHARS + 1, "bounded: {}", e.len());
+        assert!(e.ends_with('…'));
+        assert_eq!(intent_excerpt(&long), e, "deterministic");
     }
 }

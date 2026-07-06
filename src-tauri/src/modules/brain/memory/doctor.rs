@@ -41,7 +41,7 @@ pub struct Finding {
 /// anchor (`mod::fn`, `path#sym`) — those are validated by the AST graph in P2,
 /// not here. Strips a leading `./` and a trailing `:line` so `./a/b.rs:42`
 /// validates against the indexed `a/b.rs` instead of false-flagging.
-fn path_anchor(anchor: &str) -> Option<String> {
+pub(crate) fn path_anchor(anchor: &str) -> Option<String> {
     if anchor.contains("::") || anchor.contains('#') || !anchor.contains('/') {
         return None;
     }
