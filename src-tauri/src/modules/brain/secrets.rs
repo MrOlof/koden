@@ -4,20 +4,33 @@
 //! Two barriers, both applied before any content is tokenized or stored. First, a
 //! file denylist: whole files matching known credential patterns are skipped
 //! entirely (never read into the index). Second, content redaction: per line,
-//! three detectors replace the secret span with `REDACTED` — (a) known provider
+//! four detectors replace the secret span with `REDACTED` — (a) known provider
 //! token prefixes (sk-, ghp_, AKIA, JWT, PEM); (b) secret-named assignments
 //! (`password = "..."`, `api_key: ...`), whose whole value is redacted regardless
-//! of shape (catches short/low-entropy and punctuation-split secrets); and (c)
+//! of shape (catches short/low-entropy and punctuation-split secrets); (c)
 //! high-entropy mixed-alphanumeric tokens (>=16 chars), excluding git-SHA/hex,
-//! UUIDs, and path/URL/version shapes so legitimate searchable content survives.
+//! UUIDs, and path/URL/version shapes so legitimate searchable content survives;
+//! and (d) PEM block bodies: after any line CONTAINING a `-----BEGIN ...-----`
+//! marker (bare, or sharing the line with an assignment/quote — inline PEMs in
+//! code are nearly always string literals), every body line — pure
+//! base64-alphabet, or a QUOTED concat fragment (`"...\n" +` in Java/C#/JS,
+//! adjacent C literals, Python implicit concat) — is redacted WHOLE until a
+//! line containing `-----END` (itself re-checked for a same-line `-----BEGIN`
+//! of a NEXT block, the concatenated-bundle shape) — `/`- and `=`-split
+//! key-body shards would otherwise fragment below (c)'s length floor (the leak
+//! the 2026-07-05 index-layer probe reproduced; its reviews confirmed the
+//! assignment-line, quoted-concat, and bundle variants).
 //!
 //! `.gitignore`/`.kodenignore` are honored upstream by the `ignore` walker; this
 //! is the hardcoded base denylist that holds even for un-ignored files. Policy is
 //! conservative-by-design ("if uncertain, treat as secret"). Known, documented
 //! residual gaps (the honesty rule, BUILD-PROMPT §13.30): a bare in-code secret
-//! that is pure-hex, or split by `/`, and is NOT assigned to a secret-named key,
-//! may survive content redaction — the file denylist, `.gitignore`, and (future)
-//! the visible "excluded N as secret-like" override are the backstops for those.
+//! that is pure-hex, or split by `/` outside an open PEM block — since multi-line
+//! literals now open the block even when the marker shares the assignment line,
+//! that means a truly single-line `\n`-escaped PEM literal (BEGIN and END on one
+//! physical line never open the block) — and is NOT assigned to a secret-named
+//! key, may survive content redaction — the file denylist, `.gitignore`, and
+//! (future) the visible "excluded N as secret-like" override are the backstops.
 //!
 //! ponytail: regex-free (no new dep) — char-class scanning is enough here.
 
@@ -127,6 +140,64 @@ fn shannon_entropy(s: &str) -> f64 {
 /// impossible to distinguish a path from a base64 blob).
 fn is_candidate_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+')
+}
+
+/// Detector (d) entry: the line CONTAINS a full `-----BEGIN <LABEL>-----`
+/// marker. Matching bare marker lines only (the pre-review behavior) missed the
+/// most common real-world inline-PEM shape — a multi-line raw-string/template
+/// literal whose marker shares the line with the assignment (`` const k =
+/// `-----BEGIN ...` ``). Conservative-by-design: a quoted marker in parser code
+/// also opens the block; the accepted cost is bounded to whole-line redaction of
+/// FULL base64-alphabet lines until a `-----END` (normal code keeps flowing
+/// through — see the quoted-marker test). A `-----END` after the BEGIN on the
+/// SAME line (single-line `\n`-escaped literal — the documented residual gap)
+/// must NOT open the block, else stale state would blank unrelated later lines.
+fn opens_pem_block(line: &str) -> bool {
+    match line.find("-----BEGIN") {
+        Some(pos) => {
+            let rest = &line[pos + "-----BEGIN".len()..];
+            rest.contains("-----") && !rest.contains("-----END")
+        }
+        None => false,
+    }
+}
+
+/// Detector (d) body: inside a PEM block, a line made solely of base64-alphabet
+/// chars is key material. Redacted WHOLE — its `/`-split shards are each below
+/// (c)'s 16-char floor, which is exactly how the old gap leaked.
+fn is_pem_body_line(trimmed: &str) -> bool {
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+}
+
+/// Detector (d) body, quoted-concat variant: string-CONCATENATION inline PEMs
+/// (mandatory in Java/C/C++, common in C#/Python/older JS) wrap each body line
+/// in quote + `\n` escape + concat punctuation — none of which are base64
+/// chars — so `is_pem_body_line` misses them and the `/`-split shards fall
+/// below (c)'s 16-char floor (the 2026-07-05 fix's review reproduced the
+/// leak). Inside an open block, accept a line that is exactly ONE quoted
+/// literal whose interior is base64-alphabet (plus `\` escapes), followed only
+/// by concat/terminator punctuation (`+` `,` `;` `)`, line-continuation `\`).
+/// Assignment/code lines don't START with a quote, so normal code inside an
+/// over-opened block keeps flowing through (see the quoted-marker test).
+fn is_quoted_pem_body_line(trimmed: &str) -> bool {
+    let Some(quote @ ('"' | '\'')) = trimmed.chars().next() else {
+        return false;
+    };
+    let rest = &trimmed[1..];
+    let Some(close) = rest.rfind(quote) else {
+        return false;
+    };
+    let (interior, suffix) = (&rest[..close], &rest[close + 1..]);
+    interior.chars().any(|c| c.is_ascii_alphanumeric())
+        && interior
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '\\'))
+        && suffix
+            .chars()
+            .all(|c| matches!(c, ' ' | '\t' | '+' | ',' | ';' | ')' | '\\'))
 }
 
 fn is_uuid_shaped(s: &str) -> bool {
@@ -277,10 +348,41 @@ fn redact_candidates(s: &str) -> (String, usize) {
 
 /// Redact secret-shaped content. Returns `(redacted, count)`. Runs before
 /// tokenization so secrets never reach the FTS index, AST graph, memory, or gist.
+/// Deterministic (a pure function of `content`), so identical bytes still map to
+/// identical redacted text and the gist byte-identity gate ([DP-12]) is unmoved.
 pub fn redact(content: &str) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut count = 0usize;
+    // Detector (d) block state. On an unclosed BEGIN it persists to EOF, but only
+    // full base64-alphabet lines are affected — normal prose/code after a stray
+    // marker keeps flowing through the per-line detectors untouched.
+    let mut in_pem = false;
     for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if in_pem {
+            // `contains`, not `starts_with`: the END of an inline literal often
+            // carries trailing code (`-----END X-----`;`) or leading quotes.
+            if trimmed.contains("-----END") {
+                // Re-evaluate entry after exit: a concatenated bundle missing the
+                // interior newline CLOSES one block and OPENS the next on the same
+                // physical line (`-----END X----------BEGIN Y-----`); gating entry
+                // behind `else` leaked the second block's body. The marker line
+                // itself still falls through to the normal passes.
+                in_pem = opens_pem_block(trimmed);
+            } else if is_pem_body_line(trimmed) || is_quoted_pem_body_line(trimmed) {
+                // Whole-line redaction, preserving surrounding whitespace/newline
+                // (trim boundaries are char boundaries, so slicing is safe).
+                out.push_str(&line[..line.len() - line.trim_start().len()]);
+                out.push_str("REDACTED");
+                out.push_str(&line[line.trim_end().len()..]);
+                count += 1;
+                continue;
+            }
+            // Non-body lines (e.g. `Proc-Type:` headers in encrypted PEM) fall
+            // through to the normal passes; the block stays open until `-----END`.
+        } else if opens_pem_block(trimmed) {
+            in_pem = true; // the marker token itself is redacted by detector (a)
+        }
         let (keyed, kn) = redact_keyed_values(line);
         let (scanned, cn) = redact_candidates(&keyed);
         count += kn + cn;
@@ -351,6 +453,173 @@ mod tests {
         assert!(!r.contains("wJalrXUtnFEMI"), "Azure key leaked: {r}");
         assert!(r.contains("AccountKey=REDACTED"), "whole value redacted: {r}");
         assert!(r.contains("AccountName=mystore"), "non-secret segment preserved: {r}");
+    }
+
+    /// Index-layer probe 2026-07-05: the old documented "split by `/`" gap. A
+    /// realistic PEM body line fragments at every `/` into sub-16-char shards
+    /// that duck detector (c)'s length floor. Detector (d) now redacts every
+    /// base64-alphabet line inside a BEGIN/END block whole.
+    #[test]
+    fn redacts_slash_fragmented_pem_block_body() {
+        let src = "fn material() {}\n\
+                   -----BEGIN RSA PRIVATE KEY-----\n\
+                   WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
+                   MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8c\n\
+                   -----END RSA PRIVATE KEY-----\n\
+                   fn after() {}\n";
+        let (r, n) = redact(src);
+        assert!(n >= 2, "expected both body lines redacted: {r}");
+        for shard in [
+            "WqZx83Ky", "VnPb27Jm", "HcQf94Dw", "LqNs61Bu", "KvYw52Ez", "PjLm73Nq", "XrWt84Uz",
+        ] {
+            assert!(!r.contains(shard), "PEM shard leaked: {shard} in {r}");
+        }
+        assert!(!r.contains("MIIEvQ"), "clean body line leaked: {r}");
+        // Redaction stays surgical: code around the block survives, and the
+        // block state exits at -----END (the trailing line is untouched).
+        assert!(r.contains("fn material() {}"), "{r}");
+        assert!(r.contains("fn after() {}"), "{r}");
+    }
+
+    /// Encrypted-PEM headers (`Proc-Type:`/`DEK-Info:`) between BEGIN and the
+    /// body must not close the block — the body after them is still redacted.
+    #[test]
+    fn pem_block_survives_encryption_headers() {
+        let src = "-----BEGIN RSA PRIVATE KEY-----\n\
+                   Proc-Type: 4,ENCRYPTED\n\
+                   DEK-Info: AES-128-CBC,ABCD\n\
+                   \n\
+                   WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
+                   -----END RSA PRIVATE KEY-----\n";
+        let (r, _) = redact(src);
+        assert!(!r.contains("WqZx83Ky"), "body after headers leaked: {r}");
+        assert!(r.contains("Proc-Type"), "header line wrongly blanked: {r}");
+    }
+
+    /// A QUOTED marker now opens the block too (conservative-by-design — inline
+    /// PEMs live inside string literals, so quote-stripping the entry check is
+    /// exactly what leaked; see the assignment-line test). The accepted cost is
+    /// bounded: while the block is open only FULL base64-alphabet lines are
+    /// blanked, so normal code keeps flowing through, and a quoted `-----END`
+    /// closes the block again.
+    #[test]
+    fn quoted_pem_marker_over_redacts_only_base64_lines() {
+        let src = "const HEADER = \"-----BEGIN CERTIFICATE-----\";\n\
+                   let route = \"api/v0cfg/get\";\n\
+                   const FOOTER = \"-----END CERTIFICATE-----\";\n\
+                   ok\n";
+        let (r, _) = redact(src);
+        assert!(r.contains("api/v0cfg/get"), "code inside open block lost: {r}");
+        assert!(r.contains("ok\n"), "all-alnum line after quoted END lost: {r}");
+    }
+
+    /// Review of the 2026-07-05 fix: the most common real-world inline-PEM shape
+    /// puts the BEGIN marker on the ASSIGNMENT line of a multi-line raw-string /
+    /// template literal (JS/TS backtick, Go raw string). The block must open
+    /// anyway so the `/`-fragmented body is redacted whole — detector (b) only
+    /// covers the assignment line itself, and each `/`-split shard is under
+    /// (c)'s 16-char floor. The Go case uses a non-secret-named variable, so it
+    /// proves detector (d) alone protects the body.
+    #[test]
+    fn pem_block_opens_when_marker_shares_the_assignment_line() {
+        let js = "const PRIVATE_KEY = `-----BEGIN RSA PRIVATE KEY-----\n\
+                  WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
+                  -----END RSA PRIVATE KEY-----`;\n\
+                  export function afterward() {}\n";
+        let go = "var pemData = `-----BEGIN RSA PRIVATE KEY-----\n\
+                  WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
+                  -----END RSA PRIVATE KEY-----`\n\
+                  func afterward() {}\n";
+        for src in [js, go] {
+            let (r, n) = redact(src);
+            assert!(n >= 1, "expected body redaction: {r}");
+            for shard in [
+                "WqZx83Ky", "VnPb27Jm", "HcQf94Dw", "LqNs61Bu", "KvYw52Ez", "PjLm73Nq",
+                "XrWt84Uz",
+            ] {
+                assert!(!r.contains(shard), "PEM shard leaked: {shard} in {r}");
+            }
+            // the inline -----END (with trailing `;` / backtick) closes the
+            // block: code after the literal survives
+            assert!(r.contains("afterward"), "code after the literal lost: {r}");
+        }
+    }
+
+    /// Review round 2 of the 2026-07-05 fix: the string-CONCATENATION inline-PEM
+    /// encoding (mandatory in Java/C/C++, common in C#/Python/older JS) wraps
+    /// every body line in quotes + `\n` escape + concat punctuation — none of
+    /// which are base64-alphabet chars — so the pure-base64 body predicate
+    /// missed them and each `/`-split shard fell below (c)'s 16-char floor.
+    /// Inside an open block a quoted concat literal is a body line too. The
+    /// assignment keys are deliberately NOT secret-named, so detector (d) alone
+    /// must protect the body.
+    #[test]
+    fn pem_block_redacts_quoted_concat_body_lines() {
+        // Java `+` concat (also C# / older JS string building).
+        let java = "String pemMaterial = \"-----BEGIN RSA PRIVATE KEY-----\\n\" +\n\
+                    \"WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\\n\" +\n\
+                    \"-----END RSA PRIVATE KEY-----\\n\";\n\
+                    void afterward() {}\n";
+        // C adjacent string literals (no operator between fragments).
+        let c = "const char *pem =\n\
+                 \"-----BEGIN RSA PRIVATE KEY-----\\n\"\n\
+                 \"WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\\n\"\n\
+                 \"-----END RSA PRIVATE KEY-----\\n\";\n\
+                 void afterward(void) {}\n";
+        // Python parenthesized implicit concat.
+        let py = "PEM_MATERIAL = (\n\
+                  \"-----BEGIN RSA PRIVATE KEY-----\\n\"\n\
+                  \"WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\\n\"\n\
+                  \"-----END RSA PRIVATE KEY-----\\n\"\n\
+                  )\n\
+                  def afterward(): pass\n";
+        for src in [java, c, py] {
+            let (r, n) = redact(src);
+            assert!(n >= 1, "expected quoted body redaction: {r}");
+            for shard in [
+                "WqZx83Ky", "VnPb27Jm", "HcQf94Dw", "LqNs61Bu", "KvYw52Ez", "PjLm73Nq",
+                "XrWt84Uz",
+            ] {
+                assert!(!r.contains(shard), "PEM shard leaked: {shard} in {r}");
+            }
+            // the quoted -----END fragment closes the block: code after survives
+            assert!(r.contains("afterward"), "code after the literal lost: {r}");
+        }
+    }
+
+    /// Review round 2 of the 2026-07-05 fix: a concatenated bundle missing the
+    /// interior newline CLOSES one block and OPENS the next on the SAME physical
+    /// line (`cat a.pem b.pem` output pasted into a code file or heredoc). Entry
+    /// must be re-evaluated after exit — gating it behind `else` left the second
+    /// block closed and leaked its `/`-split body shards.
+    #[test]
+    fn end_and_begin_on_one_line_reopens_the_block() {
+        let src = "-----BEGIN CERTIFICATE-----\n\
+                   MIIBcertBody47AaZzQqRrTt\n\
+                   -----END CERTIFICATE----------BEGIN RSA PRIVATE KEY-----\n\
+                   WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
+                   -----END RSA PRIVATE KEY-----\n\
+                   fn after() {}\n";
+        let (r, _) = redact(src);
+        assert!(!r.contains("MIIBcert"), "first-block body leaked: {r}");
+        for shard in [
+            "WqZx83Ky", "VnPb27Jm", "HcQf94Dw", "LqNs61Bu", "KvYw52Ez", "PjLm73Nq", "XrWt84Uz",
+        ] {
+            assert!(!r.contains(shard), "second-block shard leaked: {shard} in {r}");
+        }
+        // the second -----END still closes the block: trailing code survives
+        assert!(r.contains("fn after() {}"), "{r}");
+    }
+
+    /// BEGIN and END on the SAME physical line (the single-line `\n`-escaped
+    /// literal — still the documented residual gap for its own content) must NOT
+    /// open the block: stale state would blank unrelated all-alnum lines to EOF.
+    #[test]
+    fn same_line_begin_end_does_not_poison_block_state() {
+        let src = "const K = \"-----BEGIN X-----\\nzz\\n-----END X-----\";\n\
+                   done\n";
+        let (r, _) = redact(src);
+        assert!(r.contains("done"), "block left open past same-line BEGIN/END: {r}");
     }
 
     #[test]
