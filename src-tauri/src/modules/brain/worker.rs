@@ -31,12 +31,12 @@ const TICK_SECS: u64 = 60;
 /// count and NO fixed clock — the digest-hash gate inside [reflect::reflect_auto] is
 /// the real "is there anything new" signal and keeps an unchanged round at $0; these
 /// only pick the *moment*. ponytail: fixed intervals; lift to user settings to tune.
-const LIBRARIAN_IDLE_SETTLE_MS: i64 = 3 * 60 * 1000;
-const LIBRARIAN_MIN_GAP_MS: i64 = 5 * 60 * 1000;
+pub const LIBRARIAN_IDLE_SETTLE_MS: i64 = 3 * 60 * 1000;
+pub const LIBRARIAN_MIN_GAP_MS: i64 = 5 * 60 * 1000;
 /// Paid-retry policy (ADR-010 cluster 5): after this many CONSECUTIVE failed paid
 /// rounds the project stops re-arming itself — only a NEW content change (an Fs
 /// event setting `dirty`) buys another attempt.
-const LIBRARIAN_MAX_CONSEC_FAILURES: u32 = 3;
+pub const LIBRARIAN_MAX_CONSEC_FAILURES: u32 = 3;
 /// Backoff clamp: the anti-hammer gap doubles per consecutive failure, capped at
 /// `MIN_GAP << 4` (5 → 10 → 20 → 40 → 80 min).
 const LIBRARIAN_BACKOFF_MAX_SHIFT: u32 = 4;
@@ -412,9 +412,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         // Record the change (dirty + when). The Librarian settles in
                         // after a quiet spell, deciding via the digest hash whether
                         // there's actually anything new to reflect on.
-                        let st = lib_state.entry(project.clone()).or_default();
-                        st.dirty = true;
-                        st.last_change_ms = now_epoch_ms();
+                        note_content_change(lib_state.entry(project.clone()).or_default(), now_epoch_ms());
                     }
                 }
             }
@@ -781,22 +779,33 @@ pub fn index_changed(
 }
 
 /// Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
-/// restart, fine — only matters while the app is open).
+/// restart, fine — only matters while the app is open). `pub` (like [index_dir])
+/// so the `tests/` integration driver can exercise the REAL retry policy through
+/// [librarian_round_step] — not part of any stable surface.
 #[derive(Default)]
-struct LibrarianAuto {
+pub struct LibrarianAuto {
     /// Something was indexed/pruned here since the last round.
-    dirty: bool,
+    pub dirty: bool,
     /// An AI session exited here since the last round — a "settle now" boundary.
-    boundary: bool,
+    pub boundary: bool,
     /// Epoch ms of the last indexed change (drives the idle-settle wait).
-    last_change_ms: i64,
+    pub last_change_ms: i64,
     /// Epoch ms of the last round (drives the anti-hammer min-gap).
-    last_pass_ms: i64,
+    pub last_pass_ms: i64,
     /// Hash of the last digest we reflected on (drives the delta gate).
-    digest_hash: Option<String>,
+    pub digest_hash: Option<String>,
     /// CONSECUTIVE failed PAID rounds (CallFailed/InvalidOutput) since the last
     /// success — drives the backoff + the stop-re-arming cap (ADR-010 cluster 5).
-    fail_streak: u32,
+    pub fail_streak: u32,
+}
+
+/// Fold one indexed content change into the state — the Fs-handler half of the
+/// retry policy: re-arm the round and restart the idle-settle clock. The fail
+/// streak is deliberately NOT reset here — only a successful round clears it —
+/// so a still-failing provider keeps its widened backoff gap even as edits land.
+pub fn note_content_change(st: &mut LibrarianAuto, now_ms: i64) {
+    st.dirty = true;
+    st.last_change_ms = now_ms;
 }
 
 /// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
@@ -859,6 +868,34 @@ fn apply_round_outcome(
     }
 }
 
+/// One project's full round step — the production sequencing (ADR-010 cluster 5):
+/// gate via [due_for_round], consume the dirty/boundary flags, stamp `last_pass_ms`
+/// (the next round is gated regardless of outcome), run exactly ONE reflect attempt
+/// via `run` (handed the previous digest hash for the delta gate), and fold the
+/// outcome back via [apply_round_outcome]. Returns `None` when no attempt fired
+/// this tick (not due, or parked past the failure cap). Extracted from
+/// [run_librarian_rounds] — which MUST keep delegating here — so the `tests/`
+/// integration driver exercises the identical decision path without an AppHandle.
+pub fn librarian_round_step<F>(
+    st: &mut LibrarianAuto,
+    now_ms: i64,
+    run: F,
+) -> Option<reflect::ReflectOutcome>
+where
+    F: FnOnce(Option<&str>) -> (reflect::ReflectOutcome, Option<String>),
+{
+    if !due_for_round(st.dirty, st.boundary, st.last_change_ms, st.last_pass_ms, now_ms, st.fail_streak) {
+        return None;
+    }
+    st.dirty = false;
+    st.boundary = false;
+    st.last_pass_ms = now_ms; // gate the next round regardless of outcome
+    let prev = st.digest_hash.clone();
+    let (outcome, digest_hash) = run(prev.as_deref());
+    apply_round_outcome(st, &outcome.reason, digest_hash);
+    Some(outcome)
+}
+
 /// One Librarian sweep (driven by the periodic Tick): for each project that changed
 /// since its last round and is past the round interval, run ONE delta-gated reflect.
 /// End-to-end safe: [reflect::reflect_auto] no-ops (Disabled) without a budget
@@ -875,16 +912,11 @@ fn run_librarian_rounds(
     // visible to autonomous rounds, not only to manual clicks (ADR-010 cluster 5).
     let today = utc_date_ymd(now_ms);
     for (project_id, st) in state.iter_mut() {
-        if !due_for_round(st.dirty, st.boundary, st.last_change_ms, st.last_pass_ms, now_ms, st.fail_streak) {
+        let Some(outcome) = librarian_round_step(st, now_ms, |prev| {
+            reflect::reflect_auto(app, index, project_id, Some(&today), now_ms, prev)
+        }) else {
             continue;
-        }
-        st.dirty = false;
-        st.boundary = false;
-        st.last_pass_ms = now_ms; // gate the next round regardless of outcome
-        let prev = st.digest_hash.clone();
-        let (outcome, digest_hash) =
-            reflect::reflect_auto(app, index, project_id, Some(&today), now_ms, prev.as_deref());
-        apply_round_outcome(st, &outcome.reason, digest_hash);
+        };
         match &outcome.reason {
             reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
                 log::info!(
