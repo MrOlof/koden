@@ -31,7 +31,7 @@ pub fn spent_total(conn: &Connection) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Set the monthly ceiling (the wizard / settings write). `0.0` disables reflect.
+/// Set the cumulative ceiling (the wizard / settings write). `0.0` disables reflect.
 pub fn set_ceiling(conn: &Connection, ceiling_usd: f64, now: i64) -> Result<(), String> {
     conn.execute(
         "UPDATE brain_budget SET ceiling_usd=?1, updated_at=?2 WHERE id=1",

@@ -16,7 +16,9 @@ use koden_lib::modules::brain::memory::doctor::run_doctor;
 use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::curate::contradiction::curate_contradictions_with_client;
 use koden_lib::modules::brain::curate::{curate_act_only, curate_with_client, CurationReason};
-use koden_lib::modules::brain::memory::proposal::ProposalAction;
+use koden_lib::modules::brain::memory::proposal::{
+    proposal_signature, MemoryProposal, ProposalAction,
+};
 use koden_lib::modules::brain::reflect::{
     reflect_auto_with_client, reflect_with_client, ReflectClient, ReflectConfig, ReflectReason,
     ReflectResponse,
@@ -842,6 +844,50 @@ fn reflect_call_failure_charges_estimate() {
     assert_eq!(idx.sweep_orphaned_reservations(2000).unwrap(), 0, "failure path reconciled the reservation");
 }
 
+/// ADR-010 cluster 5: an error the provider demonstrably did NOT bill (a 4xx
+/// rejection, e.g. a bad request) must release the reservation at $0 — not burn
+/// the estimate on every retry of a call that never ran.
+#[test]
+fn reflect_http_4xx_charges_nothing() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let fake = FakeClient::failing("openai-compat http 400");
+    let out = reflect_with_client(&idx, &fake, &ReflectConfig::default(), PID, None, 1000);
+    assert!(matches!(out.reason, ReflectReason::CallFailed(_)), "{:?}", out.reason);
+    assert_eq!(out.spent_usd, 0.0, "4xx = provider billed nothing");
+    assert_eq!(idx.budget_state().1, 0.0, "no spend folded");
+    assert_eq!(fake.calls(), 1);
+    assert_eq!(idx.sweep_orphaned_reservations(2000).unwrap(), 0, "reservation released, not stranded");
+}
+
+/// ADR-010 cluster 5: InvalidOutput is PAID — the digest hash must still come back
+/// so the caller can pin it: the byte-identical digest is then skipped (Unchanged,
+/// $0, zero requests) instead of being re-paid every round.
+#[test]
+fn reflect_auto_invalid_output_hash_prevents_repay() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_db, idx) = index_with_note(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+
+    let fake1 = FakeClient::ok("not json at all", 1000, 200);
+    let (out1, h1) =
+        reflect_auto_with_client(&idx, &fake1, &ReflectConfig::default(), PID, None, 1000, None);
+    assert!(matches!(out1.reason, ReflectReason::InvalidOutput), "{:?}", out1.reason);
+    let h1 = h1.expect("digest hash returned on InvalidOutput (it was paid for)");
+    let spent1 = idx.budget_state().1;
+    assert!(spent1 > 0.0, "InvalidOutput was charged");
+
+    let fake2 = FakeClient::ok("not json at all", 1000, 200);
+    let (out2, _) =
+        reflect_auto_with_client(&idx, &fake2, &ReflectConfig::default(), PID, None, 2000, Some(&h1));
+    assert!(matches!(out2.reason, ReflectReason::Unchanged), "{:?}", out2.reason);
+    assert_eq!(fake2.calls(), 0, "identical digest never re-paid");
+    assert_eq!(idx.budget_state().1, spent1, "no additional spend");
+}
+
 /// Re-running reflect on the same corpus + same output enqueues NOTHING new
 /// (dedup by proposal signature) — but still makes the call + charges.
 #[test]
@@ -1048,6 +1094,138 @@ fn curate_zero_usage_charges_estimate() {
     assert_eq!(out.escalated, 1);
     assert!(out.spent_usd > 0.0, "0/0 usage must floor to the estimate, not $0");
     assert!((idx.budget_state().1 - out.spent_usd).abs() < 1e-9);
+}
+
+/// ADR-010 cluster 5: the escalate band checks pending-dedup + reject-signatures
+/// BEFORE the paid call (mirroring the ACT band's order). A note already in the
+/// review inbox — and later one whose every graded outcome was declined — costs $0.
+#[test]
+fn curate_escalation_skips_pending_and_rejected_before_paying() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (db, idx) = curate_fixture(work.path(), store.path());
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+    let verdict = r#"{"classification":"obsolete","action":"supersede","confidence":"high","reason":"replaced"}"#;
+
+    // Round 1: 'old' is judged once → a pending Supersede proposal.
+    let fake1 = FakeClient::ok(verdict, 1000, 200);
+    let out1 = curate_with_client(&idx, &fake1, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert_eq!(out1.escalated, 1);
+    assert_eq!(fake1.calls(), 1);
+    let spent1 = idx.budget_state().1;
+
+    // Round 2: 'old' already awaits review → pending-dedup skips the paid call.
+    let fake2 = FakeClient::ok(verdict, 1000, 200);
+    let out2 = curate_with_client(&idx, &fake2, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert_eq!(fake2.calls(), 0, "pending proposal → no paid re-judgment");
+    assert_eq!(out2.escalated, 0);
+    assert_eq!(idx.budget_state().1, spent1, "no spend movement");
+
+    // The human declines the Supersede — and (via other rounds) the remaining
+    // graded outcomes for 'old' — so NO verdict could enqueue anything.
+    let pending = list_proposals_readonly(&db, Some(PID)).unwrap();
+    let sup = pending.iter().find(|p| p.target_id.as_deref() == Some("old")).unwrap();
+    idx.resolve_proposal(PID, &sup.signature, true).unwrap();
+    for action in [ProposalAction::Archive, ProposalAction::Update] {
+        let verb = if action == ProposalAction::Archive { "Archive" } else { "Update" };
+        let title = format!("{verb} stale note 'old'");
+        let p = MemoryProposal {
+            project: PID.into(),
+            signature: proposal_signature(action, Some("old"), &title),
+            action,
+            target_id: Some("old".into()),
+            title,
+            detail: "x".into(),
+            source: "curate".into(),
+            status: "pending".into(),
+        };
+        assert!(idx.insert_proposal(PID, &p, 20).unwrap());
+        idx.resolve_proposal(PID, &p.signature, true).unwrap();
+    }
+
+    // Round 3: every possible outcome is rejected → still no paid call.
+    let fake3 = FakeClient::ok(verdict, 1000, 200);
+    let out3 = curate_with_client(&idx, &fake3, &ReflectConfig::default(), PID, Some("2026-01-01"), 10);
+    assert_eq!(fake3.calls(), 0, "fully-rejected note → no paid re-judgment");
+    assert_eq!(out3.escalated, 0);
+    assert_eq!(idx.budget_state().1, spent1, "a fully-declined note never re-charges");
+}
+
+/// ADR-010 cluster 5: a co-anchored pair whose contradiction flag is already
+/// queued — or was declined by the human — is skipped BEFORE reserving/paying.
+#[test]
+fn contradiction_rejected_pair_not_recharged() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth.rs", b"pub fn auth() {}");
+    write(root, ".koden-memory/old.md", b"---\nid: old\ntype: decision\ntitle: Auth via sessions\nanchors:\n  - src/auth.rs\n---\nbody\n");
+    write(root, ".koden-memory/new.md", b"---\nid: new\ntype: decision\ntitle: Auth via JWT\nanchors:\n  - src/auth.rs\n---\nbody\n");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+
+    // Round 1: judged once, 'old' flagged (pending).
+    let fake1 = FakeClient::ok(r#"{"contradicts":true,"stale_id":"old","reason":"sessions vs JWT"}"#, 100, 100);
+    let out1 = curate_contradictions_with_client(&idx, &fake1, &ReflectConfig::default(), PID, 10);
+    assert_eq!(out1.escalated, 1);
+    assert_eq!(fake1.calls(), 1);
+    let spent1 = idx.budget_state().1;
+
+    // Round 2: the flag is still pending → the pair is not re-paid.
+    let fake2 = FakeClient::ok(r#"{"contradicts":true,"stale_id":"old","reason":"x"}"#, 100, 100);
+    let out2 = curate_contradictions_with_client(&idx, &fake2, &ReflectConfig::default(), PID, 10);
+    assert_eq!(fake2.calls(), 0, "queued flag → no paid re-judgment");
+    assert_eq!(out2.escalated, 0);
+    assert_eq!(idx.budget_state().1, spent1);
+
+    // The human declines the flag → the pair stays parked (the "no" is preserved).
+    let props = list_proposals_readonly(&db, Some(PID)).unwrap();
+    let flag = props.iter().find(|p| p.target_id.as_deref() == Some("old")).unwrap();
+    idx.resolve_proposal(PID, &flag.signature, true).unwrap();
+    let fake3 = FakeClient::ok(r#"{"contradicts":true,"stale_id":"old","reason":"x"}"#, 100, 100);
+    let out3 = curate_contradictions_with_client(&idx, &fake3, &ReflectConfig::default(), PID, 10);
+    assert_eq!(fake3.calls(), 0, "rejected pair must never re-charge");
+    assert_eq!(out3.escalated, 0);
+    assert_eq!(idx.budget_state().1, spent1);
+}
+
+/// Pins the DOCUMENTED CEILING on `judgment_can_enqueue` (see its ponytail): an
+/// APPLIED flag also parks the pair for the note's lifetime — the applied row
+/// survives the pending-only purge, so enqueue's signature dedup would no-op and
+/// paying to re-judge is provably wasted. Anyone relaxing this skip must ALSO
+/// make enqueue insertable past resolved rows (pair-scoped signatures), or the
+/// funded re-charge loop returns through the applied path.
+#[test]
+fn contradiction_applied_pair_parked_not_recharged() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth.rs", b"pub fn auth() {}");
+    write(root, ".koden-memory/old.md", b"---\nid: old\ntype: decision\ntitle: Auth via sessions\nanchors:\n  - src/auth.rs\n---\nbody\n");
+    write(root, ".koden-memory/new.md", b"---\nid: new\ntype: decision\ntitle: Auth via JWT\nanchors:\n  - src/auth.rs\n---\nbody\n");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+    idx.set_budget_ceiling(1.0, 1).unwrap();
+
+    let fake1 = FakeClient::ok(r#"{"contradicts":true,"stale_id":"old","reason":"sessions vs JWT"}"#, 100, 100);
+    curate_contradictions_with_client(&idx, &fake1, &ReflectConfig::default(), PID, 10);
+    assert_eq!(fake1.calls(), 1);
+    let spent1 = idx.budget_state().1;
+
+    // The human AGREES and applies the fix → the applied row still parks the pair.
+    let props = list_proposals_readonly(&db, Some(PID)).unwrap();
+    let flag = props.iter().find(|p| p.target_id.as_deref() == Some("old")).unwrap();
+    idx.resolve_proposal(PID, &flag.signature, false).unwrap();
+    let fake2 = FakeClient::ok(r#"{"contradicts":true,"stale_id":"old","reason":"x"}"#, 100, 100);
+    let out2 = curate_contradictions_with_client(&idx, &fake2, &ReflectConfig::default(), PID, 10);
+    assert_eq!(fake2.calls(), 0, "applied flag → enqueue would no-op → no paid call");
+    assert_eq!(out2.escalated, 0);
+    assert_eq!(idx.budget_state().1, spent1, "resolved pair costs $0, by design");
 }
 
 /// P4 crash-resume, end-to-end: per-pane journal → boot recovery (skips cleanly

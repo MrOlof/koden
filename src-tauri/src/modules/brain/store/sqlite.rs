@@ -497,11 +497,14 @@ impl SqliteIndex {
         Ok(n > 0)
     }
 
-    /// Full note records for the doctor.
+    /// Full note records for the doctor. Deterministic order (ORDER BY id): the
+    /// records feed the doctor findings and thus the reflect digest, whose hash is
+    /// the autonomous delta gate — scan-order instability would break the
+    /// "unchanged corpus ⇒ unchanged digest ⇒ $0" guarantee (ADR-010 cluster 5).
     pub fn list_note_records(&self, project_id: &str) -> rusqlite::Result<Vec<NoteRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, note_type, revalidate_after, supersedes, superseded_by, COALESCE(anchors,'[]')
-             FROM notes WHERE project_id=?1",
+             FROM notes WHERE project_id=?1 ORDER BY id",
         )?;
         let it = stmt.query_map([project_id], |r| {
             let anchors: Vec<String> =
@@ -542,6 +545,35 @@ impl SqliteIndex {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM reject_signatures WHERE project_id=?1 AND reject_sig=?2",
             (project_id, reject_sig),
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// True if a proposal row with this signature exists in ANY status (pending,
+    /// applied, or rejected) — `insert_proposal` would no-op on it. Used by the
+    /// paid escalate bands to skip candidates BEFORE reserving/spending.
+    pub fn proposal_exists(&self, project_id: &str, signature: &str) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM proposals WHERE project_id=?1 AND signature=?2",
+            (project_id, signature),
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// True if a curate-sourced proposal for this note is already awaiting review —
+    /// the paid escalate band's pending-dedup gate (re-judging a note that is
+    /// already in the inbox can add nothing the human hasn't seen).
+    pub fn has_pending_curate_proposal(
+        &self,
+        project_id: &str,
+        target_id: &str,
+    ) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM proposals
+             WHERE project_id=?1 AND target_id=?2 AND source='curate' AND status='pending'",
+            (project_id, target_id),
             |r| r.get(0),
         )?;
         Ok(n > 0)

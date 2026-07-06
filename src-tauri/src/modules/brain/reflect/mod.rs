@@ -204,13 +204,16 @@ pub fn reflect_with_client(
         Err(reason) => return ReflectOutcome::noop(reason),
     };
 
-    // The one network call. On ANY error, charge the estimate (a partial/billed
-    // call may have happened — default to charging on uncertainty, §4.1.11).
+    // The one network call. On an error the provider DEMONSTRABLY did not bill
+    // (a 4xx rejection), release the reservation at $0; on anything ambiguous
+    // (network cut, timeout, 5xx) charge the estimate — a partial/billed call may
+    // have happened (charge on uncertainty, §4.1.11).
     let resp = match client.complete(&cfg.model, &system, &user, cfg.max_output_tokens) {
         Ok(r) => r,
         Err(e) => {
-            reconcile_or_log(index, rid, est, now_ms);
-            return ReflectOutcome { proposals: Vec::new(), spent_usd: est, reason: ReflectReason::CallFailed(e) };
+            let charge = charge_for_failed_call(est, &e);
+            reconcile_or_log(index, rid, charge, now_ms);
+            return ReflectOutcome { proposals: Vec::new(), spent_usd: charge, reason: ReflectReason::CallFailed(e) };
         }
     };
 
@@ -285,6 +288,30 @@ pub fn reflect_auto_with_client(
     )
 }
 
+/// True when a call error demonstrably means the provider billed nothing: both
+/// real clients surface a non-2xx as `"<provider> http <status>"` (status only,
+/// never the body), and a 4xx is a request REJECTED before inference
+/// (validation / auth / rate-limit — providers do not bill these). Anything else
+/// (serialization, network cut, timeout, 5xx) stays ambiguous.
+pub(crate) fn provider_rejected_unbilled(err: &str) -> bool {
+    err.rfind(" http ")
+        .and_then(|i| err[i + 6..].trim().parse::<u16>().ok())
+        .is_some_and(|c| (400..500).contains(&c))
+}
+
+/// Charge for a FAILED call: $0 for a demonstrably-unbilled 4xx rejection,
+/// otherwise the conservative estimate (charge-on-uncertainty — the request may
+/// have been processed and billed even though no response arrived). Shared by the
+/// reflect and both curation call sites. The reservation is still reconciled (at
+/// the returned charge) so it never strands against the ceiling.
+pub(crate) fn charge_for_failed_call(est: f64, err: &str) -> f64 {
+    if provider_rejected_unbilled(err) {
+        0.0
+    } else {
+        est
+    }
+}
+
 /// Reconcile a reservation, logging (not swallowing) a failure. A stranded
 /// 'reserved' row is still counted against the ceiling by the next
 /// [budget::check_and_reserve] and folded by the boot sweep, so a failed reconcile
@@ -298,15 +325,17 @@ pub(crate) fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_
 
 /// Manual-trigger reflect (the real path): always builds + sends if the budget/key
 /// gates pass. Thin wrapper over [reflect_auto] with no prior digest, so a manual
-/// click never short-circuits on "unchanged".
+/// click never short-circuits on "unchanged". Returns the digest hash too so the
+/// caller can feed the autonomous delta gate — a manual round must not leave the
+/// next auto round re-paying for the byte-identical digest (ADR-010 cluster 5).
 pub fn reflect_once(
     app: &AppHandle,
     index: &SqliteIndex,
     project_id: &str,
     now_date: Option<&str>,
     now_ms: i64,
-) -> ReflectOutcome {
-    reflect_auto(app, index, project_id, now_date, now_ms, None).0
+) -> (ReflectOutcome, Option<String>) {
+    reflect_auto(app, index, project_id, now_date, now_ms, None)
 }
 
 /// Autonomous-trigger reflect: resolves the persisted Librarian model + ceiling +
@@ -363,6 +392,22 @@ mod tests {
         let free = ReflectConfig { in_rate: 0.0, out_rate: 0.0, ..ReflectConfig::default() };
         assert_eq!(estimate_cost(&free, "sys", "user"), 0.0);
         assert_eq!(actual_cost(&free, 1000, 1000), 0.0);
+    }
+
+    #[test]
+    fn failed_call_charge_classifies_unbilled_4xx() {
+        // Both real clients' 4xx shape → demonstrably unbilled → $0.
+        assert_eq!(charge_for_failed_call(0.01, "anthropic http 400"), 0.0);
+        assert_eq!(charge_for_failed_call(0.01, "openai-compat http 429"), 0.0);
+        // Ambiguous (network / 5xx / parse) → charge-on-uncertainty (the estimate).
+        for e in [
+            "anthropic http 500",
+            "connection reset",
+            "error sending request for url (https://api.openai.com/v1)",
+            "openai-compat resp parse: EOF",
+        ] {
+            assert_eq!(charge_for_failed_call(0.01, e), 0.01, "ambiguous must charge: {e}");
+        }
     }
 
     #[test]

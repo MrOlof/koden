@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS reject_signatures (
 -- Budgeted-reflect spend state (P4). CANONICAL/preserved (human/spend state, NOT
 -- derivable from the file walk) — never listed in the upgrade DROP batch. Default-
 -- OFF: ceiling 0.0 disables reflect entirely. `brain_budget` is a GLOBAL singleton
--- (one daemon-wide monthly ceiling), keyed by the CHECK (id=1) row.
+-- (one daemon-wide cumulative ceiling), keyed by the CHECK (id=1) row.
 -- All `*_at` columns here are epoch MILLISECONDS (every Rust write uses
 -- now_epoch_ms()); the seed below matches that unit.
 CREATE TABLE IF NOT EXISTS brain_budget (

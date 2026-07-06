@@ -120,6 +120,24 @@ fn run_act_band(index: &SqliteIndex, project: &str, candidates: &[Candidate], no
     out
 }
 
+/// Whether a Tier-2 verdict for this note could enqueue ANYTHING. The judge's
+/// outcome space maps to exactly {Archive, Supersede, Update} (`delete` downgrades
+/// to Archive) with the titles [enqueue_graded] builds — if every one is already
+/// human-rejected or already a queued row, the paid call is provably wasted.
+fn escalation_can_enqueue(index: &SqliteIndex, project: &str, note_id: &str) -> bool {
+    [ProposalAction::Archive, ProposalAction::Supersede, ProposalAction::Update]
+        .into_iter()
+        .any(|action| {
+            let title = format!("{} stale note '{note_id}'", action_verb(action));
+            !index
+                .is_rejected(project, &reject_signature(action, Some(note_id), &title))
+                .unwrap_or(false)
+                && !index
+                    .proposal_exists(project, &proposal_signature(action, Some(note_id), &title))
+                    .unwrap_or(false)
+        })
+}
+
 /// One stale-ADR's bounded digest for the Tier-2 judge (identifiers only).
 fn candidate_digest(c: &Candidate) -> String {
     let sup = c.superseded_by.as_deref().map(|sb| format!("superseded_by: {sb}\n")).unwrap_or_default();
@@ -155,6 +173,15 @@ pub fn curate_with_client(
 
     let system = schema::system_prompt();
     for c in candidates.iter().filter(|c| c.band == Band::Escalate) {
+        // Reject-signature + pending-dedup checks BEFORE the paid call, mirroring
+        // the ACT band's check-then-insert order (ADR-010 cluster 5): a note
+        // already awaiting review, or whose every possible verdict was declined,
+        // must cost $0 — not re-charge on every curation round.
+        if index.has_pending_curate_proposal(project, &c.note_id).unwrap_or(false)
+            || !escalation_can_enqueue(index, project, &c.note_id)
+        {
+            continue;
+        }
         let user = crate::modules::brain::secrets::redact(&candidate_digest(c)).0;
         let est = reflect::estimate_cost(cfg, &system, &user);
         let rid = match budget::check_and_reserve(index.conn(), &cfg.model, est, now_ms) {
@@ -172,10 +199,12 @@ pub fn curate_with_client(
         escalated += 1;
         let resp = match client.complete(&cfg.model, &system, &user, cfg.max_output_tokens) {
             Ok(r) => r,
-            Err(_) => {
-                // charge the estimate on uncertainty (a partial/billed call may have happened).
-                reflect::reconcile_or_log(index, rid, est, now_ms);
-                spent += est;
+            Err(e) => {
+                // $0 for a demonstrably-unbilled 4xx rejection; else charge the
+                // estimate on uncertainty (a partial/billed call may have happened).
+                let charge = reflect::charge_for_failed_call(est, &e);
+                reflect::reconcile_or_log(index, rid, charge, now_ms);
+                spent += charge;
                 continue;
             }
         };

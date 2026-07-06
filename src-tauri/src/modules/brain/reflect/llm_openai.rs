@@ -43,6 +43,22 @@ fn build_client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The output-limit parameter name for this endpoint. OpenAI proper deprecated
+/// `max_tokens` — its newer (reasoning-family) models reject it with a 400, which
+/// combined with charge-on-uncertainty would bill the estimate for a call the
+/// provider never ran — and requires `max_completion_tokens`. The other compat
+/// servers (Ollama, LM Studio, Groq, DeepSeek, OpenRouter, …) still key on
+/// `max_tokens`, and some reject unknown params, so we send exactly ONE name.
+/// ponytail: host sniff; lift to a per-provider capability flag if a third
+/// parameter shape ever appears.
+fn token_limit_key(base_url: &str) -> &'static str {
+    if base_url.contains("api.openai.com") {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
 /// Defensively unwrap a ```json … ``` fence some local models emit despite the
 /// "JSON only" instruction, so `parse_and_validate` sees bare JSON.
 fn strip_fences(s: &str) -> String {
@@ -93,7 +109,7 @@ impl ReflectClient for OpenAiCompatClient {
     ) -> Result<ReflectResponse, String> {
         let body = json!({
             "model": model,
-            "max_tokens": max_tokens,
+            token_limit_key(&self.base_url): max_tokens,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -148,6 +164,21 @@ mod tests {
         assert_eq!(c.endpoint(), "https://api.openai.com/v1/chat/completions");
         let c2 = OpenAiCompatClient::new(None, "http://localhost:11434/v1".to_string());
         assert_eq!(c2.endpoint(), "http://localhost:11434/v1/chat/completions");
+    }
+
+    /// OpenAI proper needs `max_completion_tokens` (400s `max_tokens` on newer
+    /// models → phantom spend under charge-on-uncertainty); every other compat
+    /// server keeps the classic `max_tokens`.
+    #[test]
+    fn token_limit_key_per_endpoint() {
+        assert_eq!(token_limit_key("https://api.openai.com/v1"), "max_completion_tokens");
+        for other in [
+            "http://localhost:11434/v1",             // ollama
+            "https://api.groq.com/openai/v1",        // groq
+            "https://openrouter.ai/api/v1",          // openrouter
+        ] {
+            assert_eq!(token_limit_key(other), "max_tokens", "{other}");
+        }
     }
 
     #[test]

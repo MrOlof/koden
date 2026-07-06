@@ -34,7 +34,8 @@ const SECRET_PREFIXES: &[&str] = &[
     "-----BEGIN",   // PEM block marker
     "SG.",          // SendGrid
     "shpat_", "shpss_", "shpca_", "shppa_", // Shopify
-    "AccountKey=",  // Azure storage connection string
+    // NOTE: Azure `AccountKey=...` is handled by detector (b) via SECRET_KEY_WORDS
+    // ("accountkey") — a prefix here would be dead code ('=' is not a candidate char).
     "dop_v1_",      // DigitalOcean
     "npm_",         // npm automation token
 ];
@@ -44,6 +45,7 @@ const SECRET_PREFIXES: &[&str] = &[
 const SECRET_KEY_WORDS: &[&str] = &[
     "password", "passwd", "passphrase", "pwd",
     "secret", "apikey", "accesskey", "secretkey", "privatekey", "sessionkey",
+    "accountkey", // Azure storage `AccountKey=...` (connection-string segment)
     "credential", "token", "bearer", "authtoken", "oauth",
     "connectionstring", "databaseurl",
 ];
@@ -336,6 +338,19 @@ mod tests {
         // whole value gone, including the punctuation-split tail
         let (r, _) = redact("DB_PASSWORD: Tr0ub4dor!3Kx9Lm2Qp");
         assert!(!r.contains("3Kx9Lm2Qp"), "split tail leaked: {r}");
+    }
+
+    /// ADR-010 cluster 5: the old `AccountKey=` SECRET_PREFIXES entry was
+    /// unreachable ('=' is not a candidate char) — Azure storage keys must be
+    /// redacted via the keyed-assignment detector instead.
+    #[test]
+    fn redacts_azure_account_key_connection_string() {
+        let cs = "DefaultEndpointsProtocol=https;AccountName=mystore;AccountKey=wJalrXUtnFEMI+K7MDENGbPxRfiCY==;EndpointSuffix=core.windows.net";
+        let (r, n) = redact(cs);
+        assert!(n >= 1, "expected redaction in: {r}");
+        assert!(!r.contains("wJalrXUtnFEMI"), "Azure key leaked: {r}");
+        assert!(r.contains("AccountKey=REDACTED"), "whole value redacted: {r}");
+        assert!(r.contains("AccountName=mystore"), "non-secret segment preserved: {r}");
     }
 
     #[test]

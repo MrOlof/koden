@@ -330,7 +330,7 @@ pub fn brain_reflect(
     enqueue(&state, BrainEvent::Reflect { project, now_date })
 }
 
-/// Set the reflect monthly spend ceiling (USD). `0.0` disables reflect entirely.
+/// Set the reflect cumulative spend ceiling (USD). `0.0` disables reflect entirely.
 /// The only feature that spends money, and it uses the user's own Anthropic key.
 #[tauri::command]
 pub fn brain_set_budget(state: State<BrainState>, ceiling_usd: f64) -> Result<(), String> {

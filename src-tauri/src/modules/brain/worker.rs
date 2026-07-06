@@ -33,6 +33,13 @@ const TICK_SECS: u64 = 60;
 /// only pick the *moment*. ponytail: fixed intervals; lift to user settings to tune.
 const LIBRARIAN_IDLE_SETTLE_MS: i64 = 3 * 60 * 1000;
 const LIBRARIAN_MIN_GAP_MS: i64 = 5 * 60 * 1000;
+/// Paid-retry policy (ADR-010 cluster 5): after this many CONSECUTIVE failed paid
+/// rounds the project stops re-arming itself — only a NEW content change (an Fs
+/// event setting `dirty`) buys another attempt.
+const LIBRARIAN_MAX_CONSEC_FAILURES: u32 = 3;
+/// Backoff clamp: the anti-hammer gap doubles per consecutive failure, capped at
+/// `MIN_GAP << 4` (5 → 10 → 20 → 40 → 80 min).
+const LIBRARIAN_BACKOFF_MAX_SHIFT: u32 = 4;
 /// Binary sniff window — a NUL byte in the first 8 KiB means "not text".
 const BINARY_SNIFF_BYTES: usize = 8192;
 
@@ -330,7 +337,23 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 };
                 let now_ms = now_epoch_ms();
                 for pid in pids {
-                    let outcome = reflect::reflect_once(&app, &index, &pid, now_date.as_deref(), now_ms);
+                    let (outcome, digest_hash) =
+                        reflect::reflect_once(&app, &index, &pid, now_date.as_deref(), now_ms);
+                    // Feed the autonomous delta gate: the digest just (paid-)reflected
+                    // on must not be re-paid by the next auto round. Ok = success
+                    // (resets the failure streak); InvalidOutput = paid but rejected —
+                    // identical bytes would fail identically, so pin its hash too.
+                    if digest_hash.is_some() {
+                        let st = lib_state.entry(pid.clone()).or_default();
+                        match outcome.reason {
+                            reflect::ReflectReason::Ok => {
+                                st.digest_hash = digest_hash;
+                                st.fail_streak = 0;
+                            }
+                            reflect::ReflectReason::InvalidOutput => st.digest_hash = digest_hash,
+                            _ => {} // CallFailed: retrying the same digest is legitimate
+                        }
+                    }
                     log::info!(
                         "brain: reflect '{pid}' → {:?} ({} proposal(s), ${:.4})",
                         outcome.reason,
@@ -719,23 +742,69 @@ struct LibrarianAuto {
     last_pass_ms: i64,
     /// Hash of the last digest we reflected on (drives the delta gate).
     digest_hash: Option<String>,
+    /// CONSECUTIVE failed PAID rounds (CallFailed/InvalidOutput) since the last
+    /// success — drives the backoff + the stop-re-arming cap (ADR-010 cluster 5).
+    fail_streak: u32,
 }
 
 /// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
 /// that has EITHER settled into idle OR just had an AI session exit. No change count,
 /// no fixed clock — the digest hash inside [reflect::reflect_auto] is the real
-/// "anything new" signal; this only picks the *moment*.
+/// "anything new" signal; this only picks the *moment*. Consecutive failed paid
+/// rounds widen the gap exponentially (backoff) so a failing provider can't be
+/// re-charged every min-gap.
 fn due_for_round(
     dirty: bool,
     boundary: bool,
     last_change_ms: i64,
     last_pass_ms: i64,
     now_ms: i64,
+    fail_streak: u32,
 ) -> bool {
-    if !dirty || now_ms.saturating_sub(last_pass_ms) < LIBRARIAN_MIN_GAP_MS {
+    let gap = LIBRARIAN_MIN_GAP_MS << fail_streak.min(LIBRARIAN_BACKOFF_MAX_SHIFT);
+    if !dirty || now_ms.saturating_sub(last_pass_ms) < gap {
         return false;
     }
     boundary || now_ms.saturating_sub(last_change_ms) >= LIBRARIAN_IDLE_SETTLE_MS
+}
+
+/// Fold one round's outcome into the per-project state — the paid-retry policy
+/// (ADR-010 cluster 5). Pure + testable:
+///  - Ok/Unchanged: remember the digest hash, reset the failure streak.
+///  - Disabled/NoKey/OverBudget/EmptyCorpus: $0 pre-flight skips (nothing reserved
+///    or charged) — re-arm so the round retries once the gate clears.
+///  - InvalidOutput: PAID (the provider answered; the JSON failed validation).
+///    Pin the digest hash anyway — byte-identical input would fail identically, so
+///    the SAME digest is never re-paid; only NEW content (a fresh Fs event → new
+///    digest) buys another attempt. Counts toward the streak.
+///  - CallFailed: charged on uncertainty (a 4xx was charged $0 upstream). Retry
+///    with exponential backoff; past LIBRARIAN_MAX_CONSEC_FAILURES stop re-arming —
+///    a NEW content change re-arms via the Fs handler.
+fn apply_round_outcome(
+    st: &mut LibrarianAuto,
+    reason: &reflect::ReflectReason,
+    digest_hash: Option<String>,
+) {
+    use reflect::ReflectReason as R;
+    match reason {
+        R::Ok | R::Unchanged => {
+            st.digest_hash = digest_hash;
+            st.fail_streak = 0;
+        }
+        R::Disabled | R::NoKey | R::OverBudget | R::EmptyCorpus => {
+            st.dirty = true;
+        }
+        R::InvalidOutput => {
+            st.digest_hash = digest_hash;
+            st.fail_streak = st.fail_streak.saturating_add(1);
+        }
+        R::CallFailed(_) => {
+            st.fail_streak = st.fail_streak.saturating_add(1);
+            if st.fail_streak < LIBRARIAN_MAX_CONSEC_FAILURES {
+                st.dirty = true;
+            }
+        }
+    }
 }
 
 /// One Librarian sweep (driven by the periodic Tick): for each project that changed
@@ -750,8 +819,11 @@ fn run_librarian_rounds(
     state: &mut std::collections::HashMap<String, LibrarianAuto>,
 ) {
     let now_ms = now_epoch_ms();
+    // Real current date (UTC) so date-dependent findings (stale_revalidate) are
+    // visible to autonomous rounds, not only to manual clicks (ADR-010 cluster 5).
+    let today = utc_date_ymd(now_ms);
     for (project_id, st) in state.iter_mut() {
-        if !due_for_round(st.dirty, st.boundary, st.last_change_ms, st.last_pass_ms, now_ms) {
+        if !due_for_round(st.dirty, st.boundary, st.last_change_ms, st.last_pass_ms, now_ms, st.fail_streak) {
             continue;
         }
         st.dirty = false;
@@ -759,10 +831,10 @@ fn run_librarian_rounds(
         st.last_pass_ms = now_ms; // gate the next round regardless of outcome
         let prev = st.digest_hash.clone();
         let (outcome, digest_hash) =
-            reflect::reflect_auto(app, index, project_id, None, now_ms, prev.as_deref());
-        match outcome.reason {
+            reflect::reflect_auto(app, index, project_id, Some(&today), now_ms, prev.as_deref());
+        apply_round_outcome(st, &outcome.reason, digest_hash);
+        match &outcome.reason {
             reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
-                st.digest_hash = digest_hash;
                 log::info!(
                     "brain: auto-reflect '{project_id}' → {:?} ({} proposal(s), ${:.4})",
                     outcome.reason,
@@ -770,12 +842,18 @@ fn run_librarian_rounds(
                     outcome.spent_usd
                 );
             }
-            // Disabled/NoKey/OverBudget/CallFailed/InvalidOutput: re-arm so the next
-            // round retries (recovers once a budget is set / a transient error clears).
-            other => {
-                st.dirty = true;
-                log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}");
+            // PAID failures — surface them (real money), with the retry stance.
+            reflect::ReflectReason::CallFailed(_) | reflect::ReflectReason::InvalidOutput => {
+                log::warn!(
+                    "brain: auto-reflect '{project_id}' paid round failed ({:?}, ${:.4}); {} consecutive failure(s), {}",
+                    outcome.reason,
+                    outcome.spent_usd,
+                    st.fail_streak,
+                    if st.dirty { "retrying with backoff" } else { "parked until new content changes" }
+                );
             }
+            // $0 pre-flight skips (re-armed; recover once a budget/key is set).
+            other => log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}"),
         }
     }
 }
@@ -786,6 +864,23 @@ fn now_epoch_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// UTC calendar date `YYYY-MM-DD` for an epoch-ms instant — no new dependency
+/// (civil-from-days, Howard Hinnant's algorithm). UTC rather than local is fine
+/// for note-staleness horizons measured in days; the doctor compares lexically.
+fn utc_date_ymd(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Run the doctor across every registered project (boot-time inbox seed).
@@ -900,15 +995,78 @@ mod tests {
         let settle = LIBRARIAN_IDLE_SETTLE_MS;
         let now = 100 * gap; // comfortably past any min-gap from last_pass = 0
         // Not dirty → never, even with a boundary.
-        assert!(!due_for_round(false, true, now, 0, now));
+        assert!(!due_for_round(false, true, now, 0, now, 0));
         // Dirty but still inside the min-gap since the last round → hold.
-        assert!(!due_for_round(true, true, now, now - 1, now));
+        assert!(!due_for_round(true, true, now, now - 1, now, 0));
         // Dirty, past min-gap, but still actively changing (not settled, no boundary) → hold.
-        assert!(!due_for_round(true, false, now, 0, now));
+        assert!(!due_for_round(true, false, now, 0, now, 0));
         // Dirty, past min-gap, settled into idle → fire.
-        assert!(due_for_round(true, false, now - settle, 0, now));
+        assert!(due_for_round(true, false, now - settle, 0, now, 0));
         // Dirty, past min-gap, an AI session just exited → fire even though not idle.
-        assert!(due_for_round(true, true, now, 0, now));
+        assert!(due_for_round(true, true, now, 0, now, 0));
+    }
+
+    /// ADR-010 cluster 5: consecutive paid failures widen the anti-hammer gap
+    /// exponentially, clamped so it can never overflow or grow unbounded.
+    #[test]
+    fn due_for_round_backs_off_after_failures() {
+        let gap = LIBRARIAN_MIN_GAP_MS;
+        // Boundary + dirty, one failure: min-gap alone no longer fires…
+        assert!(!due_for_round(true, true, 0, 0, gap, 1));
+        // …the doubled gap does.
+        assert!(due_for_round(true, true, 0, 0, 2 * gap, 1));
+        // The shift clamps: a huge streak behaves like the max shift (no overflow).
+        let max_gap = gap << LIBRARIAN_BACKOFF_MAX_SHIFT;
+        assert!(!due_for_round(true, true, 0, 0, max_gap - 1, u32::MAX));
+        assert!(due_for_round(true, true, 0, 0, max_gap, u32::MAX));
+    }
+
+    /// ADR-010 cluster 5: the paid-retry policy — success resets, free skips
+    /// re-arm, InvalidOutput pins the digest hash (identical bytes never re-paid),
+    /// CallFailed retries with a cap then parks until new content re-arms.
+    #[test]
+    fn apply_round_outcome_paid_retry_policy() {
+        use reflect::ReflectReason as R;
+        let mut st = LibrarianAuto::default();
+
+        // $0 pre-flight skip: re-armed, nothing counted.
+        apply_round_outcome(&mut st, &R::Disabled, None);
+        assert!(st.dirty && st.fail_streak == 0 && st.digest_hash.is_none());
+
+        // InvalidOutput: hash pinned (the SAME digest must never be re-paid),
+        // streak counted, NOT re-armed — new content is the only retry trigger.
+        st.dirty = false;
+        apply_round_outcome(&mut st, &R::InvalidOutput, Some("h1".into()));
+        assert!(!st.dirty, "InvalidOutput must not re-arm");
+        assert_eq!(st.digest_hash.as_deref(), Some("h1"));
+        assert_eq!(st.fail_streak, 1);
+
+        // CallFailed: retries (re-arms) below the cap…
+        for expected in 2..LIBRARIAN_MAX_CONSEC_FAILURES {
+            st.dirty = false;
+            apply_round_outcome(&mut st, &R::CallFailed("x".into()), None);
+            assert_eq!(st.fail_streak, expected);
+            assert!(st.dirty, "below the cap → retry");
+        }
+        // …and parks at the cap.
+        st.dirty = false;
+        apply_round_outcome(&mut st, &R::CallFailed("x".into()), None);
+        assert_eq!(st.fail_streak, LIBRARIAN_MAX_CONSEC_FAILURES);
+        assert!(!st.dirty, "at the cap → stop re-arming until new content");
+
+        // Success: streak reset, hash updated.
+        apply_round_outcome(&mut st, &R::Ok, Some("h2".into()));
+        assert_eq!(st.fail_streak, 0);
+        assert_eq!(st.digest_hash.as_deref(), Some("h2"));
+    }
+
+    #[test]
+    fn utc_date_ymd_known_dates() {
+        assert_eq!(utc_date_ymd(0), "1970-01-01");
+        assert_eq!(utc_date_ymd(86_400_000 - 1), "1970-01-01", "just before midnight");
+        assert_eq!(utc_date_ymd(86_400_000), "1970-01-02");
+        assert_eq!(utc_date_ymd(1_704_067_200_000), "2024-01-01");
+        assert_eq!(utc_date_ymd(1_709_164_800_000), "2024-02-29", "leap day");
     }
 
     /// ADR-010 cluster 2: the incremental skip-dir gate must be PROJECT-RELATIVE.

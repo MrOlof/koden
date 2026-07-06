@@ -135,7 +135,7 @@ export function brainReflect(
   return invoke<void>("brain_reflect", { project, nowDate });
 }
 
-/** Set the reflect monthly spend ceiling (USD). `0` disables reflect entirely. */
+/** Set the reflect cumulative spend ceiling (USD). `0` disables reflect entirely. */
 export function brainSetBudget(ceilingUsd: number): Promise<void> {
   return invoke<void>("brain_set_budget", { ceilingUsd });
 }

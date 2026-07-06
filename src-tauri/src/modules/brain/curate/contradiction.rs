@@ -81,6 +81,35 @@ pub fn contradiction_pairs(notes: &[NoteSummary]) -> Vec<(usize, usize, Vec<Stri
     // measurably waste budget.
 }
 
+/// Whether paying to judge this pair could still surface anything new. The
+/// verdict's outcome space is exactly {flag a, flag b} with the fixed title/action
+/// [enqueue_contradiction] builds. Skip the pair when EITHER direction was
+/// human-rejected (the reject already suppresses that flag for every pair at
+/// enqueue time — the model re-picking it would burn budget re-litigating a "no")
+/// or already has a proposal row in ANY status ([SqliteIndex::insert_proposal]'s
+/// signature dedup would no-op on it, so paying is provably wasted). EITHER — not
+/// BOTH — because a model that re-picks the one blocked direction no-ops at
+/// enqueue and the charge would repeat every round (the funded re-charge loop).
+/// ponytail: both gates are per-NOTE ("Resolve contradiction in note 'x'") and
+/// permanent — reject signatures never expire, and resolved (even APPLIED)
+/// proposal rows outlive the pending-only purge in [SqliteIndex::remove_note] —
+/// so once x's flag is resolved, every future pair containing x is parked for
+/// x's lifetime, including a later REAL contradiction where the stale pick is
+/// the other note. Upgrade path = pair-scoped titles/signatures (name both ids)
+/// if that granularity ever matters.
+fn judgment_can_enqueue(index: &SqliteIndex, project: &str, a_id: &str, b_id: &str) -> bool {
+    let action = ProposalAction::Update;
+    [a_id, b_id].into_iter().all(|id| {
+        let title = format!("Resolve contradiction in note '{id}'");
+        !index
+            .is_rejected(project, &reject_signature(action, Some(id), &title))
+            .unwrap_or(false)
+            && !index
+                .proposal_exists(project, &proposal_signature(action, Some(id), &title))
+                .unwrap_or(false)
+    })
+}
+
 /// Bounded, redacted digest of one co-anchored pair (metadata only).
 fn pair_digest(a: &NoteSummary, b: &NoteSummary, shared: &[String]) -> String {
     let line = |n: &NoteSummary| {
@@ -117,6 +146,12 @@ pub fn curate_contradictions_with_client(
     let mut reason = CurationReason::Ok;
 
     for (i, j, shared) in pairs {
+        // Reject-signature + pending-dedup BEFORE reserving/paying (ADR-010
+        // cluster 5): a pair the human already declined, or whose flag is already
+        // in the inbox, must not re-charge on every round.
+        if !judgment_can_enqueue(index, project, &notes[i].id, &notes[j].id) {
+            continue;
+        }
         let user = crate::modules::brain::secrets::redact(&pair_digest(&notes[i], &notes[j], &shared)).0;
         let est = reflect::estimate_cost(cfg, &system, &user);
         let rid = match budget::check_and_reserve(index.conn(), &cfg.model, est, now_ms) {
@@ -134,9 +169,11 @@ pub fn curate_contradictions_with_client(
         escalated += 1;
         let resp = match client.complete(&cfg.model, &system, &user, cfg.max_output_tokens) {
             Ok(r) => r,
-            Err(_) => {
-                reflect::reconcile_or_log(index, rid, est, now_ms);
-                spent += est;
+            Err(e) => {
+                // $0 for a demonstrably-unbilled 4xx; else charge-on-uncertainty.
+                let charge = reflect::charge_for_failed_call(est, &e);
+                reflect::reconcile_or_log(index, rid, charge, now_ms);
+                spent += charge;
                 continue;
             }
         };
