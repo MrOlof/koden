@@ -10,27 +10,38 @@
 //! of shape (catches short/low-entropy and punctuation-split secrets); (c)
 //! high-entropy mixed-alphanumeric tokens (>=16 chars), excluding git-SHA/hex,
 //! UUIDs, and path/URL/version shapes so legitimate searchable content survives;
-//! and (d) PEM block bodies: after any line CONTAINING a `-----BEGIN ...-----`
-//! marker (bare, or sharing the line with an assignment/quote — inline PEMs in
-//! code are nearly always string literals), every body line — pure
-//! base64-alphabet, or a QUOTED concat fragment (`"...\n" +` in Java/C#/JS,
-//! adjacent C literals, Python implicit concat) — is redacted WHOLE until a
-//! line containing `-----END` (itself re-checked for a same-line `-----BEGIN`
-//! of a NEXT block, the concatenated-bundle shape) — `/`- and `=`-split
-//! key-body shards would otherwise fragment below (c)'s length floor (the leak
-//! the 2026-07-05 index-layer probe reproduced; its reviews confirmed the
-//! assignment-line, quoted-concat, and bundle variants).
+//! and (d) PEM blocks: each line's `-----BEGIN ...-----` / `-----END` markers
+//! are folded LEFT-TO-RIGHT into a running block state, and every line touching
+//! an open block is redacted WHOLE — no body-line classification. Between BEGIN
+//! and END in real files there is nothing legitimate to preserve (base64 body,
+//! quoted/concat fragments in any language's string syntax, encrypted-PEM
+//! headers whose `DEK-Info` carries the IV), and per-shape body predicates kept
+//! leaking variants (operator-first concat, PHP dot-concat — reviews of the
+//! 2026-07-05 fix, whose index-layer probe first reproduced the `/`-split
+//! key-body shards fragmenting below (c)'s length floor). Positional folding
+//! handles the awkward marker orderings by construction: BEGIN+END on one line
+//! ends closed, END-then-BEGIN (a concatenated bundle missing its interior
+//! newline) ends open, and a complete single-line block followed by a fresh
+//! BEGIN ends open. A stray unterminated BEGIN in prose/docs is bounded: the
+//! block auto-closes after `PEM_BLOCK_LINE_CAP` consecutive block lines (the
+//! run restarts whenever a line opens a block, so a concatenated bundle is
+//! bounded per block, not cumulatively).
 //!
 //! `.gitignore`/`.kodenignore` are honored upstream by the `ignore` walker; this
 //! is the hardcoded base denylist that holds even for un-ignored files. Policy is
 //! conservative-by-design ("if uncertain, treat as secret"). Known, documented
 //! residual gaps (the honesty rule, BUILD-PROMPT §13.30): a bare in-code secret
-//! that is pure-hex, or split by `/` outside an open PEM block — since multi-line
-//! literals now open the block even when the marker shares the assignment line,
-//! that means a truly single-line `\n`-escaped PEM literal (BEGIN and END on one
-//! physical line never open the block) — and is NOT assigned to a secret-named
-//! key, may survive content redaction — the file denylist, `.gitignore`, and
-//! (future) the visible "excluded N as secret-like" override are the backstops.
+//! that is pure-hex, or split by `/` outside an open PEM block — a truly
+//! single-line `\n`-escaped PEM literal (BEGIN and END on one physical line
+//! fold back to the CLOSED state, so the line is never wholesale-blanked), or
+//! body lines past `PEM_BLOCK_LINE_CAP` consecutive lines of ANY block,
+//! TERMINATED or not (an armor longer than the cap auto-closes mid-body and
+//! its tail leaks), or a block whose BEGIN marker atom is itself split across
+//! physical concat lines (the same-line completeness check never opens it) —
+//! and is NOT assigned to a secret-named key, may survive content redaction —
+//! the file denylist,
+//! `.gitignore`, and (future) the visible "excluded N as secret-like" override
+//! are the backstops.
 //!
 //! ponytail: regex-free (no new dep) — char-class scanning is enough here.
 
@@ -142,62 +153,60 @@ fn is_candidate_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+')
 }
 
-/// Detector (d) entry: the line CONTAINS a full `-----BEGIN <LABEL>-----`
-/// marker. Matching bare marker lines only (the pre-review behavior) missed the
-/// most common real-world inline-PEM shape — a multi-line raw-string/template
-/// literal whose marker shares the line with the assignment (`` const k =
-/// `-----BEGIN ...` ``). Conservative-by-design: a quoted marker in parser code
-/// also opens the block; the accepted cost is bounded to whole-line redaction of
-/// FULL base64-alphabet lines until a `-----END` (normal code keeps flowing
-/// through — see the quoted-marker test). A `-----END` after the BEGIN on the
-/// SAME line (single-line `\n`-escaped literal — the documented residual gap)
-/// must NOT open the block, else stale state would blank unrelated later lines.
-fn opens_pem_block(line: &str) -> bool {
-    match line.find("-----BEGIN") {
-        Some(pos) => {
-            let rest = &line[pos + "-----BEGIN".len()..];
-            rest.contains("-----") && !rest.contains("-----END")
+/// Detector (d) blast-radius ceiling: consecutive block lines redacted whole
+/// before an open block is auto-closed. A stray marker in prose/docs would
+/// otherwise blank the rest of the file. The run is PER BLOCK: it restarts
+/// whenever a line opens a block, so a concatenated bundle is bounded per
+/// block, never cumulatively.
+// ponytail: 1024 is a deliberate ceiling — typical PEM bodies are ~50 lines
+// (4096-bit RSA), and even the big genuine armors close under it (RSA-16384
+// ~430 lines, a PGP key with a photo ID ~600+), while a stray BEGIN's
+// false-positive cost stays bounded. A rarer, larger armor (a multi-MB PGP
+// MESSAGE) auto-closes mid-body and its tail leaks — TERMINATED or not — a
+// documented residual gap; the .asc/.pem/.key file denylist is the backstop
+// for whole-file armors.
+const PEM_BLOCK_LINE_CAP: usize = 1024;
+
+/// Detector (d) markers: fold this line's `-----BEGIN ...-----` / `-----END`
+/// markers LEFT-TO-RIGHT into the running block state, returning the state
+/// AFTER the line. Positional folding handles the awkward orderings by
+/// construction — no special cases: BEGIN+END on one line (single-line
+/// `\n`-escaped literal, the documented residual gap) ends CLOSED so stale
+/// state can't blank later lines; END-then-BEGIN (a concatenated bundle
+/// missing its interior newline) ends OPEN; a complete single-line block
+/// followed by a fresh BEGIN ends OPEN. A BEGIN only counts when the marker is
+/// complete (`-----BEGIN <LABEL>-----` — trailing dashes somewhere after it);
+/// a bare `-----BEGIN` fragment in prose opens nothing. The second return is
+/// true when any marker on this line OPENED a block — the caller restarts the
+/// `PEM_BLOCK_LINE_CAP` run on it, so the cap bounds each block, not the
+/// concatenation (a same-line END-then-BEGIN junction keeps the final state
+/// unchanged and would otherwise be invisible).
+fn pem_state_after_line(line: &str, mut in_pem: bool) -> (bool, bool) {
+    let mut rest = line;
+    let mut opened = false;
+    loop {
+        // The earlier marker is folded first (they can never start at the same
+        // byte); the loop re-finds the other one next pass.
+        match (rest.find("-----BEGIN"), rest.find("-----END")) {
+            (None, None) => return (in_pem, opened),
+            (Some(b), Some(e)) if e < b => {
+                in_pem = false;
+                rest = &rest[e + "-----END".len()..];
+            }
+            (Some(b), _) => {
+                let after = &rest[b + "-----BEGIN".len()..];
+                if after.contains("-----") {
+                    in_pem = true;
+                    opened = true;
+                }
+                rest = after;
+            }
+            (None, Some(e)) => {
+                in_pem = false;
+                rest = &rest[e + "-----END".len()..];
+            }
         }
-        None => false,
     }
-}
-
-/// Detector (d) body: inside a PEM block, a line made solely of base64-alphabet
-/// chars is key material. Redacted WHOLE — its `/`-split shards are each below
-/// (c)'s 16-char floor, which is exactly how the old gap leaked.
-fn is_pem_body_line(trimmed: &str) -> bool {
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
-}
-
-/// Detector (d) body, quoted-concat variant: string-CONCATENATION inline PEMs
-/// (mandatory in Java/C/C++, common in C#/Python/older JS) wrap each body line
-/// in quote + `\n` escape + concat punctuation — none of which are base64
-/// chars — so `is_pem_body_line` misses them and the `/`-split shards fall
-/// below (c)'s 16-char floor (the 2026-07-05 fix's review reproduced the
-/// leak). Inside an open block, accept a line that is exactly ONE quoted
-/// literal whose interior is base64-alphabet (plus `\` escapes), followed only
-/// by concat/terminator punctuation (`+` `,` `;` `)`, line-continuation `\`).
-/// Assignment/code lines don't START with a quote, so normal code inside an
-/// over-opened block keeps flowing through (see the quoted-marker test).
-fn is_quoted_pem_body_line(trimmed: &str) -> bool {
-    let Some(quote @ ('"' | '\'')) = trimmed.chars().next() else {
-        return false;
-    };
-    let rest = &trimmed[1..];
-    let Some(close) = rest.rfind(quote) else {
-        return false;
-    };
-    let (interior, suffix) = (&rest[..close], &rest[close + 1..]);
-    interior.chars().any(|c| c.is_ascii_alphanumeric())
-        && interior
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '\\'))
-        && suffix
-            .chars()
-            .all(|c| matches!(c, ' ' | '\t' | '+' | ',' | ';' | ')' | '\\'))
 }
 
 fn is_uuid_shaped(s: &str) -> bool {
@@ -353,35 +362,42 @@ fn redact_candidates(s: &str) -> (String, usize) {
 pub fn redact(content: &str) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut count = 0usize;
-    // Detector (d) block state. On an unclosed BEGIN it persists to EOF, but only
-    // full base64-alphabet lines are affected — normal prose/code after a stray
-    // marker keeps flowing through the per-line detectors untouched.
+    // Detector (d) block state + the consecutive-block-line run that bounds an
+    // unterminated BEGIN via PEM_BLOCK_LINE_CAP.
     let mut in_pem = false;
+    let mut pem_line_run = 0usize;
     for line in content.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if in_pem {
-            // `contains`, not `starts_with`: the END of an inline literal often
-            // carries trailing code (`-----END X-----`;`) or leading quotes.
-            if trimmed.contains("-----END") {
-                // Re-evaluate entry after exit: a concatenated bundle missing the
-                // interior newline CLOSES one block and OPENS the next on the same
-                // physical line (`-----END X----------BEGIN Y-----`); gating entry
-                // behind `else` leaked the second block's body. The marker line
-                // itself still falls through to the normal passes.
-                in_pem = opens_pem_block(trimmed);
-            } else if is_pem_body_line(trimmed) || is_quoted_pem_body_line(trimmed) {
-                // Whole-line redaction, preserving surrounding whitespace/newline
-                // (trim boundaries are char boundaries, so slicing is safe).
+        let was_in_pem = in_pem;
+        let (now_in_pem, opened_block) = pem_state_after_line(line, in_pem);
+        in_pem = now_in_pem;
+        if was_in_pem || in_pem {
+            // Detector (d): any line touching an open block — body, concat
+            // fragments in any string syntax, encrypted-PEM headers, and the
+            // marker lines themselves (they carry no secret, but blanking them
+            // keeps the rule uniform) — is redacted WHOLE. Preserve the
+            // surrounding whitespace/newline (trim boundaries are char
+            // boundaries, so slicing is safe); whitespace-only lines carry
+            // nothing to redact and pass through unchanged.
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                out.push_str(line);
+            } else {
                 out.push_str(&line[..line.len() - line.trim_start().len()]);
                 out.push_str("REDACTED");
                 out.push_str(&line[line.trim_end().len()..]);
                 count += 1;
-                continue;
             }
-            // Non-body lines (e.g. `Proc-Type:` headers in encrypted PEM) fall
-            // through to the normal passes; the block stays open until `-----END`.
-        } else if opens_pem_block(trimmed) {
-            in_pem = true; // the marker token itself is redacted by detector (a)
+            if opened_block {
+                pem_line_run = 0; // fresh block: the cap run is per block, not cumulative
+            }
+            pem_line_run += 1;
+            if in_pem && pem_line_run >= PEM_BLOCK_LINE_CAP {
+                in_pem = false; // auto-close: a stray BEGIN, not a real body
+            }
+            if !in_pem {
+                pem_line_run = 0; // block closed (END or cap): run over
+            }
+            continue;
         }
         let (keyed, kn) = redact_keyed_values(line);
         let (scanned, cn) = redact_candidates(&keyed);
@@ -481,36 +497,43 @@ mod tests {
         assert!(r.contains("fn after() {}"), "{r}");
     }
 
-    /// Encrypted-PEM headers (`Proc-Type:`/`DEK-Info:`) between BEGIN and the
-    /// body must not close the block — the body after them is still redacted.
+    /// Encrypted-PEM headers (`Proc-Type:`/`DEK-Info:`) sit between BEGIN and
+    /// the body; wholesale between-marker redaction blanks them along with the
+    /// body (`DEK-Info` carries the IV — it IS key material), and the interior
+    /// blank line must not close the block or grow the output.
     #[test]
-    fn pem_block_survives_encryption_headers() {
+    fn pem_block_redacts_encryption_headers_and_body() {
         let src = "-----BEGIN RSA PRIVATE KEY-----\n\
                    Proc-Type: 4,ENCRYPTED\n\
                    DEK-Info: AES-128-CBC,ABCD\n\
                    \n\
                    WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
-                   -----END RSA PRIVATE KEY-----\n";
+                   -----END RSA PRIVATE KEY-----\n\
+                   fn after() {}\n";
         let (r, _) = redact(src);
         assert!(!r.contains("WqZx83Ky"), "body after headers leaked: {r}");
-        assert!(r.contains("Proc-Type"), "header line wrongly blanked: {r}");
+        assert!(!r.contains("DEK-Info"), "encrypted-PEM header leaked (carries the IV): {r}");
+        assert!(r.contains("\n\n"), "interior blank line not preserved as-is: {r}");
+        assert!(r.contains("fn after() {}"), "code after the block lost: {r}");
     }
 
-    /// A QUOTED marker now opens the block too (conservative-by-design — inline
+    /// A QUOTED marker opens the block too (conservative-by-design — inline
     /// PEMs live inside string literals, so quote-stripping the entry check is
-    /// exactly what leaked; see the assignment-line test). The accepted cost is
-    /// bounded: while the block is open only FULL base64-alphabet lines are
-    /// blanked, so normal code keeps flowing through, and a quoted `-----END`
-    /// closes the block again.
+    /// exactly what leaked; see the assignment-line test). Under wholesale
+    /// between-marker redaction the accepted over-redaction grew: EVERY line
+    /// between a quoted BEGIN "header constant" and the matching END is
+    /// blanked, code or not. The quoted `-----END` still closes the block
+    /// (later code survives), and PEM_BLOCK_LINE_CAP bounds a header constant
+    /// with no footer.
     #[test]
-    fn quoted_pem_marker_over_redacts_only_base64_lines() {
+    fn quoted_pem_marker_pair_blanks_the_whole_interior() {
         let src = "const HEADER = \"-----BEGIN CERTIFICATE-----\";\n\
                    let route = \"api/v0cfg/get\";\n\
                    const FOOTER = \"-----END CERTIFICATE-----\";\n\
                    ok\n";
         let (r, _) = redact(src);
-        assert!(r.contains("api/v0cfg/get"), "code inside open block lost: {r}");
-        assert!(r.contains("ok\n"), "all-alnum line after quoted END lost: {r}");
+        assert!(!r.contains("api/v0cfg/get"), "interior of an open block must be blanked: {r}");
+        assert!(r.contains("ok\n"), "line after quoted END lost: {r}");
     }
 
     /// Review of the 2026-07-05 fix: the most common real-world inline-PEM shape
@@ -587,6 +610,38 @@ mod tests {
         }
     }
 
+    /// Review round 3 of the 2026-07-05 fix, confirmed defect: operator-FIRST
+    /// concat puts the `+` (or PHP's `.`) where the old quoted-body predicate
+    /// didn't allow it — a leading operator (the line no longer STARTS with a
+    /// quote) or a trailing `.` (absent from the suffix allowlist) — so every
+    /// `/`-split shard leaked. Wholesale between-marker redaction has no body
+    /// predicate left to fool.
+    #[test]
+    fn pem_block_redacts_operator_first_and_dot_concat_body_lines() {
+        // JS/TS operator-first `+` continuation style.
+        let js = "const pem = \"-----BEGIN RSA PRIVATE KEY-----\\n\"\n\
+                  + \"WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\\n\"\n\
+                  + \"-----END RSA PRIVATE KEY-----\\n\";\n\
+                  function afterward() {}\n";
+        // PHP dot-concat (trailing `.` operator).
+        let php = "$pem = \"-----BEGIN RSA PRIVATE KEY-----\\n\" .\n\
+                   \"WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\\n\" .\n\
+                   \"-----END RSA PRIVATE KEY-----\\n\";\n\
+                   function afterward() {}\n";
+        for src in [js, php] {
+            let (r, n) = redact(src);
+            assert!(n >= 1, "expected body redaction: {r}");
+            for shard in [
+                "WqZx83Ky", "VnPb27Jm", "HcQf94Dw", "LqNs61Bu", "KvYw52Ez", "PjLm73Nq",
+                "XrWt84Uz",
+            ] {
+                assert!(!r.contains(shard), "PEM shard leaked: {shard} in {r}");
+            }
+            // the quoted -----END fragment closes the block: code after survives
+            assert!(r.contains("afterward"), "code after the literal lost: {r}");
+        }
+    }
+
     /// Review round 2 of the 2026-07-05 fix: a concatenated bundle missing the
     /// interior newline CLOSES one block and OPENS the next on the SAME physical
     /// line (`cat a.pem b.pem` output pasted into a code file or heredoc). Entry
@@ -620,6 +675,78 @@ mod tests {
                    done\n";
         let (r, _) = redact(src);
         assert!(r.contains("done"), "block left open past same-line BEGIN/END: {r}");
+    }
+
+    /// Review round 3, confirmed defect: a complete single-line block followed
+    /// by a FRESH `-----BEGIN` on the same physical line. The old entry check
+    /// ("no `-----END` after the BEGIN") saw the FIRST block's END and refused
+    /// to open, leaking the second block's `/`-split body. Left-to-right marker
+    /// folding (BEGIN, END, BEGIN) ends the line in the OPEN state by
+    /// construction.
+    #[test]
+    fn single_line_block_then_begin_opens_the_block() {
+        let src = "const A = \"-----BEGIN X-----\\nzz\\n-----END X-----\"; const B = `-----BEGIN RSA PRIVATE KEY-----\n\
+                   WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez/PjLm73Nq/XrWt84Uz\n\
+                   -----END RSA PRIVATE KEY-----`;\n\
+                   fn after() {}\n";
+        let (r, _) = redact(src);
+        for shard in [
+            "WqZx83Ky", "VnPb27Jm", "HcQf94Dw", "LqNs61Bu", "KvYw52Ez", "PjLm73Nq", "XrWt84Uz",
+        ] {
+            assert!(!r.contains(shard), "second-block shard leaked: {shard} in {r}");
+        }
+        // the -----END still closes the block: trailing code survives
+        assert!(r.contains("fn after() {}"), "{r}");
+    }
+
+    /// A stray unterminated `-----BEGIN ...-----` (prose/docs) must not blank
+    /// the rest of the file: the block auto-closes after PEM_BLOCK_LINE_CAP
+    /// consecutive block lines and everything past the cap flows through the
+    /// normal detectors untouched.
+    #[test]
+    fn unterminated_begin_auto_closes_at_the_cap() {
+        let mut src = String::from("-----BEGIN RSA PRIVATE KEY-----\n");
+        for i in 0..PEM_BLOCK_LINE_CAP + 40 {
+            src.push_str(&format!("prose line {i} kept flowing\n"));
+        }
+        src.push_str("fn survives() {}\n");
+        let (r, _) = redact(&src);
+        // Inside the cap: the stray marker DID open a block (conservative).
+        assert!(!r.contains("prose line 0 "), "line inside cap leaked");
+        // The marker line consumes run slot 1, so prose lines 0..=CAP-2 are the
+        // remaining CAP-1 blanked lines; CAP-1 is the first survivor.
+        let first_surviving = PEM_BLOCK_LINE_CAP - 1;
+        assert!(
+            !r.contains(&format!("prose line {} ", first_surviving - 1)),
+            "line inside cap leaked"
+        );
+        assert!(
+            r.contains(&format!("prose line {first_surviving} ")),
+            "block did not auto-close at the cap"
+        );
+        assert!(r.contains("fn survives() {}"), "trailing code lost");
+    }
+
+    /// Re-verify defect (2026-07-06): the cap run must restart at a same-line
+    /// END-then-BEGIN junction. With a cumulative run, a first block ending
+    /// near the cap forces the auto-close a few lines into the SECOND block and
+    /// leaks its `/`-split body tail.
+    #[test]
+    fn same_line_junction_restarts_the_cap_run_per_block() {
+        let mut src = String::from("-----BEGIN CERTIFICATE-----\n");
+        for i in 0..PEM_BLOCK_LINE_CAP - 2 {
+            src.push_str(&format!("certbody{i}AAAA\n"));
+        }
+        src.push_str("-----END CERTIFICATE----------BEGIN RSA PRIVATE KEY-----\n");
+        src.push_str("WqZx83Ky/VnPb27Jm/HcQf94Dw/LqNs61Bu/KvYw52Ez\n");
+        src.push_str("PjLm73Nq/XrWt84Uz/MnBv65Cx/QwEr21Ty/UiOp09As\n");
+        src.push_str("-----END RSA PRIVATE KEY-----\n");
+        src.push_str("fn after() {}\n");
+        let (r, _) = redact(&src);
+        for shard in ["WqZx83Ky", "KvYw52Ez", "PjLm73Nq", "UiOp09As"] {
+            assert!(!r.contains(shard), "second-block shard leaked past a cumulative cap run: {shard} in {r}");
+        }
+        assert!(r.contains("fn after() {}"), "trailing code lost: {r}");
     }
 
     #[test]
