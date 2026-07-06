@@ -2,6 +2,12 @@
 //! Commands are READERS: they open their own read-only SQLite connection (WAL →
 //! wait-free vs. the worker's writes) and never block the worker. Fail-open: a
 //! warming/degraded brain returns partial/empty results, not errors.
+//!
+//! Threading (ADR-010 cluster 6): every command that opens a SQLite connection is
+//! `async` (off the Tauri MAIN thread) and runs the read on the blocking pool via
+//! [`blocking`], so a 5s `busy_timeout` during an indexing burst can freeze
+//! neither the UI nor the async runtime. Pure in-memory/enqueue commands stay
+//! sync — they are lock-snapshot + mpsc-send, microseconds on the main thread.
 
 use tauri::State;
 
@@ -34,8 +40,9 @@ pub fn brain_list_projects(state: State<BrainState>) -> Vec<Project> {
 
 /// Register a new project root (the wizard / "add folder" flow) and trigger a
 /// reconcile so it gets indexed + watched. Returns the registered project.
+/// Async: the `is_dir`/canonicalize stats can stall on a dead network drive.
 #[tauri::command]
-pub fn brain_add_project(state: State<BrainState>, path: String) -> Result<Project, String> {
+pub async fn brain_add_project(state: State<'_, BrainState>, path: String) -> Result<Project, String> {
     let pb = std::path::PathBuf::from(&path);
     if !pb.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -79,8 +86,12 @@ pub fn brain_workspace_status(state: State<BrainState>) -> WorkspaceStatus {
 /// Set the workspace root (source of truth) and auto-register each immediate child
 /// that looks like a real project (has .git / a manifest) as its OWN project. Returns
 /// the added projects; the worker indexes them, re-arms the watcher, and persists.
+/// Async: the child-marker discovery walk is filesystem I/O (one-shot wizard action).
 #[tauri::command]
-pub fn brain_set_workspace(state: State<BrainState>, path: String) -> Result<Vec<Project>, String> {
+pub async fn brain_set_workspace(
+    state: State<'_, BrainState>,
+    path: String,
+) -> Result<Vec<Project>, String> {
     let root = std::path::PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -99,33 +110,35 @@ pub fn brain_set_workspace(state: State<BrainState>, path: String) -> Result<Vec
 
 /// Overall status + per-project indexed file counts.
 #[tauri::command]
-pub fn brain_index_status(state: State<BrainState>) -> BrainStatusReport {
+pub async fn brain_index_status(state: State<'_, BrainState>) -> Result<BrainStatusReport, String> {
     let status = state
         .status
         .read()
         .map(|s| s.clone())
         .unwrap_or(BrainStatus::Degraded { reason: "status lock poisoned".into() });
     let db = state.db_path.read().ok().and_then(|p| p.clone());
-    let projects = state
-        .registry
-        .projects()
-        .into_iter()
-        .map(|project| {
-            let files = match &db {
-                Some(path) => store::file_count_readonly(path, &project.id).unwrap_or(0),
-                None => 0,
-            };
-            ProjectStatus { project, files }
-        })
-        .collect();
-    BrainStatusReport { status, projects }
+    let registered = state.registry.projects();
+    blocking(move || {
+        let projects = registered
+            .into_iter()
+            .map(|project| {
+                let files = match &db {
+                    Some(path) => store::file_count_readonly(path, &project.id).unwrap_or(0),
+                    None => 0,
+                };
+                ProjectStatus { project, files }
+            })
+            .collect();
+        BrainStatusReport { status, projects }
+    })
+    .await
 }
 
 /// Lexical (BM25 + weighted RRF) search across code (and, from P1, notes).
 /// `project = None` searches every registered project.
 #[tauri::command]
-pub fn brain_search(
-    state: State<BrainState>,
+pub async fn brain_search(
+    state: State<'_, BrainState>,
     project: Option<String>,
     query: String,
     limit: Option<usize>,
@@ -135,26 +148,29 @@ pub fn brain_search(
         return Ok(Vec::new());
     };
     let limit = limit.unwrap_or(20).clamp(1, 200);
-    match store::search_readonly(&db, project.as_deref(), &query, limit) {
-        Ok(hits) => Ok(hits),
+    blocking(move || match store::search_readonly(&db, project.as_deref(), &query, limit) {
+        Ok(hits) => hits,
         // A missing/locked DB during warmup is not a user error.
         Err(e) => {
             log::debug!("brain_search soft error: {e}");
-            Ok(Vec::new())
+            Vec::new()
         }
-    }
+    })
+    .await
 }
 
 /// Build the cache-stable gist for a project + intent (P3). Zero tokens; an
 /// unchanged relaunch returns a byte-identical gist. `None` if the index isn't ready.
 #[tauri::command]
-pub fn brain_build_gist(
-    state: State<BrainState>,
+pub async fn brain_build_gist(
+    state: State<'_, BrainState>,
     project: String,
     intent: String,
     budget: Option<usize>,
-) -> Option<Gist> {
-    let db = state.db_path.read().ok().and_then(|p| p.clone())?;
+) -> Result<Option<Gist>, String> {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Ok(None);
+    };
     let name = state
         .registry
         .projects()
@@ -162,7 +178,8 @@ pub fn brain_build_gist(
         .find(|p| p.id == project)
         .map(|p| p.name)
         .unwrap_or_else(|| project.clone());
-    Some(gist::build_gist_auto(&db, &project, &name, &intent, budget.unwrap_or(800)))
+    blocking(move || Some(gist::build_gist_auto(&db, &project, &name, &intent, budget.unwrap_or(800))))
+        .await
 }
 
 /// Allowlist for ids spliced into a filename: `[A-Za-z0-9_-]{1,64}`. Rejects path
@@ -177,8 +194,8 @@ fn valid_agent_id(id: &str) -> bool {
 /// the agent's `--append-system-prompt` file (`~/.koden/agent-<agent_id>.txt`) so
 /// a launching agent gets project context. Returns the gist for the toast.
 #[tauri::command]
-pub fn brain_write_gist(
-    state: State<BrainState>,
+pub async fn brain_write_gist(
+    state: State<'_, BrainState>,
     project: String,
     intent: String,
     agent_id: String,
@@ -203,51 +220,62 @@ pub fn brain_write_gist(
         .unwrap_or_else(|| project.clone());
     let home = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
     let path = home.join(".koden").join(format!("agent-{agent_id}.txt"));
-    gist::write_gist(&db, &project, &name, &intent, budget.unwrap_or(800), &path)
-        .map_err(|e| format!("write gist: {e}"))
+    blocking(move || {
+        gist::write_gist(&db, &project, &name, &intent, budget.unwrap_or(800), &path)
+            .map_err(|e| format!("write gist: {e}"))
+    })
+    .await?
 }
 
 /// Definition locations of a symbol (path/kind/line) — the AST graph (P2).
 #[tauri::command]
-pub fn brain_get_symbol(
-    state: State<BrainState>,
+pub async fn brain_get_symbol(
+    state: State<'_, BrainState>,
     project: String,
     symbol: String,
-) -> Vec<SymbolInfo> {
+) -> Result<Vec<SymbolInfo>, String> {
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    store::get_symbol_readonly(&db, &project, &symbol).unwrap_or_default()
+    blocking(move || store::get_symbol_readonly(&db, &project, &symbol).unwrap_or_default()).await
 }
 
 /// Tiered impact of a symbol: AST reverse-import dependents + lexical candidates.
 #[tauri::command]
-pub fn brain_code_impact(
-    state: State<BrainState>,
+pub async fn brain_code_impact(
+    state: State<'_, BrainState>,
     project: String,
     symbol: String,
     depth: Option<usize>,
-) -> Impact {
+) -> Result<Impact, String> {
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return Impact { symbol, ..Default::default() };
+        return Ok(Impact { symbol, ..Default::default() });
     };
     let depth = depth.unwrap_or(5).clamp(1, 20);
-    store::code_impact_readonly(&db, &project, &symbol, depth).unwrap_or(Impact {
-        symbol,
-        ..Default::default()
+    blocking(move || match store::code_impact_readonly(&db, &project, &symbol, depth) {
+        Ok(impact) => impact,
+        Err(_) => Impact { symbol, ..Default::default() },
     })
+    .await
 }
 
 /// Whole-brain knowledge graph for the Brain Map: project hubs + (capped) files +
 /// memory notes, with containment/import/anchor edges. Read-only snapshot.
 #[tauri::command]
-pub fn brain_graph(state: State<BrainState>, max_files: Option<usize>) -> store::BrainGraph {
+pub async fn brain_graph(
+    state: State<'_, BrainState>,
+    max_files: Option<usize>,
+) -> Result<store::BrainGraph, String> {
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return store::BrainGraph::default();
+        return Ok(store::BrainGraph::default());
     };
     let projects: Vec<(String, String)> =
         state.registry.projects().into_iter().map(|p| (p.id, p.name)).collect();
-    store::graph_readonly(&db, &projects, max_files.unwrap_or(80).clamp(1, 2000)).unwrap_or_default()
+    blocking(move || {
+        store::graph_readonly(&db, &projects, max_files.unwrap_or(80).clamp(1, 2000))
+            .unwrap_or_default()
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -271,11 +299,14 @@ mod tests {
 
 /// Structured memory notes (review inbox / cards). `project = None` = all.
 #[tauri::command]
-pub fn brain_notes(state: State<BrainState>, project: Option<String>) -> Vec<NoteSummary> {
+pub async fn brain_notes(
+    state: State<'_, BrainState>,
+    project: Option<String>,
+) -> Result<Vec<NoteSummary>, String> {
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    store::list_notes_readonly(&db, project.as_deref()).unwrap_or_default()
+    blocking(move || store::list_notes_readonly(&db, project.as_deref()).unwrap_or_default()).await
 }
 
 /// Trigger a full reconcile (add/change/delete) of all registered projects, or a
@@ -287,11 +318,15 @@ pub fn brain_rescan(state: State<BrainState>, project: Option<String>) -> Result
 
 /// Pending memory proposals (the review inbox). `project = None` = all.
 #[tauri::command]
-pub fn brain_proposals(state: State<BrainState>, project: Option<String>) -> Vec<MemoryProposal> {
+pub async fn brain_proposals(
+    state: State<'_, BrainState>,
+    project: Option<String>,
+) -> Result<Vec<MemoryProposal>, String> {
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    store::list_proposals_readonly(&db, project.as_deref()).unwrap_or_default()
+    blocking(move || store::list_proposals_readonly(&db, project.as_deref()).unwrap_or_default())
+        .await
 }
 
 /// Run the memory doctor (queues proposals on the worker). `now_date` (ISO
@@ -377,11 +412,11 @@ pub fn brain_curate(
 
 /// Reflect budget meter: `(ceiling_usd, spent_total_usd)`. Read-only.
 #[tauri::command]
-pub fn brain_budget_status(state: State<BrainState>) -> (f64, f64) {
+pub async fn brain_budget_status(state: State<'_, BrainState>) -> Result<(f64, f64), String> {
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return (0.0, 0.0);
+        return Ok((0.0, 0.0));
     };
-    store::budget_state_readonly(&db).unwrap_or((0.0, 0.0))
+    blocking(move || store::budget_state_readonly(&db).unwrap_or((0.0, 0.0))).await
 }
 
 /// The current Librarian LLM selection (read-only). Defaults to Anthropic Haiku
@@ -396,7 +431,7 @@ pub struct LibrarianStatus {
 }
 
 #[tauri::command]
-pub fn brain_librarian_status(state: State<BrainState>) -> LibrarianStatus {
+pub async fn brain_librarian_status(state: State<'_, BrainState>) -> Result<LibrarianStatus, String> {
     let def = || LibrarianStatus {
         provider: "anthropic".to_string(),
         model: "claude-haiku-4-5".to_string(),
@@ -405,14 +440,15 @@ pub fn brain_librarian_status(state: State<BrainState>) -> LibrarianStatus {
         out_rate_mtok: 5.0,
     };
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return def();
+        return Ok(def());
     };
-    match store::librarian_config_readonly(&db) {
+    blocking(move || match store::librarian_config_readonly(&db) {
         Ok((provider, model, base_url, in_rate_mtok, out_rate_mtok)) => {
             LibrarianStatus { provider, model, base_url, in_rate_mtok, out_rate_mtok }
         }
         Err(_) => def(),
-    }
+    })
+    .await
 }
 
 /// One Librarian LLM call from the budget ledger. `cost_usd` is the actual reported
@@ -438,7 +474,9 @@ pub struct LibrarianActivity {
 }
 
 #[tauri::command]
-pub fn brain_librarian_activity(state: State<BrainState>) -> LibrarianActivity {
+pub async fn brain_librarian_activity(
+    state: State<'_, BrainState>,
+) -> Result<LibrarianActivity, String> {
     let empty = LibrarianActivity {
         ceiling_usd: 0.0,
         spent_usd: 0.0,
@@ -446,21 +484,24 @@ pub fn brain_librarian_activity(state: State<BrainState>) -> LibrarianActivity {
         calls: Vec::new(),
     };
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return empty;
+        return Ok(empty);
     };
-    let (ceiling_usd, spent_usd) = store::budget_state_readonly(&db).unwrap_or((0.0, 0.0));
-    let pending_proposals = store::pending_proposals_readonly(&db).unwrap_or(0);
-    let calls = store::librarian_ledger_readonly(&db, 12)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(status, est, actual, model, at_ms)| LedgerCall {
-            cost_usd: actual.unwrap_or(est),
-            status,
-            model,
-            at_ms,
-        })
-        .collect();
-    LibrarianActivity { ceiling_usd, spent_usd, pending_proposals, calls }
+    blocking(move || {
+        let (ceiling_usd, spent_usd) = store::budget_state_readonly(&db).unwrap_or((0.0, 0.0));
+        let pending_proposals = store::pending_proposals_readonly(&db).unwrap_or(0);
+        let calls = store::librarian_ledger_readonly(&db, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(status, est, actual, model, at_ms)| LedgerCall {
+                cost_usd: actual.unwrap_or(est),
+                status,
+                model,
+                at_ms,
+            })
+            .collect();
+        LibrarianActivity { ceiling_usd, spent_usd, pending_proposals, calls }
+    })
+    .await
 }
 
 /// Panes recoverable from the previous session (P4 crash-resume), computed at boot
@@ -468,6 +509,21 @@ pub fn brain_librarian_activity(state: State<BrainState>) -> LibrarianActivity {
 #[tauri::command]
 pub fn brain_recovered_panes(state: State<BrainState>) -> Vec<crate::modules::brain::resume::RecoveredPane> {
     state.recovered.read().map(|r| r.clone()).unwrap_or_default()
+}
+
+/// Run a blocking read-only store call on the blocking pool (mirrors
+/// `git::commands::blocking`). The async command is already off the Tauri main
+/// thread; this keeps a `busy_timeout`-bound SQLite read from starving the async
+/// runtime too. `Err` only if the task can't be joined (it panicked) — which
+/// previously would have unwound the main thread.
+async fn blocking<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("brain read task failed: {e}"))
 }
 
 /// Enqueue a worker event via the registered sender (single-writer discipline).

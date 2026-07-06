@@ -49,8 +49,46 @@ const BINARY_SNIFF_BYTES: usize = 8192;
 pub fn spawn_brain_worker(app: AppHandle, launch_dir: Option<String>) {
     std::thread::Builder::new()
         .name("koden-brain-worker".into())
-        .spawn(move || brain_loop(app, launch_dir))
+        .spawn(move || {
+            // Panic observability (ADR-010 cluster 6): if the loop unwinds, the
+            // guard flips status to Degraded so the UI sees a dead brain instead
+            // of a permanently-"Ready" zombie. Defused on a clean return, which
+            // keeps whatever status the loop last set (incl. early Degraded exits).
+            let app_panic = app.clone();
+            let guard = PanicStatusGuard::arm(move || {
+                log::error!("brain: worker thread panicked; status -> degraded");
+                set_status(
+                    &app_panic,
+                    BrainStatus::Degraded { reason: "worker thread panicked".into() },
+                );
+            });
+            brain_loop(app, launch_dir);
+            guard.defuse();
+        })
         .expect("spawn koden-brain worker thread");
+}
+
+/// Drop-guard armed at worker start: runs `on_panic` when dropped by an unwind,
+/// does nothing after `defuse()` (the clean-shutdown path).
+struct PanicStatusGuard<F: FnOnce()> {
+    on_panic: Option<F>,
+}
+
+impl<F: FnOnce()> PanicStatusGuard<F> {
+    fn arm(on_panic: F) -> Self {
+        Self { on_panic: Some(on_panic) }
+    }
+    fn defuse(mut self) {
+        self.on_panic = None; // the ensuing Drop sees None and no-ops
+    }
+}
+
+impl<F: FnOnce()> Drop for PanicStatusGuard<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.on_panic.take() {
+            f();
+        }
+    }
 }
 
 fn set_status(app: &AppHandle, status: BrainStatus) {
@@ -1058,6 +1096,30 @@ mod tests {
         apply_round_outcome(&mut st, &R::Ok, Some("h2".into()));
         assert_eq!(st.fail_streak, 0);
         assert_eq!(st.digest_hash.as_deref(), Some("h2"));
+    }
+
+    /// ADR-010 cluster 6: a worker panic must flip status to Degraded (via the
+    /// armed guard's Drop during unwind); a clean, defused return must not.
+    #[test]
+    fn panic_guard_fires_on_unwind_not_on_clean_return() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Clean shutdown: defused guard never fires.
+        let fired = Arc::new(AtomicBool::new(false));
+        let f = fired.clone();
+        let guard = PanicStatusGuard::arm(move || f.store(true, Ordering::SeqCst));
+        guard.defuse();
+        assert!(!fired.load(Ordering::SeqCst), "defused guard must not fire");
+
+        // Panic path: the unwind drops the armed guard → the hook fires.
+        let f = fired.clone();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = PanicStatusGuard::arm(move || f.store(true, Ordering::SeqCst));
+            panic!("simulated worker death");
+        }));
+        assert!(unwound.is_err());
+        assert!(fired.load(Ordering::SeqCst), "unwound guard must flip status");
     }
 
     #[test]
