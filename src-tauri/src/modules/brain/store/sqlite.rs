@@ -965,6 +965,19 @@ pub fn code_impact_readonly(
     })
 }
 
+/// Tokenize a search query and DEDUPE repeated terms (first occurrence wins —
+/// deterministic, order-preserving). `tokenize` emits whole + camel-split + stem
+/// forms, so a repeated word (or camelCase parts recurring across query words)
+/// would appear twice in the MATCH OR-list and double-count in bm25, biasing
+/// multi-term queries toward the repeated term. Conductr's reference query path
+/// scores a deduped term set; mirror it (ADR-010 cluster 7).
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut toks = tokenize::tokenize(query);
+    let mut seen = std::collections::HashSet::new();
+    toks.retain(|t| seen.insert(t.clone()));
+    toks
+}
+
 /// Build the FTS5 column-filtered OR query for a set of pre-tokenized query terms.
 /// Tokens are pure ASCII alnum, quoted as FTS5 string literals.
 fn build_match(columns: &str, q_tokens: &[String]) -> String {
@@ -1073,7 +1086,7 @@ pub fn search_with_weights(
     limit: usize,
     w: &SearchWeights,
 ) -> rusqlite::Result<Vec<Hit>> {
-    let q_tokens = tokenize::tokenize(query);
+    let q_tokens = query_tokens(query);
     if q_tokens.is_empty() {
         return Ok(Vec::new());
     }
@@ -1488,6 +1501,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
         (dir, path)
+    }
+
+    /// ADR-010 cluster 7: repeated query terms are deduped (first occurrence wins)
+    /// before the MATCH so they can't double-count in bm25. camelCase queries emit
+    /// whole + part tokens, so duplicates arise even from distinct words.
+    #[test]
+    fn query_tokens_dedupes_preserving_first_occurrence_order() {
+        assert_eq!(query_tokens("getUser getUser data"), vec!["getuser", "get", "user", "data"]);
+        // Parts recurring ACROSS words dedupe too ("user" from both camel splits).
+        assert_eq!(
+            query_tokens("getUser userData"),
+            vec!["getuser", "get", "user", "userdata", "data"]
+        );
+        assert!(query_tokens("").is_empty());
     }
 
     /// ADR-010 cluster 4: a NOTADB cache file (garbage bytes) must not brick the

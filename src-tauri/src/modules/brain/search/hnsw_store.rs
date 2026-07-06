@@ -2,10 +2,11 @@
 //! World ANN), behind `feature = "semantic"`. Pure Rust (no ONNX/network), so it
 //! builds + tests offline — unlike the embedder, which needs a model download.
 //!
-//! HNSW is append-only (no in-place delete), which matches the brain's model: the
-//! vector index is rebuilt from the persisted embeddings, not mutated in place. So
-//! `upsert` APPENDS; `query` de-dups by DocId (keeps the nearest) so a re-inserted
-//! id never returns twice. Cosine DISTANCE is converted to a higher-is-better score
+//! HNSW is append-only (no in-place delete), so REPLACE is implemented by
+//! tombstone: every `upsert` appends, and a per-DocId `live` map points at the
+//! NEWEST insertion — `query` filters superseded/removed insertions, so a stale
+//! embedding can never outrank the current one after an edit (ADR-010 cluster 7).
+//! `remove` tombstones the same way. Cosine DISTANCE is converted to a higher-is-better score
 //! `1 - distance`; hnsw_rs DistCosine returns `1 - cosΘ ∈ [0, 2]`, so the score is
 //! cosine similarity in `[-1, 1]` (same range as the BruteForceStore reference) — NOT
 //! `[0, 1]`. The RRF fuser consumes leg RANK, not score magnitude, so the sign is
@@ -34,6 +35,10 @@ struct Inner {
     hnsw: Hnsw<'static, f32, DistCosine>,
     /// data-id (insertion index) → DocId, so search results map back to DocIds.
     ids: Vec<DocId>,
+    /// DocId → its CURRENT (live) data-id. hnsw_rs cannot delete in place, so
+    /// replace/remove are tombstones: superseded insertions stay in the graph but
+    /// only the live one may surface from `query`.
+    live: std::collections::HashMap<DocId, usize>,
 }
 
 pub struct HnswStore {
@@ -48,7 +53,11 @@ impl HnswStore {
             Hnsw::<f32, DistCosine>::new(MAX_NB_CONN, capacity.max(1), MAX_LAYER, EF_CONSTRUCTION, DistCosine {});
         Self {
             embedder_id: embedder_id.to_string(),
-            inner: Mutex::new(Inner { hnsw, ids: Vec::new() }),
+            inner: Mutex::new(Inner {
+                hnsw,
+                ids: Vec::new(),
+                live: std::collections::HashMap::new(),
+            }),
         }
     }
 }
@@ -67,32 +76,46 @@ impl VectorStore for HnswStore {
             let data_id = inner.ids.len();
             inner.hnsw.insert((vec, data_id));
             inner.ids.push(id.clone());
+            // REPLACE semantics: the newest insertion becomes the live one; any
+            // prior insertion of this id is tombstoned (filtered at query time).
+            inner.live.insert(id.clone(), data_id);
+        }
+        Ok(())
+    }
+
+    fn remove(&self, ids: &[DocId]) -> Result<(), String> {
+        let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
+        for id in ids {
+            inner.live.remove(id); // tombstone — the insertion stays but never surfaces
         }
         Ok(())
     }
 
     fn query(&self, vector: &[f32], k: usize) -> Result<Vec<(DocId, f32)>, String> {
         let inner = self.inner.lock().map_err(|e| e.to_string())?;
-        if inner.ids.is_empty() || k == 0 {
+        if inner.live.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
-        // Over-fetch so de-dup by DocId can still return k distinct docs.
-        // ponytail: k*2 assumes ≤1 duplicate per slot — true for the intended flow
-        // (rebuild-from-persisted → each id inserted once). If a single id is
-        // re-upserted enough to crowd the 2k window it can under-return; grow the
-        // fetch (re-search up to ids.len()) only if live repeated upserts become real.
-        let knbn = (k * 2).min(inner.ids.len());
+        // Over-fetch by the tombstone count: among any (k + stale) nearest
+        // insertions at most `stale` are dead, so k live docs stay reachable (each
+        // live DocId has exactly ONE live insertion — no same-doc duplicates).
+        // ponytail: the window grows with churn, degrading toward a full scan for a
+        // long-lived store under heavy re-upserts; the intended flow (rebuild from
+        // persisted embeddings at boot) resets it. Upgrade path = periodically
+        // rebuild the graph from the live set once live churn is real.
+        let stale = inner.ids.len() - inner.live.len();
+        let knbn = (k + stale).min(inner.ids.len());
         let neighbours = inner.hnsw.search(vector, knbn, EF_SEARCH);
-        let mut seen = std::collections::HashSet::new();
         let mut out = Vec::with_capacity(k);
         for n in neighbours {
             let Some(doc) = inner.ids.get(n.d_id) else { continue };
-            if seen.insert(doc.clone()) {
-                // cosine DISTANCE → higher-is-better similarity score.
-                out.push((doc.clone(), 1.0 - n.distance));
-                if out.len() == k {
-                    break;
-                }
+            if inner.live.get(doc) != Some(&n.d_id) {
+                continue; // superseded (re-upserted) or removed insertion
+            }
+            // cosine DISTANCE → higher-is-better similarity score.
+            out.push((doc.clone(), 1.0 - n.distance));
+            if out.len() == k {
+                break;
             }
         }
         Ok(out)
@@ -137,6 +160,59 @@ mod tests {
         store.upsert(&["x".into()], &[v.clone()]).unwrap(); // re-insert same id
         let hits = store.query(&v, 10).unwrap();
         assert_eq!(hits.iter().filter(|(d, _)| d == "x").count(), 1, "re-inserted id returns once");
+    }
+
+    /// ADR-010 cluster 7: upsert REPLACES — after a re-embed the stale vector must
+    /// never win. Pre-fix, both insertions stayed live and a query near the OLD
+    /// vector returned the stale (nearest) one with similarity ~1.0.
+    ///
+    /// hnsw_rs ANN on a tiny RNG-layered graph (OS-seeded, see module docs) may
+    /// legitimately return FEWER neighbours than requested — e.g. only the
+    /// tombstoned insertion, which the live-map filter drops — so this asserts the
+    /// deterministic REPLACE invariant (the stale vector can never surface), not
+    /// exact ANN hit counts. The pre-fix bug still fails deterministically: both
+    /// insertions live → two "x" hits and/or a ~1.0 score at the OLD embedding.
+    #[test]
+    fn upsert_replaces_stale_embedding() {
+        let store = HnswStore::new("e", 16);
+        let old = unit(4, 0);
+        let new = unit(4, 1); // orthogonal: cosine(old, new) = 0
+        store.upsert(&["x".into()], &[old.clone()]).unwrap();
+        store.upsert(&["x".into()], &[new.clone()]).unwrap(); // the edit / re-embed
+        // Query at the OLD embedding: the only admissible hit is the live (new)
+        // vector at ~0 similarity — the stale one would score ~1.0 here.
+        let hits = store.query(&old, 5).unwrap();
+        assert!(hits.len() <= 1, "one live doc → at most one hit: {hits:?}");
+        if let Some((doc, score)) = hits.first() {
+            assert_eq!(doc, "x");
+            assert!(*score < 0.5, "stale vector must not win: score {score}");
+        }
+        // Query at the NEW embedding: if the live doc surfaces, it scores as itself.
+        let hits = store.query(&new, 5).unwrap();
+        assert!(hits.len() <= 1, "one live doc → at most one hit: {hits:?}");
+        if let Some((doc, score)) = hits.first() {
+            assert_eq!(doc, "x");
+            assert!(*score > 0.9, "live vector scores as itself: {score}");
+        }
+    }
+
+    /// ADR-010 cluster 7: a removed id never surfaces again (unknown ids no-op).
+    /// Same nondeterminism caveat as [upsert_replaces_stale_embedding]: assert the
+    /// tombstone invariant, not exact ANN hit counts.
+    #[test]
+    fn remove_tombstones_the_id() {
+        let store = HnswStore::new("e", 16);
+        store.upsert(&["x".into(), "y".into()], &[unit(4, 0), unit(4, 1)]).unwrap();
+        store.remove(&["x".into(), "never-existed".into()]).unwrap();
+        let hits = store.query(&unit(4, 0), 10).unwrap();
+        assert!(hits.iter().all(|(d, _)| d != "x"), "removed id must not surface: {hits:?}");
+        assert!(hits.len() <= 1, "only 'y' is live: {hits:?}");
+        if let Some((doc, _)) = hits.first() {
+            assert_eq!(doc, "y");
+        }
+        // Removing everything → empty results (deterministic short-circuit), no panic.
+        store.remove(&["y".into()]).unwrap();
+        assert!(store.query(&unit(4, 0), 3).unwrap().is_empty());
     }
 
     #[test]

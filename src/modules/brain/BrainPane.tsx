@@ -25,6 +25,7 @@ import {
   type NoteSummary,
   type Project,
 } from "./lib/bindings";
+import { proposalKey, reconcileProposals } from "./lib/proposalPoll";
 
 const MIN_QUERY_LEN = 2;
 const DEBOUNCE_MS = 300;
@@ -80,6 +81,9 @@ export function BrainPane() {
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastKeyboardNavAt = useRef(0);
+  // Proposal keys with an in-flight resolve: the optimistic removal must survive
+  // the bounded post-action poll until the worker applies it (ADR-010 cluster 7).
+  const pendingResolutions = useRef<Set<string>>(new Set());
 
   const active = query.trim().length > 0;
 
@@ -158,7 +162,13 @@ export function BrainPane() {
         brainNotes(project),
         brainBudgetStatus().catch(() => null),
       ]);
-      setProposals(proposalsRes);
+      // Hide proposals whose resolve is still in flight on the worker (and forget
+      // ones it has applied) — otherwise this poll clobbers the optimistic removal.
+      // Scoped to this fetch's project filter: a project-scoped list says nothing
+      // about other projects' pending keys (absence there is not "applied").
+      setProposals(
+        reconcileProposals(proposalsRes, pendingResolutions.current, project),
+      );
       setNotes(notesRes);
       setBudget(bud);
     } catch (e) {
@@ -241,9 +251,16 @@ export function BrainPane() {
   };
 
   const resolve = (p: MemoryProposal, reject: boolean) => {
-    void brainResolveProposal(p.project, p.signature, reject);
-    // optimistic removal; the poll reconciles once the worker applies it
-    setProposals((prev) => prev.filter((x) => x.signature !== p.signature));
+    const key = proposalKey(p.project, p.signature);
+    pendingResolutions.current.add(key);
+    brainResolveProposal(p.project, p.signature, reject).catch((e) => {
+      console.error("brain_resolve_proposal failed:", e);
+      pendingResolutions.current.delete(key); // let the next poll restore the card
+    });
+    // optimistic removal; the guarded poll reconciles once the worker applies it
+    setProposals((prev) =>
+      prev.filter((x) => proposalKey(x.project, x.signature) !== key),
+    );
     pollMemory();
   };
 

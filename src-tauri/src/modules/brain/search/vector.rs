@@ -24,8 +24,12 @@ pub trait Embedder: Send + Sync {
 pub trait VectorStore: Send + Sync {
     /// The embedder id this store was built with (mismatch ⇒ rebuild).
     fn embedder_id(&self) -> &str;
-    /// Insert-or-replace `(id → vector)` pairs.
+    /// Insert-or-replace `(id → vector)` pairs. REPLACE is load-bearing: after a
+    /// re-embed (file edit) the old vector must never surface from `query` again.
     fn upsert(&self, ids: &[DocId], vectors: &[Vec<f32>]) -> Result<(), String>;
+    /// Remove ids (unknown ids are a no-op). A removed id must never surface from
+    /// `query` again — the delete path for pruned files (ADR-010 cluster 7).
+    fn remove(&self, ids: &[DocId]) -> Result<(), String>;
     /// Top-`k` nearest, best-first, as `(id, score)`. `score` is higher-is-better
     /// cosine similarity in `[-1, 1]` (NOT `[0, 1]` — orthogonal is 0, opposed is
     /// negative); both impls agree. The RRF fuser uses leg RANK, not magnitude, so the

@@ -72,6 +72,39 @@ const TS_DEFS: &str = r#"
 (public_field_definition name: (property_identifier) @name)
 "#;
 
+/// TS/TSX scope anchor (ADR-010 cluster 7): a capture only counts as a DEFINITION
+/// when every enclosing scope is module- or class-like. The patterns above are
+/// unanchored, so without this a function-local `const`, a nested helper, an
+/// object-literal method, or a loop-header variable would register as a project
+/// symbol — graph noise that poisons impact analysis and the Brain Map. Walking up
+/// from the captured name: any function body (a `statement_block` not owned by a
+/// namespace/module), object literal, function expression, or loop header means
+/// the name is runtime-local. Rust needs no anchor (`let` locals aren't captured;
+/// nested items are real, named definitions).
+fn is_ts_module_scoped(name_node: tree_sitter::Node) -> bool {
+    let mut cur = name_node.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            // Namespace/module bodies are statement_blocks too — those stay allowed,
+            // as is `declare global { … }`, whose statement_block is owned directly
+            // by ambient_declaration (module/global scope, not a function body).
+            "statement_block"
+                if !matches!(
+                    n.parent().map(|p| p.kind()),
+                    Some("internal_module" | "module" | "ambient_declaration")
+                ) =>
+            {
+                return false;
+            }
+            "object" | "arrow_function" | "function_expression" | "generator_function"
+            | "for_statement" | "for_in_statement" => return false,
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    true
+}
+
 fn defs_query(lang: Lang) -> &'static str {
     match lang {
         Lang::Rust => RUST_DEFS,
@@ -99,6 +132,9 @@ pub fn extract_defs(lang: Lang, source: &str) -> Vec<String> {
     let mut it = cursor.matches(&query, tree.root_node(), src);
     while let Some(m) = it.next() {
         for cap in m.captures {
+            if matches!(lang, Lang::TypeScript | Lang::Tsx) && !is_ts_module_scoped(cap.node) {
+                continue; // function-local / object-literal — not a definition
+            }
             if let Ok(t) = cap.node.utf8_text(src) {
                 if !t.is_empty() {
                     out.push(t.to_string());
@@ -217,6 +253,9 @@ fn run_defs(language: &Language, lang: Lang, tree: &Tree, src: &[u8]) -> Vec<Cod
     while let Some(m) = it.next() {
         for cap in m.captures {
             let node = cap.node;
+            if matches!(lang, Lang::TypeScript | Lang::Tsx) && !is_ts_module_scoped(node) {
+                continue; // function-local / object-literal — not a definition
+            }
             if let Ok(name) = node.utf8_text(src) {
                 if name.is_empty() {
                     continue;
@@ -306,6 +345,59 @@ mod tests {
         );
         for n in ["alpha", "Bravo", "Charlie", "Delta", "echo", "Foxtrot"] {
             assert!(d.contains(&n.to_string()), "missing {n} in {d:?}");
+        }
+    }
+
+    /// ADR-010 cluster 7: TS definition queries are scope-anchored. Function-local
+    /// variables, nested helpers, object-literal methods, and loop-header variables
+    /// must NOT register as definitions; top-level/module/class-member ones must.
+    #[test]
+    fn ts_defs_are_scope_anchored() {
+        let src = r#"
+export function outer() {
+  const localVar = 1;
+  function innerHelper() {}
+  const cb = () => { const arrowLocal = 2; return arrowLocal; };
+  for (const loopVar of [1]) {}
+  return { objMethod() { return localVar + cb(); } };
+}
+const topConst = 3;
+class Klass {
+  method() { const methodLocal = 4; return methodLocal; }
+  field = 5;
+}
+namespace Ns { export const nsConst = 6; }
+"#;
+        let a = analyze(Lang::TypeScript, src);
+        let names: Vec<&str> = a.nodes.iter().map(|n| n.name.as_str()).collect();
+        for keep in ["outer", "topConst", "Klass", "method", "field", "nsConst"] {
+            assert!(names.contains(&keep), "missing real def {keep} in {names:?}");
+        }
+        for noise in ["localVar", "innerHelper", "arrowLocal", "loopVar", "objMethod", "methodLocal"] {
+            assert!(!names.contains(&noise), "local {noise} must not be a node: {names:?}");
+        }
+        // The FTS `symbols` column path (extract_defs) applies the same anchor.
+        let d = extract_defs(Lang::TypeScript, src);
+        assert!(d.contains(&"topConst".to_string()));
+        assert!(!d.contains(&"localVar".to_string()), "symbols column must skip locals: {d:?}");
+    }
+
+    /// ADR-010 cluster 7 repair: `declare global { … }` bodies are statement_blocks
+    /// owned by `ambient_declaration` — genuinely global-scoped declarations (the
+    /// common Window/globalThis augmentation pattern) that the scope anchor must
+    /// keep, alongside `declare module "x" { … }` (parent kind `module`).
+    #[test]
+    fn ts_declare_global_defs_are_kept() {
+        let src = r#"
+declare global {
+  interface KodenBridge { invoke(cmd: string): Promise<unknown> }
+  var kodenFlag: boolean;
+}
+declare module "some-mod" { export const modConst: number; }
+"#;
+        let d = extract_defs(Lang::TypeScript, src);
+        for keep in ["KodenBridge", "kodenFlag", "modConst"] {
+            assert!(d.contains(&keep.to_string()), "missing global/ambient def {keep} in {d:?}");
         }
     }
 

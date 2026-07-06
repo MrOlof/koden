@@ -489,11 +489,25 @@ pub fn discover_workspace_projects(root: &std::path::Path) -> Vec<std::path::Pat
     out
 }
 
-fn is_sane_root(p: &std::path::Path) -> bool {
-    if p.parent().is_none() {
+/// Root sanity gate, shared by the boot seed and `brain_add_project`: never index
+/// a filesystem/drive root or the bare home dir (the wizard handles intentional
+/// home workspaces). Judges the CANONICAL path — the same form `add_root` will
+/// register — so a non-canonical spelling (`c:\users\me`, `C:\x\..\..`) cannot
+/// slip past the gate and index a home dir or whole drive (ADR-010 cluster 7).
+pub fn is_sane_root(p: &std::path::Path) -> bool {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canon.parent().is_none() {
         return false; // filesystem root
     }
-    if dirs::home_dir().as_deref() == Some(p) {
+    // Compare home in the same canonical string form (`\\?\`-stripped, case-folded
+    // on Windows) — raw `Path` equality is byte/component-sensitive, so a
+    // differently-cased spelling would sail past it.
+    let canon_s = crate::modules::brain::registry::fold_case(&crate::modules::fs::to_canon(&canon));
+    let home_s = dirs::home_dir().map(|h| {
+        let h = std::fs::canonicalize(&h).unwrap_or(h);
+        crate::modules::brain::registry::fold_case(&crate::modules::fs::to_canon(h))
+    });
+    if home_s.as_deref() == Some(canon_s.as_str()) {
         return false; // bare home dir — the wizard handles intentional home workspaces
     }
     true
@@ -1120,6 +1134,34 @@ mod tests {
         }));
         assert!(unwound.is_err());
         assert!(fired.load(Ordering::SeqCst), "unwound guard must flip status");
+    }
+
+    /// ADR-010 cluster 7: the gate now also fronts `brain_add_project` — a drive
+    /// root or the bare home dir must be rejected; a normal folder passes.
+    #[test]
+    fn is_sane_root_rejects_fs_root_and_home() {
+        let fs_root = if cfg!(windows) { "C:\\" } else { "/" };
+        assert!(!is_sane_root(std::path::Path::new(fs_root)));
+        if let Some(home) = dirs::home_dir() {
+            assert!(!is_sane_root(&home));
+            // Non-canonical spellings must not slip past: the gate judges the
+            // CANONICAL path `add_root` would register (ADR-010 cluster 7 repair).
+            assert!(!is_sane_root(&home.join(".")), "home/. must be rejected");
+            #[cfg(windows)]
+            {
+                let lower = std::path::PathBuf::from(home.to_string_lossy().to_lowercase());
+                assert!(!is_sane_root(&lower), "case-different home spelling must be rejected");
+            }
+            // Enough `..` to escape past the fs root (extra `..` at root is a no-op):
+            // canonicalizes to the filesystem root, which must be rejected.
+            let mut escape = home.clone();
+            for _ in home.components() {
+                escape.push("..");
+            }
+            assert!(!is_sane_root(&escape), "..-escape to the fs root must be rejected");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(is_sane_root(dir.path()));
     }
 
     #[test]

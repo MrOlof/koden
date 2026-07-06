@@ -47,6 +47,17 @@ pub async fn brain_add_project(state: State<'_, BrainState>, path: String) -> Re
     if !pb.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
+    // Same sanity gate as the boot seed (ADR-010 cluster 7): a drive/filesystem
+    // root or the bare home dir would index a machine's worth of non-project
+    // files. The workspace wizard is the intentional path for project parents.
+    // The gate canonicalizes internally, so it judges the same path `add_root`
+    // will register (a raw `c:\users\me` or `C:\x\..\..` cannot slip past).
+    if !crate::modules::brain::worker::is_sane_root(&pb) {
+        return Err(
+            "refusing to index a filesystem root or home directory — add a project folder instead"
+                .to_string(),
+        );
+    }
     let proj = state
         .registry
         .add_root(&pb)
@@ -61,8 +72,18 @@ pub async fn brain_add_project(state: State<'_, BrainState>, path: String) -> Re
 /// watcher re-arm happen on the worker.
 #[tauri::command]
 pub fn brain_remove_project(state: State<BrainState>, project: String) -> Result<(), String> {
-    state.registry.remove(&project);
-    enqueue(&state, BrainEvent::RemoveProject { project })
+    // Registry first (the worker's RemoveProject handler re-arms the watcher and
+    // persists FROM the registry, so enqueue-first would race it) — but roll the
+    // mutation back if the prune can't be enqueued, else the index keeps orphaned
+    // rows while the persisted project list diverges (ADR-010 cluster 7).
+    let removed = state.registry.remove(&project);
+    if let Err(e) = enqueue(&state, BrainEvent::RemoveProject { project }) {
+        if let Some(p) = removed {
+            state.registry.restore(p);
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Status of the workspace/source-of-truth setup — drives the first-run wizard.

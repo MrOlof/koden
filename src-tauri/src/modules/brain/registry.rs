@@ -65,14 +65,22 @@ impl KodenBrainRegistry {
         Some(p)
     }
 
-    /// Remove a project by id. Returns true if it was registered.
-    pub fn remove(&self, id: &str) -> bool {
-        let Ok(mut guard) = self.projects.write() else {
-            return false;
-        };
-        let before = guard.len();
-        guard.retain(|p| p.id != id);
-        guard.len() != before
+    /// Remove a project by id. Returns the removed project (so a failed downstream
+    /// enqueue can [KodenBrainRegistry::restore] it), or `None` if not registered.
+    pub fn remove(&self, id: &str) -> Option<Project> {
+        let mut guard = self.projects.write().ok()?;
+        let idx = guard.iter().position(|p| p.id == id)?;
+        Some(guard.remove(idx))
+    }
+
+    /// Put back a project taken out by [KodenBrainRegistry::remove] — the rollback
+    /// path when the prune couldn't be enqueued. Idempotent by id.
+    pub fn restore(&self, project: Project) {
+        if let Ok(mut guard) = self.projects.write() {
+            if !guard.iter().any(|p| p.id == project.id) {
+                guard.push(project);
+            }
+        }
     }
 
     /// The configured workspace root (parent of all projects), if any.
@@ -122,14 +130,36 @@ impl KodenBrainRegistry {
 
     /// Longest-prefix match `cwd` → project (CONCEPT §5.2; used by P3 gist
     /// resolution). Picks the most specific (longest root) when projects nest.
+    /// Case-folded on Windows (see [fold_case]) — a shell reporting `c:\work\repo`
+    /// must still resolve against a stored `C:/Work/Repo` root, mirroring the
+    /// frontend's `resolveProjectForCwd`.
     pub fn resolve(&self, cwd: &str) -> Option<Project> {
-        let cwd_n = normalize(Path::new(cwd));
+        let cwd_n = fold_case(&normalize(Path::new(cwd)));
         let guard = self.projects.read().ok()?;
         guard
             .iter()
-            .filter(|p| cwd_n == p.root || cwd_n.starts_with(&format!("{}/", p.root)))
+            .filter(|p| {
+                let root = fold_case(&p.root);
+                cwd_n == root || cwd_n.starts_with(&format!("{root}/"))
+            })
             .max_by_key(|p| p.root.len())
             .cloned()
+    }
+}
+
+/// Case-fold a canonical path for identity/prefix comparison. Windows filesystems
+/// are case-insensitive, so folding is required there; Unix paths are
+/// case-SENSITIVE, so folding would collide legitimately-distinct roots
+/// (e.g. `/a/Foo` vs `/a/foo`).
+/// ponytail: macOS APFS defaults to case-insensitive yet is NOT folded here
+/// (canonicalize normalizes to on-disk casing, so spellings converge in practice);
+/// if a real case-spelling miss surfaces on macOS, widen the predicate to
+/// `cfg!(any(windows, target_os = "macos"))`.
+pub(crate) fn fold_case(s: &str) -> String {
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s.to_string()
     }
 }
 
@@ -144,9 +174,12 @@ fn normalize(p: &Path) -> String {
         .to_string()
 }
 
-/// Stable 16-hex-char id derived from the canonical root (case-insensitive).
+/// Stable 16-hex-char id derived from the canonical root. Case-folded on Windows
+/// ONLY (same [fold_case] predicate as `resolve`): folding on Unix would collide
+/// case-differing roots (`/a/Foo` and `/a/foo` are distinct directories there).
+/// Windows ids are unchanged from the previous unconditional-lowercase derivation.
 fn project_id_for(root_str: &str) -> ProjectId {
-    blake3::hash(root_str.to_lowercase().as_bytes()).to_hex()[..16].to_string()
+    blake3::hash(fold_case(root_str).as_bytes()).to_hex()[..16].to_string()
 }
 
 #[cfg(test)]
@@ -185,5 +218,45 @@ mod tests {
         assert_eq!(reg.resolve("/work/repo/pkg/src/main.rs").unwrap().id, "inner");
         assert_eq!(reg.resolve("/work/repo/README.md").unwrap().id, "outer");
         assert!(reg.resolve("/elsewhere").is_none());
+    }
+
+    /// ADR-010 cluster 7: Windows cwd casing must not break resolution — a shell
+    /// reporting `c:\work\repo` still matches a stored `C:/Work/Repo` root.
+    #[cfg(windows)]
+    #[test]
+    fn resolve_folds_case_on_windows() {
+        let reg = KodenBrainRegistry::default();
+        {
+            let mut g = reg.projects.write().unwrap();
+            g.push(Project { id: "p".into(), name: "p".into(), root: "C:/Work/Repo".into() });
+        }
+        assert_eq!(reg.resolve(r"c:\WORK\repo\src\main.rs").unwrap().id, "p");
+        assert_eq!(reg.resolve("c:/work/repo").unwrap().id, "p");
+        // Ids fold the same way: both spellings derive the same stable id.
+        assert_eq!(project_id_for("C:/Work/Repo"), project_id_for("c:/work/repo"));
+    }
+
+    /// Unix paths are case-sensitive: case-differing roots are DISTINCT projects
+    /// and must not collide on one id (the pre-fix unconditional lowercase did).
+    #[cfg(not(windows))]
+    #[test]
+    fn project_ids_do_not_fold_case_on_unix() {
+        assert_ne!(project_id_for("/a/Foo"), project_id_for("/a/foo"));
+    }
+
+    #[test]
+    fn remove_returns_project_and_restore_reinserts() {
+        let reg = KodenBrainRegistry::default();
+        let dir = tempfile::tempdir().unwrap();
+        let p = reg.add_root(dir.path()).unwrap();
+        let removed = reg.remove(&p.id).expect("registered project removed");
+        assert_eq!(removed.id, p.id);
+        assert!(reg.projects().is_empty());
+        assert!(reg.remove(&p.id).is_none(), "second remove is a no-op");
+        // Rollback path: restore puts the exact project back (idempotent by id).
+        reg.restore(removed.clone());
+        reg.restore(removed);
+        assert_eq!(reg.projects().len(), 1);
+        assert_eq!(reg.projects()[0].id, p.id);
     }
 }

@@ -29,7 +29,14 @@
 ///     DELETE) so the new columns backfill. Recency/frequency feed a deterministic,
 ///     snapshot-stable multiplicative boost — stamped only on a real content change,
 ///     so an unchanged relaunch re-derives a byte-identical gist.
-pub const SCHEMA_VERSION: i64 = 9;
+/// v10: no DDL change — extraction/query semantics changed (ADR-010 cluster 7):
+///     TS/TSX definitions are scope-anchored (function-locals / object-literal
+///     methods no longer index as symbols) and query terms are deduped before
+///     MATCH. `code_nodes` + the AST-fed `symbols` column are DERIVED, so the bump
+///     forces the rebuild that re-derives them cleanly — and rotates the gist cache
+///     key so a gist never mixes pre- and post-anchor ranking (the byte-identity
+///     gate holds per key).
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"

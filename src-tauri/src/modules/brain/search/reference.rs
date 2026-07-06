@@ -77,6 +77,11 @@ impl VectorStore for BruteForceStore {
         }
         Ok(())
     }
+    fn remove(&self, ids: &[DocId]) -> Result<(), String> {
+        let mut rows = self.rows.lock().map_err(|e| e.to_string())?;
+        rows.retain(|(d, _)| !ids.contains(d));
+        Ok(())
+    }
     fn query(&self, vector: &[f32], k: usize) -> Result<Vec<(DocId, f32)>, String> {
         let rows = self.rows.lock().map_err(|e| e.to_string())?;
         let mut scored: Vec<(DocId, f32)> =
@@ -127,6 +132,20 @@ mod tests {
         store.upsert(&["a".into()], &[vec![1.0; DIMS]]).unwrap();
         store.upsert(&["a".into()], &[vec![1.0; DIMS]]).unwrap();
         assert_eq!(store.query(&vec![1.0; DIMS], 10).unwrap().len(), 1, "upsert replaces");
+    }
+
+    /// ADR-010 cluster 7: the trait's remove path — deleted ids never surface,
+    /// unknown ids are a no-op.
+    #[test]
+    fn remove_deletes_rows() {
+        let store = BruteForceStore::new("reference-hash-v1");
+        let mut b = vec![0.0; DIMS];
+        b[1] = 1.0;
+        store.upsert(&["a".into(), "b".into()], &[vec![1.0; DIMS], b]).unwrap();
+        store.remove(&["a".into(), "never-existed".into()]).unwrap();
+        let hits = store.query(&vec![1.0; DIMS], 10).unwrap();
+        assert!(hits.iter().all(|(d, _)| d != "a"), "removed id must not surface: {hits:?}");
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
