@@ -718,6 +718,13 @@ pub fn index_changed(
         if walk::rel_under_skip_dir(&rel) || secrets::is_denylisted_path(&to_canon(path)) {
             continue;
         }
+        // Ignore-file gate: the full walk never yields a .gitignore'd/.kodenignore'd
+        // file, so the watcher must not index one either (it would oscillate —
+        // indexed here, pruned by the next full pass). Deleted paths stat as
+        // non-dirs inside the check and fall through to the prune branch below.
+        if walk::is_ignored_file(root, path) {
+            continue;
+        }
         match std::fs::metadata(path) {
             Ok(m) if m.is_file() => {
                 if m.len() > walk::MAX_INDEX_FILE_BYTES {
@@ -731,8 +738,18 @@ pub fn index_changed(
                 // A directory event (e.g. an atomic move-in of an existing tree)
                 // whose children weren't individually reported — index them so the
                 // incremental graph converges with a full rebuild. Additions only,
-                // so a partial child walk is harmless here.
-                for child in walk::walk_files(path).files {
+                // so a partial child walk is harmless here. `walk_files_under`
+                // replays in-project ancestor ignore files so this subtree walk
+                // agrees with the full walk.
+                for child in walk::walk_files_under(root, path).files {
+                    // Per-child ignore gate: the subtree walk replays ancestors at
+                    // the walker's LOWEST precedence, so a deeper per-dir whitelist
+                    // can over-yield a file the full walk ignores (root .kodenignore
+                    // `x` + sub/.gitignore `!x`). The gate has the exact cross-source
+                    // precedence, so an over-yielded child never enters the index.
+                    if walk::is_ignored_file(root, &child) {
+                        continue;
+                    }
                     let crel = rel_path(root, &child);
                     if !crel.is_empty()
                         && index_one_file(index, project_id, &crel, &child, now_ms)
@@ -1225,6 +1242,73 @@ mod tests {
         let paths = index.existing_paths("p").unwrap();
         assert!(paths.contains(&"src/main.ts".to_string()));
         assert!(!paths.iter().any(|p| p.starts_with("dist/")), "in-project dist stays skipped");
+    }
+
+    /// The incremental watcher path must agree with the FULL walk on ignore
+    /// rules in a NON-git root (CONCEPT §7.1 uniformity): per-file events for
+    /// .gitignore'd files are not indexed, and a dir event's subtree walk
+    /// honors in-project ancestor ignore files — same final path set as a full
+    /// pass, so nothing oscillates between watcher-index and full-pass prune.
+    #[test]
+    fn index_changed_honors_gitignore_like_the_full_walk() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        let dir = tempfile::tempdir().unwrap(); // NON-git project root
+        let root = dir.path();
+        std::fs::write(root.join(".gitignore"), "*.zzgen\n").unwrap();
+        std::fs::write(root.join("kept.txt"), "alpha").unwrap();
+        std::fs::write(root.join("skip.zzgen"), "bravo").unwrap();
+        let moved = root.join("moved"); // arrives later as one dir event
+        std::fs::create_dir_all(&moved).unwrap();
+        std::fs::write(moved.join("in.txt"), "charlie").unwrap();
+        std::fs::write(moved.join("out.zzgen"), "delta").unwrap();
+
+        // Incremental: per-file events + one dir event.
+        index_changed(&index, "inc", root, &[
+            root.join("kept.txt"),
+            root.join("skip.zzgen"),
+            root.join(".gitignore"),
+            moved.clone(),
+        ]);
+        let mut inc = index.existing_paths("inc").unwrap();
+        inc.sort();
+        assert!(inc.contains(&"kept.txt".to_string()));
+        assert!(!inc.contains(&"skip.zzgen".to_string()), "gitignored file event must not index");
+        assert!(inc.contains(&"moved/in.txt".to_string()), "dir event indexes non-ignored children");
+        assert!(!inc.contains(&"moved/out.zzgen".to_string()), "dir event honors ancestor .gitignore");
+
+        // Full walk over the same disk state lands on the SAME path set.
+        index_dir(&index, "full", root);
+        let mut full = index.existing_paths("full").unwrap();
+        full.sort();
+        assert_eq!(inc, full, "incremental path must agree with the full walk");
+    }
+
+    /// Residual of the subtree-walk ancestor replay: `add_ignore` ranks a
+    /// replayed root .kodenignore BELOW a per-dir .gitignore, so a deeper
+    /// `!negation` can make `walk_files_under` over-yield a .kodenignore'd
+    /// file. The dir-event branch's per-child gate must catch it — the file
+    /// must never enter the index, not even transiently until the next full pass.
+    #[test]
+    fn dir_event_never_indexes_kodenignored_child_despite_deeper_negation() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        let dir = tempfile::tempdir().unwrap(); // NON-git project root
+        let root = dir.path();
+        std::fs::write(root.join(".kodenignore"), "zz.txt\n").unwrap();
+        let sub = root.join("sub"); // arrives as ONE dir event (atomic move-in)
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".gitignore"), "!zz.txt\n").unwrap();
+        std::fs::write(sub.join("zz.txt"), "alpha").unwrap();
+        std::fs::write(sub.join("kept.txt"), "bravo").unwrap();
+
+        index_changed(&index, "p", root, &[sub.clone()]);
+        let paths = index.existing_paths("p").unwrap();
+        assert!(paths.contains(&"sub/kept.txt".to_string()), "non-ignored child is indexed");
+        assert!(
+            !paths.contains(&"sub/zz.txt".to_string()),
+            ".kodenignore'd child must not enter the index even when the subtree walk over-yields it"
+        );
     }
 
     /// ADR-010: a PARTIAL walk (scan cap hit / unreadable subtree) must never feed

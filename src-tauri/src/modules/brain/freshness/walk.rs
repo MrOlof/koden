@@ -63,18 +63,64 @@ pub struct Walked {
 /// + oversized files, and stops after `MAX_SCANNED` entries (flagged as
 /// incomplete on the returned [Walked]).
 pub fn walk_files(root: &Path) -> Walked {
-    walk_files_capped(root, MAX_SCANNED)
+    walk_files_capped(root, root, MAX_SCANNED)
 }
 
-fn walk_files_capped(root: &Path, cap: usize) -> Walked {
+/// Walk a SUBTREE of a project (the watcher's dir-event path) with the same
+/// ignore context as the full walk: in-project ancestor `.gitignore`/
+/// `.kodenignore` files between `root` and `start` are replayed explicitly,
+/// because with parent traversal bounded (see below) the walker only reads
+/// ignore files at/under its start dir.
+pub fn walk_files_under(root: &Path, start: &Path) -> Walked {
+    walk_files_capped(root, start, MAX_SCANNED)
+}
+
+/// In-project ancestor dirs of `start`, from `root` (inclusive) down to
+/// `start`'s parent (inclusive), root-first. Empty if `start` is not under `root`.
+fn ancestor_chain(root: &Path, start: &Path) -> Vec<PathBuf> {
+    let Ok(rel) = start.strip_prefix(root) else {
+        return Vec::new();
+    };
+    let mut out = vec![root.to_path_buf()];
+    let mut cur = root.to_path_buf();
+    let comps: Vec<std::path::Component> = rel.components().collect();
+    for comp in comps.iter().take(comps.len().saturating_sub(1)) {
+        cur.push(comp);
+        out.push(cur.clone());
+    }
+    out
+}
+
+fn walk_files_capped(root: &Path, start: &Path, cap: usize) -> Walked {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut complete = true;
     let mut scanned = 0usize;
-    let walker = WalkBuilder::new(root)
+    let mut builder = WalkBuilder::new(start);
+    builder
         .standard_filters(true)
         .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
+        // CONCEPT §7.1: ignore rules apply to git AND non-git projects uniformly —
+        // the crate's default require_git(true) made .gitignore dead in non-git roots.
+        .require_git(false)
+        // …but bound ignore-file discovery to the project: with require_git off,
+        // parent traversal would pull ancestor .gitignores from ABOVE the project
+        // root and over-ignore. In-project ancestors are replayed below for the
+        // subtree (dir-event) walk.
+        // ponytail: a project registered as a subdir of a bigger git repo no longer
+        // sees that repo's root .gitignore; upgrade path = replay root..git-root.
+        .parents(false)
+        // Exactly the sources CONCEPT §7.1 names (.gitignore + .kodenignore) and
+        // exactly the sources `is_ignored_file` replays. Any source honored here
+        // but not by the watcher gate re-opens the index/prune oscillation this
+        // module exists to close — with require_git(false) the crate would apply
+        // the user's GLOBAL gitignore (e.g. Thumbs.db) even to non-git roots,
+        // which the gate never sees: watcher indexes, full pass prunes, repeat.
+        // ponytail: global gitignore / .git/info/exclude / .ignore files are
+        // deliberately unsupported; upgrade path = add the source to BOTH this
+        // builder and `is_ignored_file`, never one side.
+        .git_global(false)
+        .git_exclude(false)
+        .ignore(false)
         .hidden(false) // index dotfiles (e.g. config); the denylist guards secrets
         .follow_links(false)
         .add_custom_ignore_filename(".kodenignore")
@@ -87,8 +133,31 @@ fn walk_files_capped(root: &Path, cap: usize) -> Walked {
                     .to_str()
                     .map(|n| !BASE_SKIP_DIRS.contains(&n))
                     .unwrap_or(true)
-        })
-        .build();
+        });
+    if start != root {
+        // Dir-event walk: replay ancestor ignore files (root-first; `start`'s own
+        // files the walker reads itself) so the subtree walk agrees with the full
+        // walk. `add_ignore` is lowest-precedence, matching git's deeper-file-wins
+        // for the common cases.
+        // ponytail: the replay is an approximation — a replayed ancestor
+        // .kodenignore ranks BELOW a per-dir .gitignore here, so cross-source
+        // precedence can over-yield (deeper `!negation` un-ignores a
+        // .kodenignore'd file) or under-yield vs the full walk. The worker
+        // fronts every yielded child with `is_ignored_file` (exact precedence),
+        // so over-yield never reaches the index; under-yield self-heals on the
+        // next full pass. Exact fix = per-ancestor custom-ignore replay.
+        for dir in ancestor_chain(root, start) {
+            for name in [".gitignore", ".kodenignore"] {
+                let f = dir.join(name);
+                if f.is_file() {
+                    if let Some(e) = builder.add_ignore(&f) {
+                        log::debug!("brain: unparsable ignore file {} ({e})", f.display());
+                    }
+                }
+            }
+        }
+    }
+    let walker = builder.build();
     for entry in walker {
         scanned += 1;
         if scanned > cap {
@@ -131,6 +200,68 @@ fn walk_files_capped(root: &Path, cap: usize) -> Walked {
     Walked { files: out, complete }
 }
 
+/// Per-file ignore check for the incremental watcher path: true if `path`
+/// (under `root`) is excluded by in-project `.gitignore`/`.kodenignore` rules —
+/// so a watch event for an ignored file agrees with the full walk, which never
+/// yields it (otherwise the file would be indexed by the watcher and pruned by
+/// the next full pass, oscillating). Semantics mirror the walk: only ignore
+/// files at/below the project root count, a `.kodenignore` match at ANY depth
+/// outranks a `.gitignore` match at ANY depth (the crate's custom-ignore
+/// precedence, `m_custom_ignore.or(m_gi)`), within a source the deeper file
+/// wins, and an ignored ancestor DIR ignores everything below it (the walker
+/// never descends into one). The walk honors exactly these two sources too —
+/// git-global / .git/info/exclude / .ignore are all disabled on the builder —
+/// so gate and walk agree on every file.
+pub fn is_ignored_file(root: &Path, path: &Path) -> bool {
+    use ignore::gitignore::Gitignore;
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    // One stack per SOURCE: the walker resolves each source independently
+    // (deepest file wins within a source), then lets any .kodenignore verdict
+    // outrank any .gitignore verdict — a single mixed stack would instead let a
+    // deeper .gitignore negation override a shallower .kodenignore rule.
+    fn push_dir(dir: &Path, git: &mut Vec<Gitignore>, koden: &mut Vec<Gitignore>) {
+        let g = dir.join(".gitignore");
+        if g.is_file() {
+            git.push(Gitignore::new(g).0); // parse errors → partial matcher, same as the walker
+        }
+        let k = dir.join(".kodenignore");
+        if k.is_file() {
+            koden.push(Gitignore::new(k).0);
+        }
+    }
+    let mut git_stack: Vec<Gitignore> = Vec::new();
+    let mut koden_stack: Vec<Gitignore> = Vec::new();
+    let mut dir = root.to_path_buf();
+    push_dir(&dir, &mut git_stack, &mut koden_stack);
+    let comps: Vec<std::path::Component> = rel.components().collect();
+    for (i, comp) in comps.iter().enumerate() {
+        let is_last = i + 1 == comps.len();
+        dir.push(comp);
+        // Live is_dir for the leaf: a dir event for an ignored dir must gate
+        // (its children are never walked), while a DELETED path stats false and
+        // sails through to the prune branch.
+        let is_dir = if is_last { path.is_dir() } else { true };
+        // Some(true)=ignore, Some(false)=whitelist, None=no rule in this source.
+        let per_source = |stack: &[Gitignore]| -> Option<bool> {
+            stack
+                .iter()
+                .rev() // deepest matcher wins within a source (git semantics)
+                .map(|g| g.matched(&dir, is_dir))
+                .find(|m| !m.is_none())
+                .map(|m| m.is_ignore())
+        };
+        if per_source(&koden_stack).or_else(|| per_source(&git_stack)) == Some(true) {
+            return true;
+        }
+        if !is_last {
+            push_dir(&dir, &mut git_stack, &mut koden_stack);
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,12 +284,165 @@ mod tests {
         for i in 0..5 {
             std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
         }
-        let full = walk_files_capped(dir.path(), MAX_SCANNED);
+        let full = walk_files_capped(dir.path(), dir.path(), MAX_SCANNED);
         assert!(full.complete, "an uncapped walk is complete");
         assert_eq!(full.files.len(), 5);
         // A cap smaller than the entry count (root dir + 5 files) truncates.
-        let partial = walk_files_capped(dir.path(), 3);
+        let partial = walk_files_capped(dir.path(), dir.path(), 3);
         assert!(!partial.complete, "a cap-hit walk must be flagged PARTIAL");
         assert!(partial.files.len() < 5, "truncated walk yields fewer files");
+    }
+
+    fn names(w: &Walked) -> Vec<String> {
+        let mut v: Vec<String> = w
+            .files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// CONCEPT §7.1: ignore rules apply uniformly — a NON-git project root's
+    /// .gitignore (and .kodenignore) must take effect, not require a .git dir.
+    #[test]
+    fn gitignore_honored_in_non_git_root() {
+        let dir = tempfile::tempdir().unwrap(); // no .git anywhere under it
+        std::fs::write(dir.path().join(".gitignore"), "zz_gitignored.txt\n").unwrap();
+        std::fs::write(dir.path().join(".kodenignore"), "zz_kodenignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("zz_gitignored.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("zz_kodenignored.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("zz_kept.txt"), b"x").unwrap();
+        let got = names(&walk_files(dir.path()));
+        assert!(!got.contains(&"zz_gitignored.txt".into()), ".gitignore'd file must not be yielded");
+        assert!(!got.contains(&"zz_kodenignored.txt".into()), ".kodenignore'd file must not be yielded");
+        assert!(got.contains(&"zz_kept.txt".into()), "sibling IS yielded");
+    }
+
+    /// Unchanged in a git root: .gitignore still honored (require_git(false) is
+    /// a superset of the old behavior when a .git dir exists).
+    #[test]
+    fn gitignore_still_honored_in_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap(); // repo marker
+        std::fs::write(dir.path().join(".gitignore"), "zz_gitignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("zz_gitignored.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("zz_kept.txt"), b"x").unwrap();
+        let got = names(&walk_files(dir.path()));
+        assert!(!got.contains(&"zz_gitignored.txt".into()));
+        assert!(got.contains(&"zz_kept.txt".into()));
+    }
+
+    /// Over-ignoring guard: a .gitignore ABOVE the project root has no effect —
+    /// only in-project ignore files count (parents(false)).
+    #[test]
+    fn ancestor_gitignore_above_root_has_no_effect() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join(".gitignore"), "zz_shadowed.txt\n").unwrap();
+        let root = outer.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("zz_shadowed.txt"), b"x").unwrap();
+        let got = names(&walk_files(&root));
+        assert!(
+            got.contains(&"zz_shadowed.txt".into()),
+            "an out-of-project ancestor .gitignore must not leak into the walk"
+        );
+    }
+
+    /// The dir-event subtree walk replays in-project ancestor ignore files, so
+    /// it yields exactly what the full walk yields for that subtree.
+    #[test]
+    fn subtree_walk_agrees_with_full_walk() {
+        let dir = tempfile::tempdir().unwrap(); // non-git project root
+        std::fs::write(dir.path().join(".gitignore"), "*.zzgen\n").unwrap();
+        let sub = dir.path().join("moved");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.zzgen"), b"x").unwrap();
+        std::fs::write(sub.join("a.txt"), b"x").unwrap();
+        let subtree = names(&walk_files_under(dir.path(), &sub));
+        assert_eq!(subtree, vec!["a.txt".to_string()], "ancestor .gitignore applies to the subtree walk");
+        let full: Vec<String> = walk_files(dir.path())
+            .files
+            .iter()
+            .filter(|p| p.starts_with(&sub))
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(subtree, full, "dir-event path and full walk must agree");
+    }
+
+    /// Gate/walk agreement on SOURCES: only .gitignore + .kodenignore count.
+    /// A file ignored solely by .git/info/exclude or a `.ignore` file must be
+    /// yielded by the walk (the gate can't replay those sources; honoring them
+    /// on one side only would oscillate: watcher-indexed, full-pass-pruned).
+    #[test]
+    fn walk_ignores_only_the_sources_the_gate_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+        std::fs::write(root.join(".git").join("info").join("exclude"), "zz_excl.txt\n").unwrap();
+        std::fs::write(root.join(".ignore"), "zz_dotign.txt\n").unwrap();
+        std::fs::write(root.join("zz_excl.txt"), b"x").unwrap();
+        std::fs::write(root.join("zz_dotign.txt"), b"x").unwrap();
+        let got = names(&walk_files(root));
+        assert!(got.contains(&"zz_excl.txt".into()), ".git/info/exclude is not a Koden ignore source");
+        assert!(got.contains(&"zz_dotign.txt".into()), ".ignore files are not a Koden ignore source");
+        // …and the gate agrees: neither file is ignored there either.
+        assert!(!is_ignored_file(root, &root.join("zz_excl.txt")));
+        assert!(!is_ignored_file(root, &root.join("zz_dotign.txt")));
+    }
+
+    /// Cross-depth precedence agreement: a root .kodenignore rule beats a
+    /// DEEPER .gitignore negation in the walker (custom-ignore matches at any
+    /// depth outrank .gitignore matches at any depth), so the gate must reach
+    /// the same verdict — a mixed deepest-first stack would let the negation
+    /// win in the gate only, and the file would oscillate.
+    #[test]
+    fn kodenignore_outranks_deeper_gitignore_negation_in_walk_and_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join(".kodenignore"), "zz.txt\n").unwrap();
+        std::fs::write(sub.join(".gitignore"), "!zz.txt\n").unwrap();
+        std::fs::write(sub.join("zz.txt"), b"x").unwrap();
+        let got = names(&walk_files(root));
+        assert!(!got.contains(&"zz.txt".into()), "walker: .kodenignore outranks deeper !negation");
+        assert!(is_ignored_file(root, &sub.join("zz.txt")), "gate must agree with the walker");
+        // Sanity: within .gitignore alone, the deeper negation DOES win.
+        std::fs::write(root.join(".gitignore"), "zz_g.txt\n").unwrap();
+        std::fs::write(sub.join("zz_g.txt"), b"x").unwrap();
+        std::fs::write(sub.join(".gitignore"), "!zz.txt\n!zz_g.txt\n").unwrap();
+        let got = names(&walk_files(root));
+        assert!(got.contains(&"zz_g.txt".into()), "walker: deeper .gitignore negation wins in-source");
+        assert!(!is_ignored_file(root, &sub.join("zz_g.txt")), "gate must agree in-source too");
+    }
+
+    /// The watcher's per-file gate agrees with the walk: root + nested ignore
+    /// files, .kodenignore, ignored ancestor dirs, and the ancestor bound.
+    #[test]
+    fn per_file_check_agrees_with_the_walk() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join(".gitignore"), "zz_above.txt\n").unwrap();
+        let root = outer.path().join("proj");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.zzgen\nzzdir/\n").unwrap();
+        std::fs::write(root.join(".kodenignore"), "zz_koden.txt\n").unwrap();
+        std::fs::write(sub.join(".gitignore"), "local.txt\n").unwrap();
+        assert!(is_ignored_file(&root, &root.join("a.zzgen")));
+        assert!(is_ignored_file(&root, &sub.join("b.zzgen")), "root pattern reaches subdirs");
+        assert!(is_ignored_file(&root, &root.join("zz_koden.txt")), ".kodenignore honored");
+        assert!(is_ignored_file(&root, &sub.join("local.txt")), "nested .gitignore honored");
+        assert!(!is_ignored_file(&root, &root.join("local.txt")), "nested rule stays in its subtree");
+        assert!(!is_ignored_file(&root, &sub.join("kept.txt")));
+        assert!(
+            is_ignored_file(&root, &root.join("zzdir").join("under.txt")),
+            "file under an ignored dir is ignored (walker never descends)"
+        );
+        assert!(
+            !is_ignored_file(&root, &root.join("zz_above.txt")),
+            "out-of-project ancestor .gitignore must not leak into the gate"
+        );
+        assert!(!is_ignored_file(&root, std::path::Path::new("/elsewhere/x.txt")), "outside root → not ours to judge");
     }
 }
