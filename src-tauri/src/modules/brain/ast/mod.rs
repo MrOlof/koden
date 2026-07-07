@@ -183,14 +183,69 @@ pub struct SymbolInfo {
     pub start_line: i64,
 }
 
+/// BFS direction for `brain_code_impact` over the file-level import graph.
+/// Upstream = who depends on the defining files (reverse-import, dst→src);
+/// Downstream = what the defining files depend on (src→dst); Both = merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImpactDirection {
+    Upstream,
+    Downstream,
+    Both,
+}
+
+impl ImpactDirection {
+    /// Strict parse — an unknown direction is a caller error, not a silent default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "upstream" => Some(Self::Upstream),
+            "downstream" => Some(Self::Downstream),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream",
+            Self::Downstream => "downstream",
+            Self::Both => "both",
+        }
+    }
+}
+
+/// One depth-annotated AST impact row. `depth` = minimal BFS hops from the
+/// NEAREST defining file (1 = a direct import edge). File-granular: our graph
+/// has file-level import edges, not symbol-level ones.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ImpactRow {
+    pub path: String,
+    pub depth: usize,
+}
+
 /// Tiered impact (`brain_code_impact`): AST-confident reverse-import dependents
-/// vs the lexical over-approximation (CONCEPT §4.1b).
+/// vs the lexical over-approximation (CONCEPT §4.1b). New fields are additive
+/// (serde output only) — `ast_dependents` stays as the flat wire-compat list,
+/// now mirroring `rows` (same order) instead of being alphabetically resorted.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Impact {
     pub symbol: String,
+    /// "upstream" | "downstream" | "both" (empty only in the fail-open default).
+    pub direction: String,
     pub defined_in: Vec<String>,
+    /// Flat mirror of `rows` (same order, same truncation) — wire compatibility.
     pub ast_dependents: Vec<String>,
+    /// Depth-annotated AST reach, ordered (depth asc, path asc); truncation is
+    /// applied AFTER that full ordering so the kept prefix is stable.
+    pub rows: Vec<ImpactRow>,
+    /// Lexical over-approximation tier (content mentions), capped at 50, sorted.
+    /// NEVER depth-annotated — these are not graph-confirmed edges.
     pub lexical_candidates: Vec<String>,
+    /// True when `rows` was cut at `max_results`.
+    pub truncated: bool,
+    /// Pre-truncation row count (post `exclude_tests` filtering).
+    pub result_total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_reason: Option<String>,
 }
 
 fn normalize_kind(raw: &str) -> &'static str {

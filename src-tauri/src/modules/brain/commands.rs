@@ -261,21 +261,41 @@ pub async fn brain_get_symbol(
     blocking(move || store::get_symbol_readonly(&db, &project, &symbol).unwrap_or_default()).await
 }
 
-/// Tiered impact of a symbol: AST reverse-import dependents + lexical candidates.
+/// Tiered impact of a symbol: depth-annotated AST import-graph rows (upstream
+/// dependents / downstream dependencies / both) + lexical candidates.
+/// `direction` defaults to "upstream" (who depends on this); an unknown value
+/// is a caller error. `max_results` bounds the row list (truncation is flagged
+/// on the result); `exclude_tests` drops conventional test paths.
 #[tauri::command]
 pub async fn brain_code_impact(
     state: State<'_, BrainState>,
     project: String,
     symbol: String,
     depth: Option<usize>,
+    direction: Option<String>,
+    max_results: Option<usize>,
+    exclude_tests: Option<bool>,
 ) -> Result<Impact, String> {
+    let dir = crate::modules::brain::ast::ImpactDirection::parse(
+        direction.as_deref().unwrap_or("upstream"),
+    )
+    .ok_or_else(|| "invalid direction: expected upstream | downstream | both".to_string())?;
+    let fail_open = move |symbol: String| Impact {
+        symbol,
+        direction: dir.as_str().to_string(),
+        ..Default::default()
+    };
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
-        return Ok(Impact { symbol, ..Default::default() });
+        return Ok(fail_open(symbol));
     };
     let depth = depth.unwrap_or(5).clamp(1, 20);
-    blocking(move || match store::code_impact_readonly(&db, &project, &symbol, depth) {
-        Ok(impact) => impact,
-        Err(_) => Impact { symbol, ..Default::default() },
+    let max_results = max_results.unwrap_or(200).clamp(1, 2000);
+    let exclude_tests = exclude_tests.unwrap_or(false);
+    blocking(move || {
+        match store::code_impact_readonly(&db, &project, &symbol, depth, dir, max_results, exclude_tests) {
+            Ok(impact) => impact,
+            Err(_) => fail_open(symbol),
+        }
     })
     .await
 }

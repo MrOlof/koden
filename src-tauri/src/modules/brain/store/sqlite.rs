@@ -15,7 +15,7 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 
 use super::SearchIndex;
-use crate::modules::brain::ast::{self, Impact, SymbolInfo};
+use crate::modules::brain::ast::{self, Impact, ImpactDirection, ImpactRow, SymbolInfo};
 use crate::modules::brain::memory::doctor::NoteRecord;
 use crate::modules::brain::memory::proposal::{reject_signature, MemoryProposal, ProposalAction};
 use crate::modules::brain::memory::{MemoryNote, NoteSummary};
@@ -896,16 +896,92 @@ pub fn get_symbol_readonly(
     Ok(v)
 }
 
-/// Tiered impact of a symbol: the AST reverse-import closure (files that import,
-/// transitively, the file(s) defining the symbol) plus the lexical
-/// over-approximation (content mentions). CONCEPT §4.1b `code_impact`.
+/// Test-convention matcher for `exclude_tests` — a small PURE function:
+/// a `tests` path segment, `*.test.*` / `*.spec.*` / `*_test.*` file names, or a
+/// `test_*` prefix (pytest-style). Deliberately exactly these conventions —
+/// // ponytail: no singular `test/` segment or `tests.rs` filename matching;
+/// broader heuristics start eating real files (`latest.rs`, `attestation.ts`).
+fn is_test_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let mut segs = norm.split('/').peekable();
+    let mut file = "";
+    while let Some(seg) = segs.next() {
+        if segs.peek().is_none() {
+            file = seg; // last segment = file name
+        } else if seg == "tests" {
+            return true; // a tests/ directory segment
+        }
+    }
+    let lower = file.to_ascii_lowercase();
+    lower.starts_with("test_")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.contains("_test.")
+}
+
+/// Depth-annotated directed BFS over `code_edges`. `reverse = true` walks
+/// dst→src (upstream: who imports me); `false` walks src→dst (downstream: what
+/// I import). Depth is minimal by construction (layered expansion + a visited
+/// set, which is also the cycle guard — no infinite loop on import cycles).
+/// Each frontier is SORTED before expansion so multi-path ties resolve
+/// identically every run (deterministic-ordering invariant).
+fn bfs_edges(
+    conn: &Connection,
+    project: &str,
+    roots: &[String],
+    depth: usize,
+    reverse: bool,
+) -> rusqlite::Result<Vec<(String, usize)>> {
+    let sql = if reverse {
+        "SELECT src_path FROM code_edges WHERE project_id=?1 AND dst_path=?2 ORDER BY src_path"
+    } else {
+        "SELECT dst_path FROM code_edges WHERE project_id=?1 AND src_path=?2 ORDER BY dst_path"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let mut seen: std::collections::HashSet<String> = roots.iter().cloned().collect();
+    let mut frontier: Vec<String> = roots.to_vec();
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for d in 1..=depth {
+        frontier.sort();
+        let mut next = Vec::new();
+        for node in &frontier {
+            let it = stmt.query_map((project, node.as_str()), |r| r.get::<_, String>(0))?;
+            for x in it {
+                let s = x?;
+                if seen.insert(s.clone()) {
+                    out.push((s.clone(), d));
+                    next.push(s);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(out)
+}
+
+/// Tiered impact of a symbol: the depth-annotated AST import closure around the
+/// file(s) defining the symbol, plus the lexical over-approximation (content
+/// mentions — never depth-annotated). CONCEPT §4.1b `code_impact`.
+/// File-granular: edges are file-level imports, not symbol-level references.
+/// Ordering is deterministic end-to-end: sorted `defined_in`, sorted BFS
+/// frontiers, BTreeMap merge for `both`, final (depth asc, path asc) sort —
+/// and truncation happens only AFTER that full ordering.
 pub fn code_impact_readonly(
     db_path: &Path,
     project: &str,
     symbol: &str,
     depth: usize,
+    direction: ImpactDirection,
+    max_results: usize,
+    exclude_tests: bool,
 ) -> rusqlite::Result<Impact> {
     let conn = open_readonly(db_path)?;
+    // ponytail: depth ceiling 20 — file-level import graphs saturate well before.
+    let depth = depth.clamp(1, 20);
+    let max_results = max_results.clamp(1, 2000);
     let defined_in: Vec<String> = {
         let mut stmt = conn
             .prepare("SELECT DISTINCT path FROM code_nodes WHERE project_id=?1 AND name=?2")?;
@@ -918,50 +994,61 @@ pub fn code_impact_readonly(
         v
     };
 
-    // BFS the reverse-import closure (dst → src) from the defining files.
-    let mut seen: std::collections::HashSet<String> = defined_in.iter().cloned().collect();
-    let mut frontier: Vec<String> = defined_in.clone();
-    {
-        let mut stmt =
-            conn.prepare("SELECT src_path FROM code_edges WHERE project_id=?1 AND dst_path=?2")?;
-        for _ in 0..depth.max(1) {
-            let mut next = Vec::new();
-            for node in &frontier {
-                let it = stmt.query_map((project, node.as_str()), |r| r.get::<_, String>(0))?;
-                for x in it {
-                    let s = x?;
-                    if seen.insert(s.clone()) {
-                        next.push(s);
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            frontier = next;
+    // Directed BFS leg(s). `both` merges via BTreeMap keeping the MIN depth per
+    // path — deterministic regardless of leg order.
+    let mut reach: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut merge = |leg: Vec<(String, usize)>| {
+        for (p, d) in leg {
+            reach.entry(p).and_modify(|e| *e = (*e).min(d)).or_insert(d);
         }
+    };
+    if matches!(direction, ImpactDirection::Upstream | ImpactDirection::Both) {
+        merge(bfs_edges(&conn, project, &defined_in, depth, true)?);
     }
-    let def_set: std::collections::HashSet<&String> = defined_in.iter().collect();
-    let mut ast_dependents: Vec<String> =
-        seen.iter().filter(|p| !def_set.contains(*p)).cloned().collect();
-    ast_dependents.sort();
+    if matches!(direction, ImpactDirection::Downstream | ImpactDirection::Both) {
+        merge(bfs_edges(&conn, project, &defined_in, depth, false)?);
+    }
 
-    // Lexical over-approximation: content mentions not already covered.
-    let exclude: std::collections::HashSet<String> =
-        defined_in.iter().chain(ast_dependents.iter()).cloned().collect();
+    // Filter (output-only: traversal stays intact so a test file mid-path can't
+    // hide transitive reach), then order fully, THEN truncate — the kept prefix
+    // is stable across runs.
+    let mut rows: Vec<ImpactRow> = reach
+        .iter()
+        .filter(|(p, _)| !exclude_tests || !is_test_path(p))
+        .map(|(p, d)| ImpactRow { path: p.clone(), depth: *d })
+        .collect();
+    rows.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.path.cmp(&b.path)));
+    let result_total = rows.len();
+    let truncated = result_total > max_results;
+    if truncated {
+        rows.truncate(max_results);
+    }
+    let ast_dependents: Vec<String> = rows.iter().map(|r| r.path.clone()).collect();
+
+    // Lexical over-approximation tier: content mentions not already covered by
+    // the graph (the FULL pre-truncation reach, so a cut row can't reappear as
+    // a lexical candidate). Capped at 50, sorted — never depth-annotated.
+    let exclude: std::collections::HashSet<&String> =
+        defined_in.iter().chain(reach.keys()).collect();
     let mut lexical_candidates: Vec<String> = search_with_conn(&conn, Some(project), symbol, 50)?
         .into_iter()
         .map(|h| h.path)
         .filter(|p| !exclude.contains(p))
+        .filter(|p| !exclude_tests || !is_test_path(p))
         .collect();
     lexical_candidates.sort();
     lexical_candidates.dedup();
 
     Ok(Impact {
         symbol: symbol.to_string(),
+        direction: direction.as_str().to_string(),
         defined_in,
         ast_dependents,
+        rows,
         lexical_candidates,
+        truncated,
+        result_total,
+        truncated_reason: truncated.then(|| "max_results".to_string()),
     })
 }
 
@@ -1951,6 +2038,272 @@ mod tests {
             .unwrap()
             .is_empty(),
             "git-SHA must-not-redact control must remain searchable"
+        );
+    }
+
+    // ---- code_impact fixtures + tests (depth-annotated directed BFS) ----
+
+    fn row(p: &str, d: usize) -> ImpactRow {
+        ImpactRow { path: p.to_string(), depth: d }
+    }
+
+    /// Impact fixture (project "p"): `targetSym` defined in src/dep.ts.
+    /// Upstream (importers, transitively): a→dep, b→a, c→b, x→{a,c} — x is
+    /// MULTI-PATH (via a = 2 hops, via c = 4 hops → minimal depth 2).
+    /// Downstream (what dep imports): helper (1) → leaf (2).
+    fn impact_fixture(idx: &SqliteIndex) {
+        let put = |p: &str, c: &str| {
+            idx.index_file("p", p, c, p, c.len() as i64).unwrap();
+        };
+        put("src/dep.ts", "import './helper';\nexport function targetSym() {}");
+        put("src/helper.ts", "import './leaf';\nexport function helperThing() {}");
+        put("src/leaf.ts", "export function leafThing() {}");
+        put("src/a.ts", "import './dep';\nexport const a = 1;");
+        put("src/b.ts", "import './a';\nexport const b = 1;");
+        put("src/c.ts", "import './b';\nexport const c = 1;");
+        put("src/x.ts", "import './a';\nimport './c';\nexport const x = 1;");
+        idx.rebuild_edges("p").unwrap();
+    }
+
+    #[test]
+    fn impact_upstream_depth_is_minimal_and_deterministic() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        impact_fixture(&idx);
+        let go = || {
+            code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Upstream, 200, false)
+                .unwrap()
+        };
+        let i = go();
+        assert_eq!(i.direction, "upstream");
+        assert_eq!(i.defined_in, vec!["src/dep.ts"]);
+        // Minimal depths: x is reachable at 2 (via a) AND 4 (via c) — must be 2.
+        // Full order = (depth asc, path asc): the depth-2 tie is path-sorted.
+        let expect =
+            vec![row("src/a.ts", 1), row("src/b.ts", 2), row("src/x.ts", 2), row("src/c.ts", 3)];
+        assert_eq!(i.rows, expect, "minimal BFS depths in (depth, path) order");
+        assert_eq!(
+            i.ast_dependents,
+            vec!["src/a.ts", "src/b.ts", "src/x.ts", "src/c.ts"],
+            "flat wire-compat list mirrors rows"
+        );
+        assert!(!i.truncated);
+        assert_eq!(i.result_total, 4);
+        assert_eq!(i.truncated_reason, None);
+        // Deterministic across runs (multi-path ties resolve identically).
+        let j = go();
+        assert_eq!(i.rows, j.rows);
+        assert_eq!(i.lexical_candidates, j.lexical_candidates);
+    }
+
+    #[test]
+    fn impact_downstream_and_both_directions() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        impact_fixture(&idx);
+        let down = code_impact_readonly(
+            &path, "p", "targetSym", 10, ImpactDirection::Downstream, 200, false,
+        )
+        .unwrap();
+        assert_eq!(down.direction, "downstream");
+        assert_eq!(
+            down.rows,
+            vec![row("src/helper.ts", 1), row("src/leaf.ts", 2)],
+            "downstream = what the defining file imports, depth-annotated"
+        );
+        let both =
+            code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Both, 200, false)
+                .unwrap();
+        assert_eq!(both.direction, "both");
+        assert_eq!(
+            both.rows,
+            vec![
+                row("src/a.ts", 1),
+                row("src/helper.ts", 1),
+                row("src/b.ts", 2),
+                row("src/leaf.ts", 2),
+                row("src/x.ts", 2),
+                row("src/c.ts", 3),
+            ],
+            "deterministic merge of both legs in (depth, path) order"
+        );
+    }
+
+    #[test]
+    fn impact_cycle_safe_and_both_merges_min_depth() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        let put = |p: &str, c: &str| {
+            idx.index_file("p", p, c, p, c.len() as i64).unwrap();
+        };
+        // Import CYCLE: cyc1 → cyc2 → cyc3 → cyc1; symbol defined in cyc1.
+        put("src/cyc1.ts", "import './cyc2';\nexport function cycSym() {}");
+        put("src/cyc2.ts", "import './cyc3';\nexport const c2 = 1;");
+        put("src/cyc3.ts", "import './cyc1';\nexport const c3 = 1;");
+        idx.rebuild_edges("p").unwrap();
+        // Without the visited set this BFS never terminates — depth 20 bounds it
+        // anyway, but the assertions prove the walk stops at the cycle closure.
+        let up = code_impact_readonly(&path, "p", "cycSym", 20, ImpactDirection::Upstream, 200, false)
+            .unwrap();
+        assert_eq!(up.rows, vec![row("src/cyc3.ts", 1), row("src/cyc2.ts", 2)]);
+        let down =
+            code_impact_readonly(&path, "p", "cycSym", 20, ImpactDirection::Downstream, 200, false)
+                .unwrap();
+        assert_eq!(down.rows, vec![row("src/cyc2.ts", 1), row("src/cyc3.ts", 2)]);
+        // `both` keeps the MIN depth per path across the two legs.
+        let both = code_impact_readonly(&path, "p", "cycSym", 20, ImpactDirection::Both, 200, false)
+            .unwrap();
+        assert_eq!(both.rows, vec![row("src/cyc2.ts", 1), row("src/cyc3.ts", 1)]);
+    }
+
+    #[test]
+    fn impact_truncation_fires_after_full_ordering() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        impact_fixture(&idx);
+        // Full order: a@1, b@2, x@2, c@3. max_results=2 cuts INSIDE the depth-2
+        // tie — the kept prefix must be the path-sorted head (b kept, x cut).
+        let t = code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Upstream, 2, false)
+            .unwrap();
+        assert!(t.truncated);
+        assert_eq!(t.result_total, 4, "pre-truncation count");
+        assert_eq!(t.truncated_reason.as_deref(), Some("max_results"));
+        assert_eq!(t.rows, vec![row("src/a.ts", 1), row("src/b.ts", 2)]);
+        assert_eq!(t.ast_dependents, vec!["src/a.ts", "src/b.ts"]);
+        // Negative control: an exact fit is NOT truncation.
+        let n = code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Upstream, 4, false)
+            .unwrap();
+        assert!(!n.truncated);
+        assert_eq!(n.truncated_reason, None);
+        assert_eq!(n.result_total, 4);
+        assert_eq!(n.rows.len(), 4);
+        // max_results clamps to >= 1 (0 would silence the whole result).
+        let one = code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Upstream, 0, false)
+            .unwrap();
+        assert_eq!(one.rows, vec![row("src/a.ts", 1)]);
+        assert!(one.truncated);
+    }
+
+    #[test]
+    fn is_test_path_matches_conventions_only() {
+        for t in [
+            "src/tests/a.ts",
+            "pkg\\tests\\b.rs",
+            "tests/root.ts",
+            "src/foo.test.ts",
+            "src/Foo.Spec.tsx",
+            "src/foo_test.go",
+            "src/test_thing.py",
+            "foo.test.ts",
+        ] {
+            assert!(is_test_path(t), "{t} should match a test convention");
+        }
+        for n in [
+            "src/latest.rs",
+            "src/attestation.ts",
+            "src/protest/file.ts",
+            "src/testimony.ts",
+            "src/foo.spec",       // no trailing extension → not *.spec.*
+            "src/contest_tester.rs",
+            "src/tests.rs",       // a FILE named tests.rs is not a tests/ segment
+        ] {
+            assert!(!is_test_path(n), "{n} must NOT match");
+        }
+    }
+
+    #[test]
+    fn impact_exclude_tests_filters_rows_and_lexical() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        impact_fixture(&idx);
+        let put = |p: &str, c: &str| {
+            idx.index_file("p", p, c, p, c.len() as i64).unwrap();
+        };
+        put("src/tests/it.ts", "import '../dep';\nexport const t = 1;");
+        put("src/dep.test.ts", "import './dep';\nexport const t2 = 1;");
+        put("src/mention.ts", "// targetSym mentioned here, no import edge");
+        put("tests/lex.ts", "// targetSym mention from a test file");
+        idx.rebuild_edges("p").unwrap();
+
+        let all = code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Upstream, 200, false)
+            .unwrap();
+        assert!(all.rows.contains(&row("src/dep.test.ts", 1)), "{:?}", all.rows);
+        assert!(all.rows.contains(&row("src/tests/it.ts", 1)), "{:?}", all.rows);
+        assert!(all.lexical_candidates.contains(&"src/mention.ts".to_string()));
+        assert!(all.lexical_candidates.contains(&"tests/lex.ts".to_string()));
+
+        let f = code_impact_readonly(&path, "p", "targetSym", 10, ImpactDirection::Upstream, 200, true)
+            .unwrap();
+        assert_eq!(
+            f.rows,
+            vec![row("src/a.ts", 1), row("src/b.ts", 2), row("src/x.ts", 2), row("src/c.ts", 3)],
+            "test-convention paths dropped from rows"
+        );
+        assert_eq!(f.result_total, 4, "result_total counts post-filter rows");
+        assert!(f.lexical_candidates.contains(&"src/mention.ts".to_string()));
+        assert!(
+            !f.lexical_candidates.contains(&"tests/lex.ts".to_string()),
+            "lexical tier is filtered too: {:?}",
+            f.lexical_candidates
+        );
+    }
+
+    #[test]
+    fn impact_multi_definition_symbol_uses_nearest_def() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        let put = |p: &str, c: &str| {
+            idx.index_file("p", p, c, p, c.len() as i64).unwrap();
+        };
+        put("src/d1.ts", "export function dupSym() {}");
+        put("src/d2.ts", "export function dupSym() {}");
+        put("src/far.ts", "import './d1';\nexport const f = 1;");
+        put("src/near.ts", "import './d2';\nexport const n = 1;");
+        // farther reaches d1 via far (2 hops) but imports d2 DIRECTLY — the
+        // minimal depth from the NEAREST defining file (1) must win.
+        put("src/farther.ts", "import './far';\nimport './d2';\nexport const ff = 1;");
+        idx.rebuild_edges("p").unwrap();
+        let i = code_impact_readonly(&path, "p", "dupSym", 10, ImpactDirection::Upstream, 200, false)
+            .unwrap();
+        assert_eq!(i.defined_in, vec!["src/d1.ts", "src/d2.ts"], "sorted defs");
+        assert_eq!(
+            i.rows,
+            vec![row("src/far.ts", 1), row("src/farther.ts", 1), row("src/near.ts", 1)],
+            "farther is depth 1 (direct d2 import), not 2 (via far→d1)"
+        );
+    }
+
+    #[test]
+    fn impact_depth_clamps_1_to_20() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        let put = |p: &str, c: &str| {
+            idx.index_file("p", p, c, p, c.len() as i64).unwrap();
+        };
+        // A 22-file chain: f00 defines chainSym; f01 imports f00; … f21 imports f20.
+        put("src/f00.ts", "export function chainSym() {}");
+        for i in 1..=21usize {
+            put(
+                &format!("src/f{i:02}.ts"),
+                &format!("import './f{:02}';\nexport const x{i} = 1;", i - 1),
+            );
+        }
+        idx.rebuild_edges("p").unwrap();
+        // depth 0 clamps to 1 → direct importer only (NOT empty — the floor
+        // discriminates against "0 = disabled" regressions).
+        let d0 = code_impact_readonly(&path, "p", "chainSym", 0, ImpactDirection::Upstream, 200, false)
+            .unwrap();
+        assert_eq!(d0.rows, vec![row("src/f01.ts", 1)]);
+        // depth usize::MAX clamps to 20 → f21 (hop 21) is NOT reached.
+        let dmax = code_impact_readonly(
+            &path, "p", "chainSym", usize::MAX, ImpactDirection::Upstream, 200, false,
+        )
+        .unwrap();
+        assert_eq!(dmax.rows.len(), 20);
+        assert_eq!(dmax.rows.last(), Some(&row("src/f20.ts", 20)));
+        assert!(
+            !dmax.rows.iter().any(|r| r.path == "src/f21.ts"),
+            "hop 21 must be cut by the depth ceiling"
         );
     }
 }

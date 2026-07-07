@@ -26,6 +26,7 @@ use koden_lib::modules::brain::reflect::{
 use koden_lib::modules::brain::resume::{
     gc_resume_dir, record_event, recover_all, resume_command, ResumePlan, ResumeRecord, SessionKey,
 };
+use koden_lib::modules::brain::ast::ImpactDirection;
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, list_notes_readonly, list_proposals_readonly,
     semantic_meta_readonly, SearchIndex, SqliteIndex,
@@ -638,11 +639,16 @@ fn code_impact_reverse_import_closure() {
     assert_eq!(sym[0].path, "src/a.ts");
     assert_eq!(sym[0].kind, "function");
 
-    // a defines alpha; b imports a; c imports b → dependents = {b, c}.
-    let imp = code_impact_readonly(&db, PID, "alpha", 5).unwrap();
+    // a defines alpha; b imports a; c imports b → dependents = {b@1, c@2}.
+    let imp = code_impact_readonly(&db, PID, "alpha", 5, ImpactDirection::Upstream, 200, false)
+        .unwrap();
     assert_eq!(imp.defined_in, vec!["src/a.ts"]);
     assert!(imp.ast_dependents.contains(&"src/b.ts".to_string()), "{:?}", imp.ast_dependents);
     assert!(imp.ast_dependents.contains(&"src/c.ts".to_string()), "{:?}", imp.ast_dependents);
+    // Depth-annotated rows carry minimal hop counts from the defining file.
+    assert!(imp.rows.iter().any(|r| r.path == "src/b.ts" && r.depth == 1), "{:?}", imp.rows);
+    assert!(imp.rows.iter().any(|r| r.path == "src/c.ts" && r.depth == 2), "{:?}", imp.rows);
+    assert!(!imp.truncated);
 }
 
 /// P2 gate (strengthened): incremental relink == full rebuild across ADD + DELETE
