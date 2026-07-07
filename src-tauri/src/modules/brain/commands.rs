@@ -334,6 +334,77 @@ pub async fn brain_detect_changes(
     .await
 }
 
+/// Churn hotspots (ADR-013 first step): indexed paths ranked by DISTINCT
+/// commits touching them in a bounded `git log` window, optionally narrowed
+/// by a git-parsed `since` (e.g. "2.weeks" or an ISO date). `limit` defaults
+/// to 25 (clamped 1..200). Read-only end to end; a non-git root, bad `since`
+/// shape, or unavailable git is a SOFT result (`skipped_reason`), never an
+/// error — fail-open like every other reader.
+#[tauri::command]
+pub async fn brain_hotspots(
+    state: State<'_, BrainState>,
+    project: String,
+    since: Option<String>,
+    limit: Option<usize>,
+) -> Result<store::Hotspots, String> {
+    let root = state
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project)
+        .map(|p| p.root)
+        .ok_or_else(|| format!("unknown project: {project}"))?;
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Ok(store::Hotspots::skipped("index-not-ready"));
+    };
+    blocking(move || {
+        let root = std::path::Path::new(&root);
+        store::hotspots_readonly(&db, &project, root, since.as_deref(), limit).unwrap_or_else(|e| {
+            // A missing/locked DB during warmup is not a user error.
+            log::debug!("brain_hotspots soft error: {e}");
+            store::Hotspots::skipped("index-unavailable")
+        })
+    })
+    .await
+}
+
+/// Paths touched between two git anchors (`from`..`to`, `to` defaulting to
+/// HEAD), each mapped onto the index (ADR-013 first step). Read-only end to
+/// end; a bad/unknown anchor, non-git root, or unavailable git is a SOFT
+/// result (`skipped_reason`), never an error — fail-open like every other
+/// reader.
+#[tauri::command]
+pub async fn brain_changed_between(
+    state: State<'_, BrainState>,
+    project: String,
+    from: String,
+    to: Option<String>,
+) -> Result<store::ChangedBetween, String> {
+    let root = state
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project)
+        .map(|p| p.root)
+        .ok_or_else(|| format!("unknown project: {project}"))?;
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        let to = to.as_deref().unwrap_or("HEAD");
+        return Ok(store::ChangedBetween::skipped(&from, to, "index-not-ready"));
+    };
+    blocking(move || {
+        let root = std::path::Path::new(&root);
+        store::changed_between_readonly(&db, &project, root, &from, to.as_deref()).unwrap_or_else(
+            |e| {
+                // A missing/locked DB during warmup is not a user error.
+                log::debug!("brain_changed_between soft error: {e}");
+                let to = to.as_deref().unwrap_or("HEAD");
+                store::ChangedBetween::skipped(&from, to, "index-unavailable")
+            },
+        )
+    })
+    .await
+}
+
 /// One-call read-only planning bundle: task-text search hits + git-diff
 /// affected files + (when `target` is given) upstream impact of the target
 /// symbol. Pure composition over the existing readers; each leg that cannot

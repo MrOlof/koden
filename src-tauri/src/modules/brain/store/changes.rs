@@ -78,14 +78,34 @@ impl DetectedChanges {
     }
 }
 
+/// Run ONE read-only git probe in `project_root` (args passed verbatim, no
+/// shell — untrusted values can never be interpolated) and return raw stdout.
+/// `Err` carries the skipped-reason class: "git-not-available" (spawn failed),
+/// "not-a-git-repo", "unknown-anchor" (a revision arg didn't resolve), or
+/// "git-error" (anything else). Output is fully buffered, so every caller must
+/// pass a BOUNDED query (name-only diffs, `--max-count`-capped logs) — never
+/// unbounded content.
+pub(super) fn run_git_readonly(project_root: &Path, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("--no-pager").args(args);
+    cmd.current_dir(project_root);
+    let out = cmd.output().map_err(|_| "git-not-available".to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+        return Err(if err.contains("not a git repository") {
+            "not-a-git-repo".to_string()
+        } else if err.contains("unknown revision") || err.contains("bad revision") {
+            "unknown-anchor".to_string()
+        } else {
+            "git-error".to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Run one read-only `git diff --name-only` probe and return the touched paths
 /// (forward-slash normalized). `Err` carries the skipped-reason class.
 fn git_diff_names(project_root: &Path, staged: bool) -> Result<Vec<String>, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("--no-pager").arg("diff");
-    if staged {
-        cmd.arg("--cached");
-    }
     // `-z`: NUL-separated raw paths — no core.quotepath escaping to undo.
     // `--no-renames`: a rename decomposes into delete(old) + add(new) so BOTH
     //   sides appear in `--name-only` output (rename detection would list only
@@ -95,22 +115,37 @@ fn git_diff_names(project_root: &Path, staged: bool) -> Result<Vec<String>, Stri
     // `--relative`: paths relative to the project root even when the root is a
     //   subdirectory of the git repo (changes outside the root are excluded) —
     //   matching the index's root-relative path representation.
-    cmd.args(["--name-only", "-z", "--no-renames", "--relative"]);
-    cmd.current_dir(project_root);
-    let out = cmd.output().map_err(|_| "git-not-available".to_string())?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
-        return Err(if err.contains("not a git repository") {
-            "not-a-git-repo".to_string()
-        } else {
-            "git-error".to_string()
-        });
+    let mut args: Vec<&str> = vec!["diff"];
+    if staged {
+        args.push("--cached");
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
+    args.extend(["--name-only", "-z", "--no-renames", "--relative"]);
+    let stdout = run_git_readonly(project_root, &args)?;
+    Ok(stdout
         .split('\0')
         .filter(|s| !s.is_empty())
         .map(|s| s.replace('\\', "/"))
         .collect())
+}
+
+/// Case-fold-keyed lookup of the project's indexed paths (fold → STORED
+/// spelling), same fold as the registry's `resolve` (ADR-010 cluster 7:
+/// Windows only): git records the casing from `git add` time, which can drift
+/// from the on-disk casing the index stored. Matching via the fold, then
+/// emitting the STORED spelling, keeps output paths joinable against every
+/// other brain surface.
+pub(super) fn indexed_paths_folded(
+    conn: &rusqlite::Connection,
+    project: &str,
+) -> rusqlite::Result<BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT path FROM files WHERE project_id=?1")?;
+    let it = stmt.query_map([project], |r| r.get::<_, String>(0))?;
+    let mut indexed = BTreeMap::new();
+    for p in it {
+        let p = p?;
+        indexed.insert(fold_case(&p), p);
+    }
+    Ok(indexed)
 }
 
 /// Map the project's git diff to affected indexed files + their first-degree
@@ -139,20 +174,7 @@ pub fn detect_changes_readonly(
     }
 
     let conn = super::sqlite::open_readonly(db_path)?;
-    // Case-fold-keyed lookup (same fold as the registry's `resolve`, ADR-010
-    // cluster 7: Windows only): git records the casing from `git add` time,
-    // which can drift from the on-disk casing the index stored. Matching via
-    // the fold, then emitting the STORED spelling, keeps output paths joinable
-    // against every other brain surface.
-    let mut indexed: BTreeMap<String, String> = BTreeMap::new();
-    {
-        let mut stmt = conn.prepare("SELECT path FROM files WHERE project_id=?1")?;
-        let it = stmt.query_map([project], |r| r.get::<_, String>(0))?;
-        for p in it {
-            let p = p?;
-            indexed.insert(fold_case(&p), p);
-        }
-    }
+    let indexed = indexed_paths_folded(&conn, project)?;
     let mut dep_stmt = conn.prepare(
         "SELECT DISTINCT src_path FROM code_edges WHERE project_id=?1 AND dst_path=?2 ORDER BY src_path",
     )?;

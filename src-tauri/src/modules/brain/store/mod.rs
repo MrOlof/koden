@@ -7,10 +7,14 @@ pub mod migrate;
 pub mod plan;
 pub mod schema;
 pub mod sqlite;
+pub mod temporal;
 
 pub use changes::{detect_changes_readonly, AffectedFile, DetectMode, DetectedChanges};
 pub use graph::{graph_readonly, BrainGraph};
 pub use plan::{plan_context_readonly, PlanAdvisory, PlanContext};
+pub use temporal::{
+    changed_between_readonly, hotspots_readonly, ChangedBetween, ChangedFile, HotspotRow, Hotspots,
+};
 
 pub use sqlite::{
     budget_state_readonly, code_impact_readonly, file_count_readonly, file_count_with_conn,

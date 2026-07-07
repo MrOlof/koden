@@ -212,6 +212,8 @@ pub fn run() {
             brain::commands::brain_get_symbol,
             brain::commands::brain_code_impact,
             brain::commands::brain_detect_changes,
+            brain::commands::brain_hotspots,
+            brain::commands::brain_changed_between,
             brain::commands::brain_plan_context,
             brain::commands::brain_graph,
             brain::commands::brain_build_gist,
