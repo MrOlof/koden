@@ -707,6 +707,12 @@ pub fn index_changed(
     let now_ms = now_epoch_ms(); // recency stamp for whatever changed in this delta
     let mut indexed = 0usize;
     let mut pruned = 0usize;
+    // Delta sets for the edge relink: paths (re)indexed this pass (may include
+    // unchanged no-ops — a safe over-approximation, they relink to the same
+    // edges) and paths positively removed. Drives `relink_edges_delta` so the
+    // per-event edge cost is ∝ this delta, not O(project imports).
+    let mut changed_rels: Vec<String> = Vec::new();
+    let mut removed_rels: Vec<String> = Vec::new();
     for path in changed {
         let rel = rel_path(root, path);
         if rel.is_empty() {
@@ -732,6 +738,7 @@ pub fn index_changed(
                 }
                 if index_one_file(index, project_id, &rel, path, now_ms) == FileOutcome::Indexed {
                     indexed += 1;
+                    changed_rels.push(rel.clone());
                 }
             }
             Ok(_) => {
@@ -756,6 +763,7 @@ pub fn index_changed(
                             == FileOutcome::Indexed
                     {
                         indexed += 1;
+                        changed_rels.push(crel);
                     }
                 }
             }
@@ -763,6 +771,7 @@ pub fn index_changed(
                 // Positively gone (deleted / moved away) — prune the stale row + FTS doc.
                 if index.remove_file(project_id, &rel).unwrap_or(false) {
                     pruned += 1;
+                    removed_rels.push(rel.clone());
                 }
                 // The vanished path may have been a directory whose children were
                 // not individually reported — prune any indexed files under it.
@@ -773,6 +782,7 @@ pub fn index_changed(
                             && index.remove_file(project_id, &p).unwrap_or(false)
                         {
                             pruned += 1;
+                            removed_rels.push(p);
                         }
                     }
                 }
@@ -790,8 +800,10 @@ pub fn index_changed(
     if changed.iter().any(|p| to_canon(p).contains(&mem_marker)) {
         memory::scan_project_memory(index, project_id, root);
     }
-    // Rebuild resolved import edges (cheap; converges with a full rebuild).
-    let _ = index.rebuild_edges(project_id);
+    // Delta edge relink — only the srcs this change-set can affect (incl. the
+    // dst side via stored import bases); converges byte-identically with a full
+    // rebuild (perf pair: proportional to the delta, not O(project)).
+    let _ = index.relink_edges_delta(project_id, &changed_rels, &removed_rels);
     IndexStats { indexed, pruned }
 }
 

@@ -48,7 +48,17 @@
 ///     gist cache key so one key never mixes pre- and post-coverage ranking bytes
 ///     (the byte-identity gate holds per key) — one-time post-upgrade
 ///     agent-prompt-cache miss, expected.
-pub const SCHEMA_VERSION: i64 = 12;
+/// v13: perf pair (deferred from ADR-010 cluster 6). `code_imports.base` (the
+///     normalized resolution base of a relative spec, '' for external/escaping)
+///     + its (project_id, base) index — powers the delta edge relink
+///     (`relink_edges_delta`: only imports whose base an appearing/disappearing
+///     file can serve are re-resolved). Also `files_recency` (project_id,
+///     accessed_at_ms) so the temporal-boost `ref_ms` is an index seek, not a
+///     files-table scan. RANKING semantics are UNCHANGED (equivalence pinned by
+///     `temporal_boost_bounded_probe_matches_full_scan`); the bump exists for the
+///     DDL change — `code_imports` is DERIVED, so the upgrade drop/rebuild
+///     backfills `base`. Key rotation side effect as per the v6 note.
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
@@ -77,6 +87,9 @@ CREATE TABLE IF NOT EXISTS files (
 -- UNIQUE: one FTS document per file row; the search JOIN assumes a 1:1 mapping.
 CREATE UNIQUE INDEX IF NOT EXISTS files_fts_rowid ON files(fts_rowid);
 CREATE INDEX IF NOT EXISTS files_project   ON files(project_id);
+-- V2 temporal re-rank perf: MAX(accessed_at_ms) per project (the boost's ref_ms)
+-- becomes an index seek instead of a project-wide scan on every search.
+CREATE INDEX IF NOT EXISTS files_recency   ON files(project_id, accessed_at_ms);
 
 -- Lexical FTS5 index over PRE-TOKENIZED streams (CONCEPT [DP-3]); columns carry
 -- already split/stemmed token streams. The `ascii` tokenizer is a near-passthrough
@@ -221,9 +234,17 @@ CREATE TABLE IF NOT EXISTS code_imports (
     project_id TEXT NOT NULL,
     src_path   TEXT NOT NULL,
     spec       TEXT NOT NULL,
+    -- v13: the spec's normalized resolution base (importer-dir + spec, `.`/`..`
+    -- folded), '' for external/root-escaping specs. Stored so the delta relink
+    -- can find, via the (project_id, base) index, exactly the imports whose
+    -- resolution an appearing/disappearing file could change — the EXTS
+    -- candidates of a base are `base` + fixed suffixes, so any file able to
+    -- satisfy an import serves that import's base (see `serveable_bases`).
+    base       TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, src_path, spec)
 );
-CREATE INDEX IF NOT EXISTS code_imports_src ON code_imports(project_id, src_path);
+CREATE INDEX IF NOT EXISTS code_imports_src  ON code_imports(project_id, src_path);
+CREATE INDEX IF NOT EXISTS code_imports_base ON code_imports(project_id, base);
 
 CREATE TABLE IF NOT EXISTS code_edges (
     project_id TEXT NOT NULL,

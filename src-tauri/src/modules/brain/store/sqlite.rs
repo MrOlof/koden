@@ -486,9 +486,12 @@ impl SqliteIndex {
                 )?;
             }
             for spec in &a.imports {
+                // Store the normalized resolution base ('' = can never resolve
+                // in-project) so the delta relink can index-match affected imports.
+                let base = import_base(rel_path, spec).unwrap_or_default();
                 tx.execute(
-                    "INSERT OR IGNORE INTO code_imports(project_id,src_path,spec) VALUES(?1,?2,?3)",
-                    (project_id, rel_path, spec.as_str()),
+                    "INSERT OR IGNORE INTO code_imports(project_id,src_path,spec,base) VALUES(?1,?2,?3,?4)",
+                    (project_id, rel_path, spec.as_str(), base.as_str()),
                 )?;
             }
         }
@@ -865,6 +868,89 @@ impl SqliteIndex {
         tx.commit()?;
         Ok(())
     }
+
+    /// Delta edge relink — recompute ONLY the edges a change-set can affect,
+    /// converging byte-identically with a from-scratch [Self::rebuild_edges]
+    /// (pinned by `relink_delta_converges_with_full_rebuild`). Affected srcs:
+    /// - the changed/removed files themselves (their `code_imports` rows were
+    ///   just rewritten by `index_file` / deleted by `remove_file`), and
+    /// - every importer whose stored `base` is SERVED by a changed/removed file
+    ///   (the dst side: a NEW file can become — or shadow — the resolution
+    ///   target of an EXISTING import, and a removal can un-shadow the next
+    ///   EXTS fallback; `serveable_bases` is the exact inverse of the EXTS
+    ///   expansion, so no other import's candidate-existence can have changed).
+    /// Cost ∝ delta (index-backed base lookups + per-candidate PK probes) —
+    /// never O(project imports). `changed` may safely over-approximate (an
+    /// unchanged file relinks to the same edges); iteration is over BTreeSets
+    /// for deterministic order.
+    pub fn relink_edges_delta(
+        &self,
+        project_id: &str,
+        changed: &[String],
+        removed: &[String],
+    ) -> rusqlite::Result<()> {
+        if changed.is_empty() && removed.is_empty() {
+            return Ok(());
+        }
+        let mut srcs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut bases: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for p in changed.iter().chain(removed) {
+            srcs.insert(p.clone());
+            for b in serveable_bases(p) {
+                bases.insert(b);
+            }
+        }
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT src_path FROM code_imports WHERE project_id=?1 AND base=?2")?;
+            for b in &bases {
+                let it = stmt.query_map((project_id, b.as_str()), |r| r.get::<_, String>(0))?;
+                for s in it {
+                    srcs.insert(s?);
+                }
+            }
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut del =
+                tx.prepare("DELETE FROM code_edges WHERE project_id=?1 AND src_path=?2")?;
+            // No SQL ORDER BY here: it baits the planner onto code_imports_base
+            // with only project_id bound (an O(project-imports) scan per src —
+            // the exact leak this fn exists to close); the (project_id, src_path)
+            // seek + a Rust sort keeps it delta-bounded AND deterministic.
+            let mut imp = tx.prepare(
+                "SELECT base FROM code_imports WHERE project_id=?1 AND src_path=?2 AND base<>''",
+            )?;
+            let mut exists = tx.prepare("SELECT 1 FROM files WHERE project_id=?1 AND path=?2")?;
+            let mut ins = tx.prepare(
+                "INSERT OR IGNORE INTO code_edges(project_id,src_path,dst_path,kind) VALUES(?1,?2,?3,'imports')",
+            )?;
+            for src in &srcs {
+                del.execute((project_id, src.as_str()))?;
+                let mut src_bases: Vec<String> = imp
+                    .query_map((project_id, src.as_str()), |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                src_bases.sort(); // deterministic resolution order (see above)
+                for base in src_bases {
+                    // Same EXTS precedence as resolve_import, membership via PK
+                    // probes against the CURRENT file set (bounded, not a set load).
+                    for e in EXTS {
+                        let cand = format!("{base}{e}");
+                        if exists.exists((project_id, cand.as_str()))? {
+                            if cand != *src {
+                                // skip self-loops (a file resolving an import to itself)
+                                ins.execute((project_id, src.as_str(), cand.as_str()))?;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 impl SearchIndex for SqliteIndex {
@@ -882,15 +968,20 @@ fn analyze_for(rel_path: &str, content: &str) -> Option<ast::Analysis> {
     ast::lang_for_ext(ext).map(|lang| ast::analyze(lang, content))
 }
 
-/// Resolve a relative import specifier to an indexed file path (extension +
-/// index fallback). Bare/external specifiers (e.g. `react`) return `None`.
-/// Module resolution via tsconfig paths / package exports / Cargo members is a
-/// later P2 refinement; relative resolution covers the common case.
-fn resolve_import(
-    importer: &str,
-    spec: &str,
-    files: &std::collections::HashSet<String>,
-) -> Option<String> {
+/// The fixed candidate suffixes a resolution base is expanded with (extension +
+/// index fallback), in precedence order. Shared by [resolve_import] (full
+/// rebuild), the delta relink's PK probes, and [serveable_bases] (the inverse
+/// mapping) — the three MUST stay in lockstep or delta/full edge builds diverge.
+const EXTS: &[&str] = &[
+    "", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js",
+];
+
+/// Normalized resolution BASE of an import spec: importer-dir + spec with
+/// `.`/`..` folded (and `\` / ?query / #hash cleaned). `None` for bare/external
+/// specifiers (e.g. `react`), root-escaping specs, and an empty result — exactly
+/// the specs that can never resolve to an in-project edge. Stored per import row
+/// (`code_imports.base`, '' for None) so the delta relink can index-match it.
+fn import_base(importer: &str, spec: &str) -> Option<String> {
     // Normalize the specifier: backslashes → '/' (Windows-authored imports) and
     // drop any ?query / #hash suffix before resolving.
     let spec_norm = spec.replace('\\', "/");
@@ -906,9 +997,41 @@ fn resolve_import(
     if base.is_empty() {
         return None;
     }
-    const EXTS: &[&str] = &[
-        "", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js",
-    ];
+    Some(base)
+}
+
+/// All bases an indexed file can SATISFY — the inverse of the EXTS expansion:
+/// `x.ts` serves bases `x.ts` (bare) and `x` (`.ts`); `x/index.ts` additionally
+/// serves `x` (`/index.ts`). When a file appears or disappears, ONLY imports
+/// whose stored base is in this set can change resolution (incl. shadowing:
+/// a new `x.ts` outranking an existing `x/index.ts` target, and un-shadowing on
+/// delete) — the dst-side affected set of [SqliteIndex::relink_edges_delta].
+fn serveable_bases(path: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for e in EXTS {
+        if e.is_empty() {
+            v.push(path.to_string());
+        } else if let Some(stripped) = path.strip_suffix(e) {
+            if !stripped.is_empty() {
+                v.push(stripped.to_string());
+            }
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Resolve a relative import specifier to an indexed file path (extension +
+/// index fallback). Bare/external specifiers (e.g. `react`) return `None`.
+/// Module resolution via tsconfig paths / package exports / Cargo members is a
+/// later P2 refinement; relative resolution covers the common case.
+fn resolve_import(
+    importer: &str,
+    spec: &str,
+    files: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let base = import_base(importer, spec)?;
     EXTS.iter()
         .map(|e| format!("{base}{e}"))
         .find(|c| files.contains(c))
@@ -1380,7 +1503,7 @@ pub fn search_with_weights(
     // AFTER fusion (RRF stays leg-pure — a per-doc multiplier is a document property,
     // not a leg). All inputs are STORED + read from this connection's snapshot, so
     // two reads of an unchanged index re-derive the same order → byte-identical gist.
-    apply_temporal_boost(conn, project, &mut fused)?;
+    apply_temporal_boost(conn, &mut fused)?;
 
     let hits = fused
         .into_iter()
@@ -1403,41 +1526,47 @@ pub fn search_with_weights(
 /// files are unstamped (accessed_* == 0).
 fn apply_temporal_boost(
     conn: &Connection,
-    project: Option<&str>,
     fused: &mut [(String, f64)],
 ) -> rusqlite::Result<()> {
     if fused.is_empty() {
         return Ok(());
     }
-    // Load (composite id → accessed_*) AND a PER-PROJECT ref_ms (max accessed_at_ms)
-    // in one scan, so a doc's age is relative to its OWN project even on a cross-
-    // project (project=None) search — indexing in project B never reorders project A.
-    let mut access: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    // BOUNDED probe (the ADR-010 perf-pair fix): only the candidates being ranked
+    // are looked up — they are already capped by the per-leg overfetch — plus ONE
+    // `files_recency`-index MAX seek per distinct candidate project for its
+    // `ref_ms`. Never a full files-table scan. Semantics are IDENTICAL to the
+    // historical full scan (pinned bit-for-bit by
+    // `temporal_boost_bounded_probe_matches_full_scan`): a missing files row reads
+    // as (0, 0) and a project with no rows as ref_ms = 0, exactly as the scan's
+    // absent map entries did; per-project ref_ms keeps a doc's age relative to its
+    // OWN project on cross-project searches. Same snapshot connection → the gist
+    // byte-identity gate is untouched.
+    let mut row_stmt = conn.prepare(
+        "SELECT accessed_at_ms, accessed_count FROM files WHERE project_id=?1 AND path=?2",
+    )?;
+    let mut ref_stmt = conn.prepare("SELECT MAX(accessed_at_ms) FROM files WHERE project_id=?1")?;
     let mut proj_ref: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut scan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<()> {
-        let mut stmt = conn.prepare(sql)?;
-        let it = stmt.query_map(params, |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
-        })?;
-        for row in it {
-            let (proj, path, at, count) = row?;
-            let e = proj_ref.entry(proj.clone()).or_insert(0);
-            *e = (*e).max(at);
-            access.insert(format!("{proj}\u{0}{path}"), (at, count));
-        }
-        Ok(())
-    };
-    match project {
-        Some(pid) => scan(
-            "SELECT project_id, path, accessed_at_ms, accessed_count FROM files WHERE project_id=?1",
-            &[&pid],
-        )?,
-        None => scan("SELECT project_id, path, accessed_at_ms, accessed_count FROM files", &[])?,
-    }
-
     for (id, score) in fused.iter_mut() {
-        let (at, count) = access.get(id).copied().unwrap_or((0, 0));
-        let ref_ms = id.split_once('\u{0}').and_then(|(p, _)| proj_ref.get(p)).copied().unwrap_or(0);
+        // Ids are "project\0path" by construction; a malformed id degrades to the
+        // same neutral (0,0)/ref 0 boost the full scan gave it.
+        let (proj, path) = id.split_once('\u{0}').unwrap_or(("", ""));
+        let (at, count): (i64, i64) = match row_stmt
+            .query_row((proj, path), |r| Ok((r.get(0)?, r.get(1)?)))
+        {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => (0, 0),
+            Err(e) => return Err(e),
+        };
+        let ref_ms = match proj_ref.get(proj) {
+            Some(v) => *v,
+            None => {
+                let v: i64 = ref_stmt
+                    .query_row([proj], |r| r.get::<_, Option<i64>>(0))?
+                    .unwrap_or(0);
+                proj_ref.insert(proj.to_string(), v);
+                v
+            }
+        };
         *score *= temporal_boost(at, count, ref_ms);
         debug_assert!(score.is_finite(), "temporal boost produced a non-finite score");
     }
@@ -2034,6 +2163,168 @@ mod tests {
         for (x, y) in r1.iter().zip(&r2) {
             assert_eq!((&x.path, x.score), (&y.path, y.score), "search not byte-stable across reads");
         }
+    }
+
+    /// Perf-pair sub-goal A: the bounded per-candidate probe must be BIT-IDENTICAL
+    /// to the historical full-files-table scan it replaced — same boosts, same
+    /// comparator, same output, including the degenerate cases (row missing from
+    /// `files`, project with no rows, cross-project per-project ref_ms).
+    #[test]
+    fn temporal_boost_bounded_probe_matches_full_scan() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p1", "src/a.rs", "pub fn alpha() {}", "h1", 8).unwrap();
+        idx.index_file("p1", "src/b.rs", "pub fn beta() {}", "h2", 8).unwrap();
+        idx.index_file("p1", "src/c.rs", "pub fn gamma() {}", "h3", 8).unwrap();
+        idx.index_file("p2", "src/a.rs", "pub fn alpha() {}", "h4", 8).unwrap();
+        idx.record_access("p1", "src/a.rs", 100 * DAY_MS).unwrap();
+        idx.record_access("p1", "src/b.rs", 60 * DAY_MS).unwrap();
+        idx.record_access("p2", "src/a.rs", 3 * DAY_MS).unwrap();
+        // src/c.rs stays UNSTAMPED; p3\0ghost.rs has NO files row at all.
+        let fused_in: Vec<(String, f64)> = vec![
+            ("p1\u{0}src/a.rs".into(), 0.030),
+            ("p1\u{0}src/b.rs".into(), 0.030), // equal score → the boost decides
+            ("p1\u{0}src/c.rs".into(), 0.028),
+            ("p2\u{0}src/a.rs".into(), 0.027),
+            ("p3\u{0}ghost.rs".into(), 0.026),
+        ];
+
+        // REFERENCE: the historical full-scan algorithm, replicated verbatim.
+        let mut expect = fused_in.clone();
+        {
+            let mut access: std::collections::HashMap<String, (i64, i64)> =
+                std::collections::HashMap::new();
+            let mut proj_ref: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            let mut stmt = idx
+                .conn
+                .prepare("SELECT project_id, path, accessed_at_ms, accessed_count FROM files")
+                .unwrap();
+            let it = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                })
+                .unwrap();
+            for row in it {
+                let (proj, p, at, count) = row.unwrap();
+                let e = proj_ref.entry(proj.clone()).or_insert(0);
+                *e = (*e).max(at);
+                access.insert(format!("{proj}\u{0}{p}"), (at, count));
+            }
+            for (id, score) in expect.iter_mut() {
+                let (at, count) = access.get(id).copied().unwrap_or((0, 0));
+                let ref_ms = id
+                    .split_once('\u{0}')
+                    .and_then(|(p, _)| proj_ref.get(p))
+                    .copied()
+                    .unwrap_or(0);
+                *score *= temporal_boost(at, count, ref_ms);
+            }
+            expect.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0))
+            });
+        }
+
+        let mut got = fused_in.clone();
+        apply_temporal_boost(&idx.conn, &mut got).unwrap();
+        let bits = |v: &[(String, f64)]| -> Vec<(String, u64)> {
+            v.iter().map(|(i, s)| (i.clone(), s.to_bits())).collect()
+        };
+        assert_eq!(bits(&got), bits(&expect), "bounded probe must be bit-identical to the full scan");
+        // Sanity: the boost actually discriminated — a.rs (age 0 vs ref 100d) beats
+        // the equal-scored b.rs (age 40d) despite b's input tie.
+        let pos = |p: &str| got.iter().position(|(i, _)| i == p).unwrap();
+        assert!(pos("p1\u{0}src/a.rs") < pos("p1\u{0}src/b.rs"), "fresher equal-score doc first: {got:?}");
+    }
+
+    #[test]
+    fn serveable_bases_inverts_exts_expansion() {
+        // The delta relink's dst-side correctness hinges on this inverse: for
+        // EVERY base and EVERY suffix, the candidate `base + ext` must serve
+        // `base` — else an appearing file could satisfy an import the relink
+        // never revisits.
+        for base in ["x", "a/b", "pkg/util"] {
+            for e in EXTS {
+                let cand = format!("{base}{e}");
+                assert!(
+                    serveable_bases(&cand).contains(&base.to_string()),
+                    "candidate {cand} must serve base {base}"
+                );
+            }
+        }
+        // And the bare identity always holds.
+        assert!(serveable_bases("weird.name.zz").contains(&"weird.name.zz".to_string()));
+    }
+
+    /// Perf-pair sub-goal B: the CONVERGENCE property. Over a scripted
+    /// add / modify-imports / rename / delete sequence — including the dst-side
+    /// classes (a new file becoming the target of an existing import, extension
+    /// shadowing of an index-file target, un-shadowing on delete) — the
+    /// delta-relinked edge set must be byte-identical to a from-scratch full
+    /// rebuild on the same end state, at EVERY step.
+    #[test]
+    fn relink_delta_converges_with_full_rebuild() {
+        let (_d1, p1) = temp_db();
+        let (_d2, p2) = temp_db();
+        let inc = SqliteIndex::open(&p1).expect("open inc");
+        let full = SqliteIndex::open(&p2).expect("open full");
+
+        fn edges(idx: &SqliteIndex) -> Vec<(String, String, String)> {
+            let mut stmt = idx
+                .conn
+                .prepare("SELECT src_path,dst_path,kind FROM code_edges WHERE project_id='p' ORDER BY src_path,dst_path,kind")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(|x| x.unwrap())
+                .collect()
+        }
+        // Apply one scripted step to BOTH stores: `puts` = (path, content) upserts,
+        // `dels` = removals. inc gets the DELTA relink, full a FULL rebuild.
+        let step = |label: &str, puts: &[(&str, &str)], dels: &[&str]| {
+            let mut changed: Vec<String> = Vec::new();
+            let mut removed: Vec<String> = Vec::new();
+            for (path, content) in puts {
+                // content doubles as the hash so a modify really reindexes.
+                inc.index_file("p", path, content, content, content.len() as i64).unwrap();
+                full.index_file("p", path, content, content, content.len() as i64).unwrap();
+                changed.push(path.to_string());
+            }
+            for path in dels {
+                inc.remove_file("p", path).unwrap();
+                full.remove_file("p", path).unwrap();
+                removed.push(path.to_string());
+            }
+            inc.relink_edges_delta("p", &changed, &removed).unwrap();
+            full.rebuild_edges("p").unwrap();
+            assert_eq!(edges(&inc), edges(&full), "step '{label}': delta relink diverged from full rebuild");
+        };
+
+        // z.ts is untouched by most later steps — its z→a edge must survive every
+        // delta that cannot affect it (the negative control for over-deletion).
+        step("add a+z (unresolved ./b)", &[
+            ("a.ts", "import './b';\nexport const a = 1;"),
+            ("z.ts", "import './a';\nexport const z = 1;"),
+        ], &[]);
+        step("new file becomes dst of EXISTING import", &[("b/index.ts", "export const b = 1;")], &[]);
+        assert!(edges(&inc).contains(&("a.ts".into(), "b/index.ts".into(), "imports".into())), "dst-side class: {:?}", edges(&inc));
+        step("extension shadowing: b.ts outranks b/index.ts", &[("b.ts", "export const b2 = 1;")], &[]);
+        assert!(edges(&inc).contains(&("a.ts".into(), "b.ts".into(), "imports".into())), "shadow shift: {:?}", edges(&inc));
+        step("add another importer of ./b", &[("w.ts", "import './b';\nexport const w = 1;")], &[]);
+        step("modify a's imports (./b → ./c, unresolved)", &[("a.ts", "import './c';\nexport const a = 2;")], &[]);
+        step("new .tsx satisfies a's pending import", &[("c.tsx", "export const c = 1;")], &[]);
+        step("rename c.tsx → cc.tsx (dst removed)", &[("cc.tsx", "export const c = 1;")], &["c.tsx"]);
+        step("delete b.ts (UN-shadow → b/index.ts fallback)", &[], &["b.ts"]);
+        assert!(edges(&inc).contains(&("w.ts".into(), "b/index.ts".into(), "imports".into())), "un-shadow on delete: {:?}", edges(&inc));
+        step("delete b/index.ts (w unresolved)", &[], &["b/index.ts"]);
+        step("delete importer z.ts", &[], &["z.ts"]);
+        // End state: the only edge left is nothing — a, w, cc unresolved/leafs.
+        assert_eq!(edges(&inc), Vec::<(String, String, String)>::new(), "end state: {:?}", edges(&inc));
     }
 
     #[test]
