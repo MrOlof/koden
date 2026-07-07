@@ -267,17 +267,78 @@ fn normalize_kind(raw: &str) -> &'static str {
     }
 }
 
-// Static + re-export import specifiers (TS/JS/TSX). Rust `use` paths aren't file
-// paths and need module-tree resolution — deferred (Rust still gets nodes).
+// Static + re-export import specifiers (TS/JS/TSX).
 const TS_IMPORTS: &str = r#"
 (import_statement source: (string) @src)
 (export_statement source: (string) @src)
 "#;
 
+// Rust `use` declarations (incl. `pub use` re-exports). The whole argument is
+// captured and expanded textually (groups/aliases/wildcards) into individual
+// `::`-paths — module-tree RESOLUTION to file paths happens in the store
+// (`rust_use_base`), mirroring the TS split (raw spec here, resolution there).
+const RUST_IMPORTS: &str = r#"
+(use_declaration argument: (_) @use)
+"#;
+
 fn imports_query(lang: Lang) -> Option<&'static str> {
     match lang {
         Lang::TypeScript | Lang::Tsx => Some(TS_IMPORTS),
-        Lang::Rust => None,
+        Lang::Rust => Some(RUST_IMPORTS),
+    }
+}
+
+/// Expand one `use` argument into flat `::`-paths: groups recurse
+/// (`a::{b, c::d}` → `a::b`, `a::c::d`), `self` in a group and trailing
+/// wildcards collapse to their prefix (`a::{self}` / `a::*` → `a`), and
+/// ` as alias` is dropped. Malformed text (unbalanced braces) yields nothing —
+/// fail-open, like every other extraction path here.
+fn expand_rust_use(prefix: &str, part: &str, out: &mut Vec<String>) {
+    let part = part.trim();
+    if part.is_empty() {
+        return;
+    }
+    if let Some(open) = part.find('{') {
+        let Some(close) = part.rfind('}') else {
+            return; // unbalanced — skip this use
+        };
+        if close < open {
+            return;
+        }
+        let head = part[..open].trim().trim_end_matches("::").trim();
+        let new_prefix = join_use_path(prefix, head);
+        // Split the group body on top-level commas only (nested groups recurse).
+        let inner = &part[open + 1..close];
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    expand_rust_use(&new_prefix, &inner[start..i], out);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        expand_rust_use(&new_prefix, &inner[start..], out);
+        return;
+    }
+    let leaf = part.split(" as ").next().unwrap_or(part).trim();
+    let leaf = leaf.strip_suffix("::*").unwrap_or(leaf).trim();
+    let leaf = if leaf == "*" || leaf == "self" { "" } else { leaf };
+    let full = join_use_path(prefix, leaf);
+    if !full.is_empty() {
+        out.push(full);
+    }
+}
+
+fn join_use_path(prefix: &str, seg: &str) -> String {
+    match (prefix.is_empty(), seg.is_empty()) {
+        (true, _) => seg.to_string(),
+        (_, true) => prefix.to_string(),
+        _ => format!("{prefix}::{seg}"),
     }
 }
 
@@ -346,9 +407,13 @@ fn run_imports(language: &Language, lang: Lang, tree: &Tree, src: &[u8]) -> Vec<
     while let Some(m) = it.next() {
         for cap in m.captures {
             if let Ok(raw) = cap.node.utf8_text(src) {
-                let spec = raw.trim_matches(['"', '\'', '`']);
-                if !spec.is_empty() {
-                    out.push(spec.to_string());
+                if lang == Lang::Rust {
+                    expand_rust_use("", raw, &mut out);
+                } else {
+                    let spec = raw.trim_matches(['"', '\'', '`']);
+                    if !spec.is_empty() {
+                        out.push(spec.to_string());
+                    }
                 }
             }
         }
@@ -465,9 +530,48 @@ declare module "some-mod" { export const modConst: number; }
         assert!(a.nodes.iter().any(|n| n.name == "foo" && n.kind == "function"));
         assert!(a.imports.contains(&"./a".to_string()));
         assert!(a.imports.contains(&"../b".to_string()));
-        // Rust: nodes extracted, but import edges deferred (use-path resolution).
+        // Rust: nodes AND use-paths extracted (resolution to files is the store's job).
         let r = analyze(Lang::Rust, "use crate::foo;\npub fn bar() {}");
         assert!(r.nodes.iter().any(|n| n.name == "bar"));
-        assert!(r.imports.is_empty());
+        assert_eq!(r.imports, vec!["crate::foo".to_string()]);
+    }
+
+    /// Regression (gauntlet defect `rust-imports-no-ast-dependents`): Rust `use`
+    /// paths ARE extracted — groups expand, aliases drop, `self`/`*` collapse to
+    /// their prefix, and `pub use` re-exports count. Before this, every Rust
+    /// symbol had zero AST-confirmed dependents (`ast_dependents=[]`).
+    #[test]
+    fn extracts_rust_use_paths() {
+        let src = r#"
+use crate::modules::brain::gist::{self, Gist};
+use super::store::{plan::PlanRow, SqliteIndex as Idx};
+use koden_lib::modules::brain::worker::index_dir;
+use std::collections::HashMap;
+use crate::rank::*;
+pub use crate::events::BrainEvent;
+use crate::{
+    tokenize,
+    secrets::redact,
+};
+"#;
+        let a = analyze(Lang::Rust, src);
+        for want in [
+            "crate::modules::brain::gist",           // {self, …}
+            "crate::modules::brain::gist::Gist",
+            "super::store::plan::PlanRow",           // nested group
+            "super::store::SqliteIndex",             // alias dropped
+            "koden_lib::modules::brain::worker::index_dir",
+            "std::collections::HashMap",             // extracted; store maps std → no edge
+            "crate::rank",                           // wildcard collapses
+            "crate::events::BrainEvent",             // pub use re-export
+            "crate::tokenize",                       // multi-line group
+            "crate::secrets::redact",
+        ] {
+            assert!(a.imports.contains(&want.to_string()), "missing {want} in {:?}", a.imports);
+        }
+        // Negative: no alias names, no braces/wildcards leak into specs.
+        assert!(!a.imports.iter().any(|s| s.contains('{') || s.contains('*') || s.contains(" as ")),
+            "raw syntax leaked: {:?}", a.imports);
+        assert!(!a.imports.contains(&"super::store::SqliteIndex as Idx".to_string()));
     }
 }

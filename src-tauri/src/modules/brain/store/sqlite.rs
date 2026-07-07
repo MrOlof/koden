@@ -970,10 +970,13 @@ impl SqliteIndex {
                     .query_map((project_id, src.as_str()), |r| r.get(0))?
                     .collect::<Result<_, _>>()?;
                 src_bases.sort(); // deterministic resolution order (see above)
+                // Per-language ext set, keyed off the IMPORTER like resolve_import
+                // (a file's imports are always in its own language).
+                let exts: &[&str] = if is_rust_path(src) { RUST_EXTS } else { EXTS };
                 for base in src_bases {
                     // Same EXTS precedence as resolve_import, membership via PK
                     // probes against the CURRENT file set (bounded, not a set load).
-                    for e in EXTS {
+                    for e in exts {
                         let cand = format!("{base}{e}");
                         if exists.exists((project_id, cand.as_str()))? {
                             if cand != *src {
@@ -1030,14 +1033,28 @@ pub fn prepare_file(rel_path: &str, content: &str, hash: String, size: i64) -> P
     // stale nodes/imports unconditionally either way, byte-identical to before.
     let (nodes, imports) = match analysis {
         Some(a) => {
-            let imports = a
-                .imports
-                .iter()
-                .map(|spec| {
+            let is_rust = is_rust_path(rel_path);
+            let mut imports: Vec<(String, String)> = Vec::new();
+            for spec in &a.imports {
+                if is_rust {
+                    let base = rust_use_base(rel_path, spec).unwrap_or_default();
+                    imports.push((spec.clone(), base));
+                    // A use path's LAST segment may be an ITEM, not a module —
+                    // the defining FILE is then the parent module's. The parent
+                    // path is emitted as its own import row so the fixed
+                    // base+ext machinery (resolve / delta relink / serveable
+                    // inverse) handles both shapes uniformly; the PK dedupes.
+                    if let Some(parent) = rust_parent_spec(spec) {
+                        let pbase = rust_use_base(rel_path, &parent).unwrap_or_default();
+                        if !pbase.is_empty() {
+                            imports.push((parent, pbase));
+                        }
+                    }
+                } else {
                     let base = import_base(rel_path, spec).unwrap_or_default();
-                    (spec.clone(), base)
-                })
-                .collect();
+                    imports.push((spec.clone(), base));
+                }
+            }
             (a.nodes, imports)
         }
         None => (Vec::new(), Vec::new()),
@@ -1058,9 +1075,29 @@ fn analyze_for(rel_path: &str, content: &str) -> Option<ast::Analysis> {
 /// index fallback), in precedence order. Shared by [resolve_import] (full
 /// rebuild), the delta relink's PK probes, and [serveable_bases] (the inverse
 /// mapping) — the three MUST stay in lockstep or delta/full edge builds diverge.
+/// The ext set is chosen PER LANGUAGE: by importer/src extension on the resolve
+/// side, by dst extension on the serveable side (a `.rs` file can only satisfy
+/// Rust bases and vice versa — the selectors agree because a file's imports are
+/// always in its own language).
 const EXTS: &[&str] = &[
     "", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js",
 ];
+
+/// Rust counterpart of [EXTS]: a use-path base `a/b` is served by `a/b.rs` or
+/// `a/b/mod.rs`; a crate-root base (`crate` alone / a lib crate named from
+/// tests|examples) by `<src>/lib.rs` or `<src>/main.rs`. No bare "" entry —
+/// Rust specs never carry a file extension.
+const RUST_EXTS: &[&str] = &[".rs", "/mod.rs", "/lib.rs", "/main.rs"];
+
+/// One extension-check used by ALL per-language ext-set selections (prepare,
+/// resolve, delta relink, serveable) so they can never disagree.
+fn is_rust_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("rs"))
+        .unwrap_or(false)
+}
 
 /// Normalized resolution BASE of an import spec: importer-dir + spec with
 /// `.`/`..` folded (and `\` / ?query / #hash cleaned). `None` for bare/external
@@ -1086,6 +1123,107 @@ fn import_base(importer: &str, spec: &str) -> Option<String> {
     Some(base)
 }
 
+/// Resolution BASE of a Rust `use` path — a LEXICAL module-tree mapping (no fs,
+/// pure fn of importer path + spec, like [import_base]):
+/// - `crate::a::b`      → `<crate-src-dir>/a/b` (nearest ancestor dir named `src`)
+/// - `self::a`          → `<own-module-dir>/a` (`x.rs` owns `x/`; mod/lib/main.rs own their dir)
+/// - `super::a` (chain) → parent module dirs, popped per `super`
+/// - `name::a::b` from a file OUTSIDE any `src/` tree but under tests|examples|
+///   benches (separate crates that must name the lib crate) → `<sibling src>/a/b`.
+///   In-src files use `crate::`/`self::`/`super::` for local paths, so a leading
+///   crate NAME there is external → `None` (avoids `use serde_json::x` false edges).
+/// `None` for std/core/alloc/proc_macro, bare crate names, and unmappable roots.
+/// Known ceiling: `use a::Enum::Variant` maps only full + parent paths, so the
+/// grandparent-defined variant case yields no edge (over-approximation stays in
+/// the lexical tier); `mod` declarations and workspace cross-crate deps are not
+/// mapped. Rust 2018 UNIFORM paths are unmapped too: a leading module NAME from
+/// an in-src file (`use modules::x` in lib.rs instead of `crate::modules::x`)
+/// hits the external-crate branch above and yields no edge — distinguishing a
+/// local top-level module from an extern crate lexically would risk
+/// `use serde_json::x` false edges, so the miss stays fail-open in the lexical
+/// tier (the dependent still surfaces via lexical_candidates).
+fn rust_use_base(importer: &str, spec: &str) -> Option<String> {
+    let norm = importer.replace('\\', "/");
+    let mut dir: Vec<&str> = norm.split('/').filter(|c| !c.is_empty()).collect();
+    let file = dir.pop()?;
+    let segs: Vec<String> = spec
+        .split("::")
+        .map(|s| s.trim().trim_start_matches("r#").to_string())
+        .collect();
+    if segs.is_empty()
+        || segs
+            .iter()
+            .any(|s| s.is_empty() || !s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+    {
+        return None;
+    }
+    // Own module dir: `worker.rs` owns `worker/`; mod.rs / lib.rs / main.rs own
+    // the directory they sit in.
+    let self_dir = |dir: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = dir.iter().map(|s| s.to_string()).collect();
+        if !matches!(file, "mod.rs" | "lib.rs" | "main.rs") {
+            if let Some(stem) = file.strip_suffix(".rs") {
+                v.push(stem.to_string());
+            }
+        }
+        v
+    };
+    let (mut base, rest) = match segs[0].as_str() {
+        "std" | "core" | "alloc" | "proc_macro" => return None,
+        "crate" => {
+            let i = dir.iter().rposition(|c| *c == "src")?;
+            (dir[..=i].iter().map(|s| s.to_string()).collect::<Vec<_>>(), &segs[1..])
+        }
+        "self" => (self_dir(&dir), &segs[1..]),
+        "super" => {
+            let mut d = self_dir(&dir);
+            let mut i = 0;
+            while i < segs.len() && segs[i] == "super" {
+                if d.pop().is_none() {
+                    return None; // escaped above the project root
+                }
+                i += 1;
+            }
+            (d, &segs[i..])
+        }
+        _name => {
+            // Leading crate NAME: only meaningful from tests/examples/benches
+            // crates (no `src` ancestor), which reference the lib by name.
+            if dir.iter().any(|c| *c == "src") {
+                return None;
+            }
+            let i = dir
+                .iter()
+                .rposition(|c| matches!(*c, "tests" | "examples" | "benches"))?;
+            if segs.len() < 2 {
+                return None; // bare crate name (`use serde;`) — never a file edge
+            }
+            let mut v: Vec<String> = dir[..i].iter().map(|s| s.to_string()).collect();
+            v.push("src".to_string());
+            (v, &segs[1..])
+        }
+    };
+    base.extend(rest.iter().cloned());
+    if base.is_empty() {
+        return None;
+    }
+    Some(base.join("/"))
+}
+
+/// Parent path of a Rust use spec (`a::b::c` → `a::b`) — emitted as its own
+/// import row because the last segment may be an item whose defining file is
+/// the parent module's. `None` when the parent would be a BARE non-keyword
+/// crate name: resolving that to `<src>/lib.rs` would edge every
+/// `use extern_crate::item` to the local lib root (false edges). `crate` /
+/// `self` / `super` parents are always local, hence safe.
+fn rust_parent_spec(spec: &str) -> Option<String> {
+    let (parent, _last) = spec.rsplit_once("::")?;
+    if !parent.contains("::") && !matches!(parent, "crate" | "self" | "super") {
+        return None;
+    }
+    Some(parent.to_string())
+}
+
 /// All bases an indexed file can SATISFY — the inverse of the EXTS expansion:
 /// `x.ts` serves bases `x.ts` (bare) and `x` (`.ts`); `x/index.ts` additionally
 /// serves `x` (`/index.ts`). When a file appears or disappears, ONLY imports
@@ -1094,12 +1232,23 @@ fn import_base(importer: &str, spec: &str) -> Option<String> {
 /// delete) — the dst-side affected set of [SqliteIndex::relink_edges_delta].
 fn serveable_bases(path: &str) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
-    for e in EXTS {
-        if e.is_empty() {
-            v.push(path.to_string());
-        } else if let Some(stripped) = path.strip_suffix(e) {
-            if !stripped.is_empty() {
-                v.push(stripped.to_string());
+    if is_rust_path(path) {
+        // A .rs file can only satisfy Rust bases (RUST_EXTS inverse, no bare "").
+        for e in RUST_EXTS {
+            if let Some(stripped) = path.strip_suffix(e) {
+                if !stripped.is_empty() {
+                    v.push(stripped.to_string());
+                }
+            }
+        }
+    } else {
+        for e in EXTS {
+            if e.is_empty() {
+                v.push(path.to_string());
+            } else if let Some(stripped) = path.strip_suffix(e) {
+                if !stripped.is_empty() {
+                    v.push(stripped.to_string());
+                }
             }
         }
     }
@@ -1117,6 +1266,13 @@ fn resolve_import(
     spec: &str,
     files: &std::collections::HashSet<String>,
 ) -> Option<String> {
+    if is_rust_path(importer) {
+        let base = rust_use_base(importer, spec)?;
+        return RUST_EXTS
+            .iter()
+            .map(|e| format!("{base}{e}"))
+            .find(|c| files.contains(c));
+    }
     let base = import_base(importer, spec)?;
     EXTS.iter()
         .map(|e| format!("{base}{e}"))
@@ -2394,6 +2550,19 @@ mod tests {
         }
         // And the bare identity always holds.
         assert!(serveable_bases("weird.name.zz").contains(&"weird.name.zz".to_string()));
+        // Rust half of the inverse (defect `rust-imports-no-ast-dependents`):
+        // every RUST_EXTS candidate of a base must serve that base.
+        for base in ["x", "src/gist", "src-tauri/src"] {
+            for e in RUST_EXTS {
+                let cand = format!("{base}{e}");
+                assert!(
+                    serveable_bases(&cand).contains(&base.to_string()),
+                    "rust candidate {cand} must serve base {base}"
+                );
+            }
+        }
+        // A .rs file must NOT serve TS-style bases (bare path / index fallback).
+        assert!(!serveable_bases("src/gist.rs").contains(&"src/gist.rs".to_string()));
     }
 
     /// Perf-pair sub-goal B: the CONVERGENCE property. Over a scripted
@@ -2462,6 +2631,105 @@ mod tests {
         assert_eq!(edges(&inc), Vec::<(String, String, String)>::new(), "end state: {:?}", edges(&inc));
     }
 
+    /// Regression (gauntlet defect `rust-imports-no-ast-dependents`): end-to-end
+    /// on a Rust fixture crate, `use` imports become AST-confirmed file edges and
+    /// `code_impact` returns real `ast_dependents` for a Rust symbol — the tier
+    /// was EMPTY for the whole Rust surface before this fix. Runs every step
+    /// through BOTH the delta relink and a full rebuild (convergence pinned for
+    /// the RUST_EXTS shadowing classes), with negative controls for std/external
+    /// crates.
+    #[test]
+    fn rust_use_edges_feed_impact_ast_dependents() {
+        let (_d1, p1) = temp_db();
+        let (_d2, p2) = temp_db();
+        let inc = SqliteIndex::open(&p1).expect("open inc");
+        let full = SqliteIndex::open(&p2).expect("open full");
+        fn edges(idx: &SqliteIndex) -> Vec<(String, String)> {
+            let mut stmt = idx
+                .conn
+                .prepare("SELECT src_path,dst_path FROM code_edges WHERE project_id='p' ORDER BY src_path,dst_path")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|x| x.unwrap())
+                .collect()
+        }
+        let step = |label: &str, puts: &[(&str, &str)], dels: &[&str]| {
+            let mut changed: Vec<String> = Vec::new();
+            let mut removed: Vec<String> = Vec::new();
+            for (path, content) in puts {
+                inc.index_file("p", path, content, content, content.len() as i64).unwrap();
+                full.index_file("p", path, content, content, content.len() as i64).unwrap();
+                changed.push(path.to_string());
+            }
+            for path in dels {
+                inc.remove_file("p", path).unwrap();
+                full.remove_file("p", path).unwrap();
+                removed.push(path.to_string());
+            }
+            inc.relink_edges_delta("p", &changed, &removed).unwrap();
+            full.rebuild_edges("p").unwrap();
+            assert_eq!(edges(&inc), edges(&full), "step '{label}': delta relink diverged from full rebuild");
+        };
+
+        step("rust crate", &[
+            ("src/lib.rs", "pub mod gist;\npub mod commands;\npub struct TopItem;"),
+            ("src/gist/mod.rs", "pub struct Gist;\npub fn build_gist() {}"),
+            // item + {self, Item} group forms — both must edge to the module FILE.
+            ("src/commands.rs", "use crate::gist::{self, Gist};\nuse crate::gist::build_gist;\npub fn go() {}"),
+            // super:: item import from a sibling module file.
+            ("src/gist/synth.rs", "use super::Gist;\npub fn synth() {}"),
+            // examples/tests are separate crates that name the lib crate.
+            ("examples/cli.rs", "use mylib::gist::build_gist;\nfn main() {}"),
+            ("tests/it.rs", "use mylib::gist::Gist;\nfn t() {}"),
+            // NEGATIVE CONTROL: std/external uses from in-src files → zero edges.
+            ("src/noise.rs", "use std::collections::HashMap;\nuse serde::Deserialize;\nuse serde_json::json;\npub fn n() {}"),
+        ], &[]);
+        let e = edges(&inc);
+        for (src, dst) in [
+            ("src/commands.rs", "src/gist/mod.rs"),
+            ("src/gist/synth.rs", "src/gist/mod.rs"),
+            ("examples/cli.rs", "src/gist/mod.rs"),
+            ("tests/it.rs", "src/gist/mod.rs"),
+        ] {
+            assert!(e.contains(&(src.into(), dst.into())), "missing {src}→{dst} in {e:?}");
+        }
+        assert!(
+            !e.iter().any(|(s, _)| s == "src/noise.rs"),
+            "std/external uses must not edge: {e:?}"
+        );
+
+        // `use crate::Item` (item defined in the crate root) → lib.rs via the
+        // crate-keyword parent row (always local, hence safe to root-resolve).
+        step("crate-root item import", &[("src/uses_top.rs", "use crate::TopItem;\npub fn u() {}")], &[]);
+        assert!(edges(&inc).contains(&("src/uses_top.rs".into(), "src/lib.rs".into())), "{:?}", edges(&inc));
+
+        // Shadowing: a sibling gist.rs outranks gist/mod.rs (.rs precedes /mod.rs
+        // in RUST_EXTS), and deleting it un-shadows back — both through the delta.
+        step("rs shadows mod.rs", &[("src/gist.rs", "pub fn shadow() {}")], &[]);
+        assert!(edges(&inc).contains(&("src/commands.rs".into(), "src/gist.rs".into())), "shadow: {:?}", edges(&inc));
+        step("un-shadow on delete", &[], &["src/gist.rs"]);
+        assert!(edges(&inc).contains(&("src/commands.rs".into(), "src/gist/mod.rs".into())), "un-shadow: {:?}", edges(&inc));
+
+        // THE defect's acceptance: impact of a Rust symbol has AST dependents.
+        let i = code_impact_readonly(&p1, "p", "build_gist", 5, ImpactDirection::Upstream, 200, false)
+            .unwrap();
+        assert_eq!(i.defined_in, vec!["src/gist/mod.rs".to_string()]);
+        for want in ["src/commands.rs", "examples/cli.rs", "src/gist/synth.rs"] {
+            assert!(
+                i.ast_dependents.contains(&want.to_string()),
+                "missing AST dependent {want}: {:?}",
+                i.ast_dependents
+            );
+        }
+        // exclude_tests still filters the tier (tests/it.rs has a tests/ segment).
+        let no_tests =
+            code_impact_readonly(&p1, "p", "build_gist", 5, ImpactDirection::Upstream, 200, true)
+                .unwrap();
+        assert!(no_tests.ast_dependents.contains(&"src/commands.rs".to_string()));
+        assert!(!no_tests.ast_dependents.contains(&"tests/it.rs".to_string()));
+    }
+
     #[test]
     fn resolve_import_edges() {
         let files: std::collections::HashSet<String> = [
@@ -2486,6 +2754,54 @@ mod tests {
         assert_eq!(resolve_import("src/b.ts", "../shared", &files), Some("shared.ts".into()));
         // ?query / #hash suffixes are stripped before resolving.
         assert_eq!(resolve_import("src/b.ts", "./a?raw", &files), Some("src/a.ts".into()));
+    }
+
+    /// Regression (gauntlet defect `rust-imports-no-ast-dependents`): Rust use
+    /// paths resolve to defining files via the lexical module-tree mapping.
+    #[test]
+    fn rust_resolve_import_paths() {
+        let files: std::collections::HashSet<String> = [
+            "src-tauri/src/lib.rs",
+            "src-tauri/src/modules/brain/gist/mod.rs",
+            "src-tauri/src/modules/brain/worker.rs",
+            "src-tauri/src/json.rs", // collision bait for the external-crate guard
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let cmd = "src-tauri/src/modules/brain/commands.rs";
+        // crate:: → nearest `src` ancestor; module dir falls back to mod.rs.
+        assert_eq!(
+            resolve_import(cmd, "crate::modules::brain::gist", &files),
+            Some("src-tauri/src/modules/brain/gist/mod.rs".into())
+        );
+        assert_eq!(
+            resolve_import(cmd, "crate::modules::brain::worker", &files),
+            Some("src-tauri/src/modules/brain/worker.rs".into())
+        );
+        // super:: from a mod.rs pops to the parent module's dir.
+        assert_eq!(
+            resolve_import("src-tauri/src/modules/brain/gist/mod.rs", "super::worker", &files),
+            Some("src-tauri/src/modules/brain/worker.rs".into())
+        );
+        // `crate` alone (the parent row of `use crate::Item`) → the crate root file.
+        assert_eq!(resolve_import(cmd, "crate", &files), Some("src-tauri/src/lib.rs".into()));
+        // examples/tests name the lib crate → sibling src tree.
+        assert_eq!(
+            resolve_import("src-tauri/examples/cli.rs", "koden_lib::modules::brain::gist", &files),
+            Some("src-tauri/src/modules/brain/gist/mod.rs".into())
+        );
+        assert_eq!(
+            resolve_import("src-tauri/tests/it.rs", "koden_lib::modules::brain::gist", &files),
+            Some("src-tauri/src/modules/brain/gist/mod.rs".into())
+        );
+        // NEGATIVE CONTROLS: std and external crate names never edge from in-src
+        // files — even when a same-named local module exists (src/json.rs bait).
+        assert_eq!(resolve_import(cmd, "std::collections::HashMap", &files), None);
+        assert_eq!(resolve_import(cmd, "serde_json::json", &files), None);
+        assert_eq!(resolve_import(cmd, "serde", &files), None);
+        // Bare external crate from a test crate: no root-file edge either.
+        assert_eq!(resolve_import("src-tauri/tests/it.rs", "serde", &files), None);
     }
 
     #[test]

@@ -65,7 +65,18 @@
 ///     every gist cache key so one key never mixes pre- and post-filter bytes
 ///     (the byte-identity gate holds per key) — one-time post-upgrade
 ///     agent-prompt-cache miss, expected.
-pub const SCHEMA_VERSION: i64 = 14;
+/// v15: no DDL change — EXTRACTION semantics changed (gauntlet defect
+///     `rust-imports-no-ast-dependents`): Rust `use` declarations are now
+///     extracted into `code_imports` (expanded groups/aliases/wildcards) and
+///     resolved to file edges (`rust_use_base`), so `ast_dependents` covers the
+///     Rust surface. `code_imports`/`code_edges` are DERIVED, but the worker
+///     hash-skips unchanged files and `rebuild_edges` only reads `code_imports`
+///     — without the bump every pre-existing store would keep zero Rust import
+///     rows forever (the original defect persisting). As with v10, the bump
+///     forces the derived-table drop/rebuild that re-derives them, and rotates
+///     the gist cache key — one-time post-upgrade agent-prompt-cache miss,
+///     expected.
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"
