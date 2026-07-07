@@ -20,6 +20,10 @@ pub const MAX_INDEX_FILE_BYTES: u64 = 1024 * 1024;
 const BASE_SKIP_DIRS: &[&str] = &[
     "node_modules", ".git", "dist", "build", "target", ".next", ".turbo",
     "coverage", ".venv", "venv", "vendor", "generated", ".cache", ".svelte-kit",
+    // Agent-tooling state: leftover Claude-Code worktrees under .claude/worktrees/
+    // are full stale copies of the repo — indexing them duplicates every symbol
+    // (gauntlet defect claude-worktrees-indexed: 978/1605 rows were copies).
+    ".claude",
 ];
 
 /// True if any `/`-separated component of a PROJECT-RELATIVE path (as produced
@@ -276,6 +280,37 @@ mod tests {
         assert!(!rel_under_skip_dir("src/main.rs"));
         assert!(!rel_under_skip_dir("distx/main.rs")); // component match, not substring
         assert!(!rel_under_skip_dir(""));
+    }
+
+    /// Gauntlet defect claude-worktrees-indexed: leftover Claude-Code agent
+    /// worktrees under `.claude/worktrees/` are full stale copies of the repo.
+    /// Indexing them duplicated 61% of rows and tripled code_impact results.
+    /// `.claude` must be base-skipped on BOTH paths: the full walk (in_skip_dir
+    /// + filter_entry prune) and the watcher gate (rel_under_skip_dir).
+    #[test]
+    fn claude_worktrees_are_never_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("src");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("redact.ts"), b"export function redactSensitive() {}").unwrap();
+        // Stale worktree copy of the same file, as an agent leaves it behind.
+        let wt = dir
+            .path()
+            .join(".claude")
+            .join("worktrees")
+            .join("agent-a2b92c098ab5ffd64")
+            .join("src");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("redact.ts"), b"export function redactSensitive() {}").unwrap();
+        let got = &walk_files(dir.path()).files;
+        assert_eq!(got.len(), 1, "only the real tree's file is yielded, got {got:?}");
+        assert!(got[0].starts_with(&real), "yielded file is the real one, not the worktree copy");
+        // Watcher path agrees (a save inside a live agent worktree must not index).
+        assert!(rel_under_skip_dir(".claude/worktrees/agent-x/src/redact.ts"));
+        assert!(rel_under_skip_dir(".claude/settings.json"));
+        // Negative control: a dir merely NAMED like it is not skipped.
+        assert!(!rel_under_skip_dir("src/claude/notes.md"));
+        assert!(!rel_under_skip_dir("claude-tools/x.ts"));
     }
 
     #[test]
