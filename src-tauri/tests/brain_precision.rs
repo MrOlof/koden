@@ -25,23 +25,30 @@
 
 use std::path::Path;
 
-use koden_lib::modules::brain::store::{SearchIndex, SqliteIndex};
+use koden_lib::modules::brain::store::{SearchIndex, SearchWeights, SqliteIndex};
 use koden_lib::modules::brain::worker::index_dir;
 
 const PID: &str = "prec";
 const TOPK: usize = 10;
 
 // ---------------------------------------------------------------------------
-// Floors — measured 2026-07-07 on this exact corpus (commit of introduction):
-//   macro precision@10 (positives) = 0.53
-//   macro recall@10    (positives) = 0.96
-//   negative-control pollution     = 0.05
+// Floors — measured on this exact corpus:
+//   2026-07-07 (introduction):        macro P@10 = 0.53 · macro R@10 = 0.96 ·
+//                                     neg pollution = 0.05 · camel-token P@10 = 0.29
+//   2026-07-07 (V3 coverage re-rank): macro P@10 = 0.96 · macro R@10 = 0.96 ·
+//                                     neg pollution = 0.05 · camel-token P@10 = 1.00
+// Floors raised DELIBERATELY with the multi-token coverage gate (blend + relative
+// prune in search_with_weights) — same ~0.10 headroom policy as at introduction.
 // Headroom is deliberate (regression gate, not a leaderboard). Raise/lower
 // deliberately, never silently — re-measure with --nocapture and update the
 // numbers in this comment alongside the consts.
 // ---------------------------------------------------------------------------
-const FLOOR_MACRO_PRECISION: f64 = 0.45;
+const FLOOR_MACRO_PRECISION: f64 = 0.85;
 const FLOOR_MACRO_RECALL: f64 = 0.85;
+/// The camel-token class was the measured weak class (0.29 pre-coverage); the
+/// coverage gate is what fixed it, so it gets its own floor (measured 1.00,
+/// 2026-07-07) to stop a silent regression of exactly that fix.
+const FLOOR_CAMEL_PRECISION: f64 = 0.85;
 /// Ceiling on avg |hits|/10 over the negative controls. A return-everything
 /// ranker scores 1.0 here and MUST fail; measured honest value is 0.05 (only
 /// the deliberate hard negative "graphql subscription resolver" leaks via the
@@ -182,7 +189,11 @@ fn precision_recall_regression_gate() {
     let mut pos_n = 0usize;
     let mut neg_pollution_sum = 0.0f64;
     let mut neg_n = 0usize;
-    let mut imperfect_precision = 0usize; // positives where a decoy got retrieved
+    let mut imperfect_precision = 0usize; // positives where a decoy survived the gate
+    let mut ungated_collisions = 0usize; // positives where the UNGATED ranker retrieves a decoy
+    // The coverage gate DISABLED — the anti-vanity seam: decoy collision is a
+    // property of the corpus + lexical legs, measured BEFORE the gate prunes.
+    let ungated = SearchWeights { coverage_w: 0.0, coverage_gate_ratio: 0.0, ..SearchWeights::default() };
     let mut per_class: std::collections::BTreeMap<&str, (f64, f64, usize)> =
         std::collections::BTreeMap::new();
 
@@ -222,6 +233,10 @@ fn precision_recall_regression_gate() {
         pos_n += 1;
         if p < 1.0 {
             imperfect_precision += 1;
+        }
+        let raw = idx.search_weighted(Some(PID), case.query, TOPK, &ungated).unwrap();
+        if raw.iter().any(|h| !case.relevant.contains(&h.path.as_str())) {
+            ungated_collisions += 1;
         }
         let e = per_class.entry(case.class).or_insert((0.0, 0.0, 0));
         e.0 += p;
@@ -268,10 +283,22 @@ fn precision_recall_regression_gate() {
         neg_pollution <= CEILING_NEG_POLLUTION,
         "negative-control pollution {neg_pollution:.2} above ceiling {CEILING_NEG_POLLUTION} — ranker is returning junk for concepts the corpus does not contain"
     );
-    // Anti-vanity: the decoys must actually collide with queries, otherwise the
-    // precision floor is vacuous (nothing could ever pollute the top-10).
+    let (camel_p_sum, _, camel_n) = per_class["camel-token"];
+    let camel_p = camel_p_sum / camel_n as f64;
     assert!(
-        imperfect_precision >= 5,
-        "only {imperfect_precision} positive queries retrieved any decoy — corpus no longer discriminates; precision floor is vacuous"
+        camel_p >= FLOOR_CAMEL_PRECISION,
+        "camel-token P@10 {camel_p:.2} fell below floor {FLOOR_CAMEL_PRECISION} — the V3 coverage-gate fix regressed"
     );
+    // Anti-vanity: the decoys must actually collide with queries, otherwise the
+    // precision floor is vacuous (nothing could ever pollute the top-10). Since the
+    // V3 coverage gate legitimately PRUNES colliders from production results, the
+    // collision property is asserted on the UNGATED seam (coverage disabled) — the
+    // corpus must still lexically collide, and the gated results must show the gate
+    // actually earned its precision (gated ≥ measurably cleaner than ungated is
+    // enforced by the floors above being far over the 0.53 pre-gate baseline).
+    assert!(
+        ungated_collisions >= 5,
+        "only {ungated_collisions} positive queries retrieve any decoy UNGATED — corpus no longer discriminates; precision floor is vacuous"
+    );
+    println!("anti-vanity: {ungated_collisions} positives collide ungated; {imperfect_precision} still imperfect after the coverage gate");
 }

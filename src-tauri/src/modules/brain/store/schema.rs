@@ -42,7 +42,13 @@
 ///     historical(superseded)). The bump rotates every gist cache key (see the
 ///     v6 note) so one key never mixes pre- and post-layout bytes — one-time
 ///     post-upgrade agent-prompt-cache miss, expected.
-pub const SCHEMA_VERSION: i64 = 11;
+/// v12: no DDL change — RANKING semantics changed (V3 multi-token coverage
+///     re-rank: blend + relative gate in `search_with_weights`), which changes the
+///     gist "Relevant files" selection/order. As with v10, the bump rotates every
+///     gist cache key so one key never mixes pre- and post-coverage ranking bytes
+///     (the byte-identity gate holds per key) — one-time post-upgrade
+///     agent-prompt-cache miss, expected.
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"

@@ -286,6 +286,8 @@ fn weight_sweep_reports_mrr_subject_to_zero_leaks() {
                 content_bm25: (0.0, 0.0, 1.0),
                 rrf_identity: rrf_id,
                 rrf_content: 1.0,
+                // Sweep the RRF axis with production coverage handling in place.
+                ..SearchWeights::default()
             };
             let mut mrr = 0.0;
             for (q, expect) in &positives {

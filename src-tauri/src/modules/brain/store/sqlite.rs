@@ -42,6 +42,67 @@ const W_CONTENT: (f64, f64, f64) = (0.0, 0.0, 1.0);
 const RRF_W_IDENTITY: f64 = 1.5;
 const RRF_W_CONTENT: f64 = 1.0;
 
+/// V3 multi-token COVERAGE re-rank (NorrGit adoption): per-hit coverage = fraction
+/// of DISTINCT query tokens (whole + camel parts + stems, exactly as `query_tokens`
+/// emits + dedupes them — ADR-010 cluster 7) that the doc matches ANYWHERE
+/// (path/symbols/content). Two effects, both DETERMINISTIC (probes run on the same
+/// connection snapshot as the legs):
+///   1. BLEND: `score *= 1 + COVERAGE_W · coverage` — a doc matching more of the
+///      query outranks a doc matching a stray token. Multiplicative (like the
+///      temporal boost) so RRF stays leg-pure; measured effect on the scoreboard
+///      is ORDER-neutral on the labeled corpora (set metrics saturate), the gate
+///      below is what moves P@10 — see brain_precision 2026-07-07 table.
+///   2. RELATIVE GATE: for multi-token queries, hits with
+///      `matched < COVERAGE_GATE_RATIO · best_matched` are DROPPED, with a
+///      CONCEPT-BAG RESCUE: when even the BEST hit is partial (best < all tokens —
+///      e.g. the gist's synthesized "project-name + note titles" intent, or
+///      hard-concept "authentication flow"), any hit matching ≥
+///      COVERAGE_RESCUE_MIN distinct tokens survives — multi-concept intents
+///      legitimately have per-concept partial matches (the synth-gist sandbox test
+///      is the real-consumer proof: without the rescue, the project's only code
+///      file was gated out of its own gist by the note that SEEDED the intent).
+///      When some hit FULLY covers the query (a focused query), the relative gate
+///      prunes hard. The argmax hit is kept by construction, so a query with any
+///      candidate still returns ≥1 hit.
+/// MEASURED (brain_precision 2026-07-07): ratio sweep 0.6→macro P@10 0.92,
+/// 0.7→0.96, 0.8→1.00; at 0.7 camel-token P@10 0.29→1.00 and exact-name 0.38→1.00;
+/// recall (0.96) and negative pollution (0.05) IDENTICAL across the sweep. 0.8's
+/// extra +0.04 comes solely from pruning the 0.75-coverage sibling tier (send-sms
+/// → email/push), which the corpus cannot price for recall (its one multi-relevant
+/// query has all relevants at full coverage) — and a scoreboard pinned at 1.00
+/// stops discriminating. 0.7 is the chosen Pareto point (recall-safe side).
+/// The concept-bag rescue changes NOTHING on this scoreboard (re-measured
+/// identical table at 0.7) — its real-consumer proof is the synth-gist sandbox
+/// test above. Single-token queries skip coverage entirely (uniform coverage=1 →
+/// gate/blend are no-ops by construction). BOUNDEDNESS vs [DP-2]: the blend-factor RATIO
+/// between any two docs is ≤ (1+COVERAGE_W) = 1.25 < the 1.5 cross-leg RRF margin,
+/// and between EQUAL-coverage docs the factors cancel exactly — so the temporal
+/// "recency can never bury a path match" guarantee is preserved among
+/// equal-coverage docs. A body-only hit covering MORE distinct query tokens than a
+/// stray-token path hit may now outrank it — deliberate: fuller query coverage is
+/// a stronger relevance signal than one stray path token.
+const COVERAGE_W: f64 = 0.25;
+const COVERAGE_GATE_RATIO: f64 = 0.7;
+/// Concept-bag rescue floor (see gate docs above): on partial-best queries a hit
+/// matching at least this many DISTINCT tokens is never gated. 2 = "more than a
+/// stray token".
+const COVERAGE_RESCUE_MIN: usize = 2;
+/// ponytail: probe at most this many distinct tokens; keeps the probe cost
+/// O(tokens × candidates) with a hard small constant. On a >cap-token query
+/// (real consumer: cold-start gist synth intents, which "can run long") every
+/// probed count is an UNDERCOUNT — tail-token matches are invisible — so the
+/// relative GATE is skipped entirely at the call site: undercounts may still
+/// BLEND (monotone, neutral at 0) but must never EXCLUDE. (A partial fix that
+/// only exempted `matched == 0` was non-monotonic: a file matching 1 probed +
+/// 20 tail tokens was hard-dropped while its tail-only twin survived — matching
+/// strictly MORE of the query removed it.) The m == 0 gate exemption in
+/// `apply_coverage` remains as defense in depth: within the cap every candidate
+/// matches ≥1 probed token, so 0 can only mean UNKNOWN. All precision-corpus
+/// queries sit far below the cap, so every measured gate win (camel/exact-name
+/// P@10) is unaffected. Upgrade path = IDF-weighted token selection if
+/// tail-token matches ever need real RANKING, not just retention.
+const COVERAGE_MAX_PROBE_TOKENS: usize = 24;
+
 /// V2 temporal re-rank ([DP-12]) weights: a bounded multiplicative boost so a
 /// recently-/frequently-touched file is NUDGED up WITHIN its lexical tier, never
 /// buried. Quantized into coarse buckets so sub-threshold drift can't reorder two
@@ -1076,22 +1137,24 @@ fn build_match(columns: &str, q_tokens: &[String]) -> String {
     format!("{{{columns}}} : ({or_clause})")
 }
 
-/// Run one BM25 leg, returning ranked `(project_id, path)` best-first.
+/// Run one BM25 leg, returning ranked `(project_id, path, fts_rowid)` best-first.
+/// The rowid rides along so the coverage probes can restrict their MATCH to the
+/// candidate set (O(tokens × candidates), never a full posting walk).
 fn run_leg(
     conn: &Connection,
     match_expr: &str,
     project: Option<&str>,
     w: (f64, f64, f64),
     limit: usize,
-) -> rusqlite::Result<Vec<(String, String)>> {
+) -> rusqlite::Result<Vec<(String, String, i64)>> {
     // Weights are fixed constants (no injection risk); inline them since FTS5
     // bm25() column-weight args are not reliably bindable.
     let bm25 = format!("bm25(code_fts, {:.4}, {:.4}, {:.4})", w.0, w.1, w.2);
-    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut rows: Vec<(String, String, i64)> = Vec::new();
     match project {
         Some(pid) => {
             let sql = format!(
-                "SELECT f.project_id, f.path FROM code_fts
+                "SELECT f.project_id, f.path, code_fts.rowid FROM code_fts
                  JOIN files f ON f.fts_rowid = code_fts.rowid
                  WHERE code_fts MATCH ?1 AND f.project_id = ?2
                  ORDER BY {bm25}, f.path LIMIT ?3"
@@ -1099,7 +1162,7 @@ fn run_leg(
             let mut stmt = conn.prepare(&sql)?;
             let it = stmt.query_map(
                 rusqlite::params![match_expr, pid, limit as i64],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
             )?;
             for x in it {
                 rows.push(x?);
@@ -1107,7 +1170,7 @@ fn run_leg(
         }
         None => {
             let sql = format!(
-                "SELECT f.project_id, f.path FROM code_fts
+                "SELECT f.project_id, f.path, code_fts.rowid FROM code_fts
                  JOIN files f ON f.fts_rowid = code_fts.rowid
                  WHERE code_fts MATCH ?1
                  ORDER BY {bm25}, f.path LIMIT ?2"
@@ -1115,7 +1178,7 @@ fn run_leg(
             let mut stmt = conn.prepare(&sql)?;
             let it = stmt.query_map(
                 rusqlite::params![match_expr, limit as i64],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
             )?;
             for x in it {
                 rows.push(x?);
@@ -1123,6 +1186,101 @@ fn run_leg(
         }
     }
     Ok(rows)
+}
+
+/// Probe which candidates each DISTINCT query token matches: ONE FTS5 MATCH per
+/// token, restricted to the candidate rowids. Cost is O(tokens × candidates) with
+/// small constants — pure FTS index lookups over ≤ `COVERAGE_MAX_PROBE_TOKENS`
+/// tokens and the (overfetch-bounded) candidate set; no content rescans. Returns
+/// `token_hits[i]` = set of composite ids matched by probed token i.
+fn probe_token_hits(
+    conn: &Connection,
+    q_tokens: &[String],
+    rowid_of: &std::collections::HashMap<String, i64>,
+) -> rusqlite::Result<Vec<std::collections::HashSet<String>>> {
+    let id_of: std::collections::HashMap<i64, &String> =
+        rowid_of.iter().map(|(id, rid)| (*rid, id)).collect();
+    // Rowids come from our own SELECT (i64) — inlining is injection-free and lets
+    // one prepared statement serve every token probe.
+    let mut rowids: Vec<i64> = rowid_of.values().copied().collect();
+    rowids.sort_unstable();
+    let in_list = rowids.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT rowid FROM code_fts WHERE code_fts MATCH ?1 AND rowid IN ({in_list})");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut token_hits: Vec<std::collections::HashSet<String>> = Vec::new();
+    for tok in q_tokens.iter().take(COVERAGE_MAX_PROBE_TOKENS) {
+        // Same quoting as `build_match`: tokens are [a-z0-9]+ from the tokenizer.
+        let m = format!("\"{tok}\"");
+        let mut hits = std::collections::HashSet::new();
+        let it = stmt.query_map([&m], |r| r.get::<_, i64>(0))?;
+        for rid in it {
+            if let Some(id) = id_of.get(&rid?) {
+                hits.insert((*id).clone());
+            }
+        }
+        token_hits.push(hits);
+    }
+    Ok(token_hits)
+}
+
+/// PURE coverage computation: candidate id → COUNT of DISTINCT probed tokens
+/// whose hit-set contains it (fractions derive from `count / token_hits.len()`).
+/// `token_hits` must be built from an already-DEDUPED token list (`query_tokens`
+/// — ADR-010 cluster 7), so a repeated query word can never deflate or
+/// double-count coverage; the denominator is the number of distinct probed tokens.
+fn coverage_counts(
+    token_hits: &[std::collections::HashSet<String>],
+    candidates: impl Iterator<Item = String>,
+) -> std::collections::HashMap<String, usize> {
+    candidates
+        .map(|id| {
+            let matched = token_hits.iter().filter(|s| s.contains(&id)).count();
+            (id, matched)
+        })
+        .collect()
+}
+
+/// PURE gate+blend over the fused list (see the COVERAGE_* docs):
+///   gate: keep a hit iff `matched ≥ gate_ratio · best_matched` (the argmax hit
+///         always survives) OR — when best is PARTIAL (`best < n_tokens`, a
+///         concept-bag query) — `matched ≥ COVERAGE_RESCUE_MIN`.
+///         `matched == 0` is UNKNOWN coverage, never zero (a candidate matched
+///         ≥1 query token to become a candidate; zero probed matches only
+///         happens when its matches lie beyond COVERAGE_MAX_PROBE_TOKENS) —
+///         such hits are kept, blend-neutral. Defense in depth only: the call
+///         site already skips the gate on >cap-token queries, where ALL probed
+///         counts (not just 0) are untrustworthy undercounts.
+///   blend: `score *= 1 + w · matched/n_tokens` on the kept hits.
+/// Integer counts (not floats) do the gate compare, so boundary cases are exact.
+/// Order-stable: `retain` keeps fused order and the caller re-sorts with the
+/// canonical comparator afterwards.
+fn apply_coverage(
+    fused: &mut Vec<(String, f64)>,
+    matched: &std::collections::HashMap<String, usize>,
+    n_tokens: usize,
+    w: f64,
+    gate_ratio: f64,
+) {
+    if n_tokens == 0 {
+        return;
+    }
+    let best = fused.iter().filter_map(|(id, _)| matched.get(id).copied()).max().unwrap_or(0);
+    if gate_ratio > 0.0 && best > 0 {
+        let rescue_active = best < n_tokens;
+        fused.retain(|(id, _)| {
+            let m = matched.get(id).copied().unwrap_or(0);
+            // m == 0 ⇒ UNKNOWN coverage (matches beyond the probe cap), not a
+            // stray-token hit — keep it; the blend below is neutral at m = 0.
+            m == 0
+                || m as f64 >= gate_ratio * best as f64
+                || (rescue_active && m >= COVERAGE_RESCUE_MIN)
+        });
+    }
+    for (id, score) in fused.iter_mut() {
+        let m = matched.get(id).copied().unwrap_or(0);
+        *score *= 1.0 + w * (m as f64 / n_tokens as f64);
+        debug_assert!(score.is_finite(), "coverage blend produced a non-finite score");
+    }
 }
 
 /// The tunable ranking weights — the per-column bm25 weights for each FTS5 leg plus
@@ -1139,6 +1297,11 @@ pub struct SearchWeights {
     pub rrf_identity: f64,
     /// RRF fusion weight for the content leg.
     pub rrf_content: f64,
+    /// Multiplicative coverage blend weight (`score *= 1 + w·coverage`). 0 disables.
+    pub coverage_w: f64,
+    /// Relative coverage gate: drop hits with `coverage < ratio · best_coverage`
+    /// on multi-token queries. 0 disables (the calibration/anti-vanity seam).
+    pub coverage_gate_ratio: f64,
 }
 
 impl Default for SearchWeights {
@@ -1148,6 +1311,8 @@ impl Default for SearchWeights {
             content_bm25: W_CONTENT,
             rrf_identity: RRF_W_IDENTITY,
             rrf_content: RRF_W_CONTENT,
+            coverage_w: COVERAGE_W,
+            coverage_gate_ratio: COVERAGE_GATE_RATIO,
         }
     }
 }
@@ -1184,13 +1349,32 @@ pub fn search_with_weights(
     let leg_b = run_leg(conn, &build_match("content", &q_tokens), project, w.content_bm25, overfetch)?;
 
     // Composite id "project\0path" keeps paths unique across projects.
-    let key = |p: &(String, String)| format!("{}\u{0}{}", p.0, p.1);
+    let key = |p: &(String, String, i64)| format!("{}\u{0}{}", p.0, p.1);
     let a_ids: Vec<String> = leg_a.iter().map(key).collect();
     let b_ids: Vec<String> = leg_b.iter().map(key).collect();
     let mut fused = rank::weighted_rrf(&[
         Leg { weight: w.rrf_identity, ranked: &a_ids },
         Leg { weight: w.rrf_content, ranked: &b_ids },
     ]);
+
+    // V3 coverage re-rank (see COVERAGE_W docs): only meaningful on multi-token
+    // queries — with one distinct token every candidate has coverage 1 by
+    // construction (it matched to become a candidate), so probes are skipped.
+    if q_tokens.len() >= 2 && (w.coverage_w > 0.0 || w.coverage_gate_ratio > 0.0) {
+        let rowid_of: std::collections::HashMap<String, i64> = leg_a
+            .iter()
+            .chain(leg_b.iter())
+            .map(|p| (key(p), p.2))
+            .collect();
+        let token_hits = probe_token_hits(conn, &q_tokens, &rowid_of)?;
+        let matched = coverage_counts(&token_hits, fused.iter().map(|(id, _)| id.clone()));
+        // Beyond the probe cap every count is an UNDERCOUNT (tail-token matches
+        // are invisible): counts may still BLEND (monotone, neutral at 0) but
+        // must never EXCLUDE — skip the gate (see COVERAGE_MAX_PROBE_TOKENS).
+        let gate_ratio =
+            if q_tokens.len() > COVERAGE_MAX_PROBE_TOKENS { 0.0 } else { w.coverage_gate_ratio };
+        apply_coverage(&mut fused, &matched, token_hits.len(), w.coverage_w, gate_ratio);
+    }
 
     // V2 temporal re-rank ([DP-12]): a snapshot-stable multiplicative boost applied
     // AFTER fusion (RRF stays leg-pure — a per-doc multiplier is a document property,
@@ -1898,12 +2082,16 @@ mod tests {
             content_bm25: (0.0, 0.0, 1.0),
             rrf_identity: 1.5,
             rrf_content: 1.0,
+            coverage_w: 0.25,
+            coverage_gate_ratio: 0.7,
         };
         let d = SearchWeights::default();
         assert_eq!(d.identity_bm25, pinned.identity_bm25, "W_IDENTITY drifted from the documented production value");
         assert_eq!(d.content_bm25, pinned.content_bm25, "W_CONTENT drifted");
         assert_eq!(d.rrf_identity, pinned.rrf_identity, "RRF_W_IDENTITY drifted");
         assert_eq!(d.rrf_content, pinned.rrf_content, "RRF_W_CONTENT drifted");
+        assert_eq!(d.coverage_w, pinned.coverage_w, "COVERAGE_W drifted");
+        assert_eq!(d.coverage_gate_ratio, pinned.coverage_gate_ratio, "COVERAGE_GATE_RATIO drifted");
 
         let (_dir, path) = temp_db();
         let idx = SqliteIndex::open(&path).expect("open");
@@ -1919,6 +2107,203 @@ mod tests {
             for (x, y) in a.iter().zip(&b) {
                 assert_eq!((&x.path, x.score), (&y.path, y.score), "q={q}: divergent hit");
             }
+        }
+    }
+
+    // ---- V3 coverage re-rank: pure-fn units + end-to-end behavior ----
+
+    fn hs(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Coverage = COUNT of matched DISTINCT tokens per candidate (pure fn).
+    #[test]
+    fn coverage_counts_distinct_tokens_per_candidate() {
+        // 3 distinct tokens; doc "full" matches all, "half" one, "none" zero.
+        let token_hits = vec![hs(&["full", "half"]), hs(&["full"]), hs(&["full"])];
+        let m = coverage_counts(
+            &token_hits,
+            ["full", "half", "none"].iter().map(|s| s.to_string()),
+        );
+        assert_eq!(m["full"], 3);
+        assert_eq!(m["half"], 1);
+        assert_eq!(m["none"], 0);
+        // Degenerate: zero probed tokens → count 0 (apply_coverage no-ops on n=0).
+        let m0 = coverage_counts(&[], ["x".to_string()].into_iter());
+        assert_eq!(m0["x"], 0);
+    }
+
+    /// ADR-010 cluster 7 carried into coverage: repeated query words (and camel
+    /// parts recurring across words) are DEDUPED by `query_tokens` BEFORE probing,
+    /// so repetition can neither deflate the denominator nor double-count a match.
+    #[test]
+    fn coverage_denominator_uses_deduped_distinct_tokens() {
+        assert_eq!(
+            query_tokens("sendEmail sendEmail email"),
+            query_tokens("sendEmail email"),
+            "repeated words must not change the probed token set"
+        );
+        // A doc matching the single distinct concept covers 1/1, not 1/3.
+        let toks = query_tokens("login login login");
+        assert_eq!(toks, vec!["login"]);
+        let m = coverage_counts(&[hs(&["doc"])], ["doc".to_string()].into_iter());
+        assert_eq!(m["doc"], 1, "one DISTINCT token → denominator 1 → full coverage");
+    }
+
+    /// FULL-coverage best (focused query): the relative gate prunes below
+    /// ratio·best — no rescue — and blend multiplies kept scores by 1 + w·cov.
+    #[test]
+    fn apply_coverage_gates_relative_when_best_is_full() {
+        let matched: std::collections::HashMap<String, usize> =
+            [("full".to_string(), 4), ("near".to_string(), 3), ("stray".to_string(), 1)].into();
+        let mut fused =
+            vec![("full".to_string(), 1.0), ("near".to_string(), 0.9), ("stray".to_string(), 0.8)];
+        apply_coverage(&mut fused, &matched, 4, 0.25, 0.7);
+        // best=4 (FULL of n=4) → no rescue; threshold 2.8 → "stray"(1) dropped.
+        let ids: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["full", "near"]);
+        assert!((fused[0].1 - 1.0 * (1.0 + 0.25 * 1.0)).abs() < 1e-12);
+        assert!((fused[1].1 - 0.9 * (1.0 + 0.25 * 0.75)).abs() < 1e-12);
+        // ratio 0 disables the gate AND w 0 disables the blend (calibration seam).
+        let mut fused2 = vec![("stray".to_string(), 0.8)];
+        apply_coverage(&mut fused2, &matched, 4, 0.0, 0.0);
+        assert_eq!(fused2.len(), 1);
+        assert_eq!(fused2[0].1, 0.8, "w=0, ratio=0 → identity");
+    }
+
+    /// PARTIAL best (concept-bag query, e.g. the synthesized gist intent): the
+    /// ≥COVERAGE_RESCUE_MIN rescue keeps multi-token partial matches that the
+    /// relative gate alone would prune; single-stray-token hits still drop.
+    #[test]
+    fn apply_coverage_rescues_multi_token_hits_on_partial_best() {
+        // n=4, best=3 (< n → rescue active): "code"(2) is below 0.7·3=2.1 but ≥2.
+        let matched: std::collections::HashMap<String, usize> =
+            [("note".to_string(), 3), ("code".to_string(), 2), ("stray".to_string(), 1)].into();
+        let mut fused =
+            vec![("note".to_string(), 1.0), ("code".to_string(), 0.9), ("stray".to_string(), 0.8)];
+        apply_coverage(&mut fused, &matched, 4, 0.25, 0.7);
+        let ids: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["note", "code"], "2-token hit rescued, stray token still gated");
+    }
+
+    /// `matched == 0` means UNKNOWN coverage (the candidate's matches lie beyond
+    /// COVERAGE_MAX_PROBE_TOKENS — a genuinely zero-coverage candidate cannot
+    /// exist), so the gate must keep it and the blend must be neutral.
+    #[test]
+    fn apply_coverage_keeps_unprobed_candidates() {
+        // "unprobed" is absent from the matched map entirely (probes never saw it).
+        let matched: std::collections::HashMap<String, usize> =
+            [("full".to_string(), 4), ("stray".to_string(), 1)].into();
+        let mut fused = vec![
+            ("full".to_string(), 1.0),
+            ("stray".to_string(), 0.9),
+            ("unprobed".to_string(), 0.8),
+        ];
+        apply_coverage(&mut fused, &matched, 4, 0.25, 0.7);
+        let ids: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["full", "unprobed"],
+            "unknown-coverage hit kept, stray-token hit still gated"
+        );
+        let unprobed_score = fused.iter().find(|(id, _)| id == "unprobed").unwrap().1;
+        assert_eq!(unprobed_score, 0.8, "unknown coverage must be blend-NEUTRAL");
+    }
+
+    /// END-TO-END regression for the COVERAGE_MAX_PROBE_TOKENS hard-drop: on a
+    /// query with MORE distinct tokens than the probe cap (real consumer: long
+    /// cold-start gist synth intents), probed counts are UNDERCOUNTS and the
+    /// gate is skipped, so BOTH a file matching ONLY tail tokens (probed m=0)
+    /// AND a file matching a few probed + tail tokens (small nonzero m — the
+    /// case an m==0-only exemption non-monotonically hard-dropped: matching
+    /// strictly MORE of the query removed it) must still be returned.
+    #[test]
+    fn coverage_cap_does_not_drop_tail_token_matchers() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        // 24 filler concepts (fill the probe window) + 2 tail concepts.
+        let fillers = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+            "india", "juliett", "kilo", "lima", "mike", "november", "oscar", "papa",
+            "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "xray",
+        ];
+        idx.index_file("p", "src/hub.ts", &format!("// {}", fillers.join(" ")), "a", 60).unwrap();
+        idx.index_file("p", "src/zebra.ts", "export function zebraQuokka() {}", "b", 30).unwrap();
+        // Mixed candidate: 2 probed tokens + the tail tokens — probed m is a
+        // small NONZERO undercount, so the m==0 exemption alone never rescued it.
+        idx.index_file(
+            "p",
+            "src/mixed.ts",
+            "// alpha bravo\nexport function zebraQuokka() {}",
+            "c",
+            20,
+        )
+        .unwrap();
+        let query = format!("{} zebra quokka", fillers.join(" "));
+        assert!(
+            query_tokens(&query).len() > COVERAGE_MAX_PROBE_TOKENS,
+            "fixture must exceed the probe cap or the test proves nothing"
+        );
+        let hits = search_with_conn(&idx.conn, Some("p"), &query, 10).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(
+            paths.contains(&"src/zebra.ts"),
+            "tail-token matcher hard-dropped by the probe cap: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"src/mixed.ts"),
+            "probed+tail matcher hard-dropped (non-monotonic gate): {paths:?}"
+        );
+        assert!(paths.contains(&"src/hub.ts"), "probed full-coverage hit missing: {paths:?}");
+    }
+
+    /// Single-token queries have uniform coverage by construction → gate must be
+    /// a no-op (guards the `q_tokens.len() >= 2` skip in search_with_weights).
+    #[test]
+    fn coverage_single_token_query_is_a_noop() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "src/login.rs", "fn handler() {}", "a", 10).unwrap();
+        idx.index_file("p", "src/other.rs", "// login flow happens here", "b", 10).unwrap();
+        let hits = search_with_conn(&idx.conn, Some("p"), "login", 10).unwrap();
+        assert_eq!(hits.len(), 2, "single-token query must not gate anything: {hits:?}");
+    }
+
+    /// End-to-end: a multi-token camel query keeps the full-coverage doc and
+    /// prunes stray single-token matchers (the measured camel-class P@10 fix).
+    #[test]
+    fn coverage_gate_prunes_stray_token_hits() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "src/auth/reset.ts", "export function sendPasswordResetEmail() {}", "a", 40).unwrap();
+        idx.index_file("p", "src/notify/sms.ts", "export function sendSms() {}", "b", 30).unwrap();
+        idx.index_file("p", "tests/fixtures.ts", "// sample password words for the fuzzer", "c", 30).unwrap();
+        let hits = search_with_conn(&idx.conn, Some("p"), "sendPasswordResetEmail", 10).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+            vec!["src/auth/reset.ts"],
+            "stray 'send'/'password' matchers must be gated out"
+        );
+        // The UNGATED seam still sees the collisions (anti-vanity/calibration path).
+        let ungated = SearchWeights { coverage_w: 0.0, coverage_gate_ratio: 0.0, ..SearchWeights::default() };
+        let raw = idx.search_weighted(Some("p"), "sendPasswordResetEmail", 10, &ungated).unwrap();
+        assert_eq!(raw.len(), 3, "ungated search must still retrieve the colliders: {raw:?}");
+    }
+
+    /// Determinism: coverage probes read the same snapshot as the legs — two
+    /// identical searches must return identical (path, score) lists.
+    #[test]
+    fn coverage_rerank_is_byte_stable_across_reads() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.index_file("p", "src/a.rs", "pub fn alphaBeta() {}", "h1", 20).unwrap();
+        idx.index_file("p", "src/b.rs", "pub fn alphaOnly() {}", "h2", 24).unwrap();
+        let r1 = search_with_conn(&idx.conn, Some("p"), "alpha beta", 10).unwrap();
+        let r2 = search_with_conn(&idx.conn, Some("p"), "alpha beta", 10).unwrap();
+        assert!(!r1.is_empty());
+        assert_eq!(r1.len(), r2.len());
+        for (x, y) in r1.iter().zip(&r2) {
+            assert_eq!((&x.path, x.score), (&y.path, y.score), "coverage re-rank not byte-stable");
         }
     }
 
