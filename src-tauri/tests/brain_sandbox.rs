@@ -661,6 +661,70 @@ fn gist_note_freshness_labels() {
     assert_ne!(g2.fingerprint, g1.fingerprint, "content change rotated the key");
 }
 
+/// Regression (gauntlet S7 `stale-note-labeled-current`): staleness signals that
+/// previously lived ONLY in the doctor inbox must hedge the agent-facing gist
+/// label too. (a) broken anchor — the anchor target pruned from the index
+/// (moved/deleted) → `[possibly-stale]`, mirroring the doctor's `broken_anchor`;
+/// (b) overdue `revalidate_after` → `[possibly-stale]`, mirroring
+/// `stale_revalidate` (day-granular overdue SET folded into the cache key, so
+/// byte-identity per key holds without a daily cache bust). NEGATIVE CONTROLS:
+/// a valid-anchor note and a future-dated note stay `[current]`.
+#[test]
+fn gist_labels_broken_anchor_and_overdue_revalidate() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/gone.ts", b"export function goneFn() {}");
+    write(root, "src/kept.ts", b"export function keptFn() {}");
+    write(
+        root,
+        ".koden-memory/n-broke.md",
+        b"---\nid: n-broke\ntype: decision\ntitle: Gone module decision\nanchors:\n  - src/gone.ts\n---\nx\n",
+    );
+    write(
+        root,
+        ".koden-memory/n-keep.md",
+        b"---\nid: n-keep\ntype: decision\ntitle: Kept module decision\nanchors:\n  - src/kept.ts\n---\ny\n",
+    );
+    // Overdue for any realistic wall clock vs. a far-future negative control.
+    write(
+        root,
+        ".koden-memory/n-due.md",
+        b"---\nid: n-due\ntype: decision\ntitle: Overdue decision\nrevalidate_after: 2000-01-01\n---\nz\n",
+    );
+    write(
+        root,
+        ".koden-memory/n-later.md",
+        b"---\nid: n-later\ntype: decision\ntitle: Future-dated decision\nrevalidate_after: 2099-01-01\n---\nw\n",
+    );
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+    scan_project_memory(&idx, PID, root);
+
+    // (b) overdue vs future-dated, plus both anchored notes still valid.
+    let g0 = build_gist(&db, PID, "proj", "module", 1200);
+    assert!(g0.bytes.contains("- Overdue decision (decision) [possibly-stale]"), "{}", g0.bytes);
+    assert!(g0.bytes.contains("- Future-dated decision (decision) [current]"), "{}", g0.bytes);
+    assert!(g0.bytes.contains("- Gone module decision (decision) [current]"), "{}", g0.bytes);
+
+    // (a) the anchor target is DELETED → real incremental reindex prunes it.
+    std::fs::remove_file(root.join("src/gone.ts")).unwrap();
+    index_changed(&idx, PID, root, &[root.join("src/gone.ts")]);
+    let g1 = build_gist(&db, PID, "proj", "module", 1200);
+    let g2 = build_gist(&db, PID, "proj", "module", 1200);
+    assert_eq!(g1.bytes, g2.bytes, "labeled gist must stay byte-identical");
+    assert_eq!(g1.fingerprint, g2.fingerprint);
+    assert!(
+        g1.bytes.contains("- Gone module decision (decision) [possibly-stale]"),
+        "pruned-anchor note must be hedged, not presented as current: {}",
+        g1.bytes
+    );
+    // NEGATIVE CONTROL: the valid-anchor note stays current throughout.
+    assert!(g1.bytes.contains("- Kept module decision (decision) [current]"), "{}", g1.bytes);
+    assert_ne!(g1.fingerprint, g0.fingerprint, "prune rotated the cache key");
+}
+
 fn ts_chain(root: &Path) {
     write(root, "src/a.ts", b"export function alpha() {}");
     write(root, "src/b.ts", b"import { alpha } from './a';\nexport function bravo() { alpha(); }");

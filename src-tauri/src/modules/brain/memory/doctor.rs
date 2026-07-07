@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use crate::modules::brain::gist::iso_date_to_epoch_ms;
 use crate::modules::brain::memory::proposal::{
     proposal_signature, reject_signature, MemoryProposal, ProposalAction,
 };
@@ -54,9 +55,11 @@ pub(crate) fn path_anchor(anchor: &str) -> Option<String> {
     }
 }
 
-/// Pure check pass. `now_date` is an ISO `YYYY-MM-DD` string (ISO sorts
-/// chronologically, so lexical `<` is a correct date comparison); `None` disables
-/// the date-dependent staleness check.
+/// Pure check pass. `now_date` is an ISO `YYYY-MM-DD` string; `None` disables
+/// the date-dependent staleness check. Dates are compared via the gist's
+/// `iso_date_to_epoch_ms` (NOT lexically) so the doctor and the gist freshness
+/// labels agree on exactly which notes are overdue — unparseable
+/// `revalidate_after` values fail toward current on both sides.
 pub fn check(
     notes: &[NoteRecord],
     indexed_paths: &HashSet<String>,
@@ -88,7 +91,15 @@ pub fn check(
             }
         }
         if let (Some(rv), Some(now)) = (&n.revalidate_after, now_date) {
-            if rv.as_str() < now {
+            // Same day-granular parser as the gist's overdue set — lexical `<`
+            // on the raw strings would fire on malformed values like `1999`
+            // that the gist ignores, presenting a doctor-flagged note as
+            // `[current]` (gauntlet defect stale-note-labeled-current residual).
+            let overdue = match (iso_date_to_epoch_ms(rv), iso_date_to_epoch_ms(now)) {
+                (Some(rv_ms), Some(now_ms)) => rv_ms < now_ms,
+                _ => false, // unparseable → fail toward current, like the gist
+            };
+            if overdue {
                 out.push(Finding {
                     check: "stale_revalidate",
                     severity: "medium",
@@ -217,6 +228,30 @@ mod tests {
     fn clean_note_yields_nothing() {
         let f = check(&[note("a")], &HashSet::new(), Some("2026-06-20"));
         assert!(f.is_empty());
+    }
+
+    /// Malformed `revalidate_after` (e.g. bare `1999`, lexically < any ISO
+    /// date) must NOT fire: the gist's freshness label ignores unparseable
+    /// dates (fails toward current), and a doctor-only signal would present a
+    /// flagged note as `[current]` (stale-note-labeled-current residual).
+    #[test]
+    fn malformed_revalidate_fails_toward_current_like_gist() {
+        for bad in ["1999", "yesterday", "2020-13-40", ""] {
+            let mut n = note("a");
+            n.revalidate_after = Some(bad.into());
+            assert!(
+                check(&[n], &HashSet::new(), Some("2026-06-20"))
+                    .iter()
+                    .all(|x| x.check != "stale_revalidate"),
+                "unparseable revalidate_after {bad:?} must not fire stale_revalidate"
+            );
+        }
+        // Control: a parseable past date still fires under the same now_date.
+        let mut n = note("a");
+        n.revalidate_after = Some("2020-01-01".into());
+        assert!(check(&[n], &HashSet::new(), Some("2026-06-20"))
+            .iter()
+            .any(|x| x.check == "stale_revalidate"));
     }
 
     #[test]

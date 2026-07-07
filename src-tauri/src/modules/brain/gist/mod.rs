@@ -8,8 +8,8 @@
 //! deriving the gist purely from deterministic index state (search is now fully
 //! ordered, notes/symbols are sorted), read over ONE pinned snapshot so the key
 //! and the body never tear apart, and keying it by
-//! `blake3(project_fingerprint ‖ intent ‖ budget ‖ schema_version)` (CONCEPT
-//! §6 Flow C, [DP-21]/[DP-22]).
+//! `blake3(project_fingerprint ‖ temporal_digest ‖ overdue_digest ‖ intent ‖
+//! budget ‖ schema_version)` (CONCEPT §6 Flow C, [DP-21]/[DP-22]).
 //!
 //! Byte-identity is a *property of the deterministic build*, not a stored
 //! key→bytes cache. CONCEPT Flow C step 5 ("emit the byte-identical prior gist")
@@ -49,8 +49,9 @@ const DAY_MS: i64 = 86_400_000;
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Gist {
     pub bytes: String,
-    /// Cache key — `blake3(fingerprint ‖ intent ‖ budget ‖ schema_version)`. An
-    /// unchanged relaunch reproduces this key (and byte-identical `bytes`).
+    /// Cache key — `blake3(fingerprint ‖ temporal_digest ‖ overdue_digest ‖
+    /// intent ‖ budget ‖ schema_version)`. An unchanged relaunch reproduces
+    /// this key (and byte-identical `bytes`).
     pub fingerprint: String,
     pub sources: Vec<String>,
 }
@@ -112,8 +113,23 @@ fn build_gist_on_conn(
     let temporal = conn
         .and_then(|c| store::project_temporal_digest_with_conn(c, project_id).ok())
         .unwrap_or_default();
+    // Notes are fetched BEFORE the key: the overdue-revalidate set (the one
+    // wall-clock-dependent label input, gauntlet S7 `stale-note-labeled-current`)
+    // must be folded into the key so a note crossing its `revalidate_after`
+    // boundary rotates the key instead of re-rendering different bytes under an
+    // unchanged key. Day-granular and derived from the pinned snapshot's notes,
+    // so the key only moves when the overdue SET changes (a note crosses its
+    // boundary / note files change) — not once per day.
+    let notes = conn
+        .and_then(|c| store::gist_notes_with_conn(c, project_id).ok())
+        .unwrap_or_default();
+    let overdue = overdue_note_ids(&notes, today_utc_ms());
+    let overdue_digest = overdue.join("\u{1}");
     let key = blake3::hash(
-        format!("{fp}\u{0}{temporal}\u{0}{intent}\u{0}{budget_tokens}\u{0}{SCHEMA_VERSION}").as_bytes(),
+        format!(
+            "{fp}\u{0}{temporal}\u{0}{overdue_digest}\u{0}{intent}\u{0}{budget_tokens}\u{0}{SCHEMA_VERSION}"
+        )
+        .as_bytes(),
     )
     .to_hex()
     .to_string();
@@ -131,12 +147,10 @@ fn build_gist_on_conn(
     let mut sources: Vec<String> = Vec::new();
 
     // Both retrieval legs run up-front so the known-unknowns section can name
-    // exactly which came back empty (ADR-011).
+    // exactly which came back empty (ADR-011). (`notes` already fetched above —
+    // the overdue-set digest in the cache key derives from it.)
     let hits = conn
         .and_then(|c| store::search_with_conn(c, Some(project_id), intent, MAX_FILES).ok())
-        .unwrap_or_default();
-    let notes = conn
-        .and_then(|c| store::gist_notes_with_conn(c, project_id).ok())
         .unwrap_or_default();
 
     // Known-unknowns (ADR-011): an empty retrieval leg is stated explicitly so an
@@ -193,8 +207,9 @@ fn build_gist_on_conn(
             .filter_map(|n| n.supersedes.as_deref())
             .filter(|s| !s.is_empty())
             .collect();
+        let overdue_set: std::collections::HashSet<&str> = overdue.iter().copied().collect();
         for n in notes.iter().take(MAX_NOTES) {
-            let label = note_freshness_label(conn, project_id, n, &superseding);
+            let label = note_freshness_label(conn, project_id, n, &superseding, &overdue_set);
             let line = match &n.note_type {
                 Some(t) => format!("- {} ({t}) [{label}]", n.title),
                 None => format!("- {} [{label}]", n.title),
@@ -210,57 +225,112 @@ fn build_gist_on_conn(
 
 /// Per-claim freshness label for one memory note (ADR-011): `current` /
 /// `possibly-stale` / `historical(superseded)`. CACHE-STABILITY IS THE HARD
-/// CONSTRAINT: labels derive ONLY from key-covered state — supersession edges +
-/// `created` live in the note files (indexed → the content fingerprint) and the
-/// anchors' touch state lives in `files.accessed_*` (the temporal digest) — so
-/// one cache key always renders the same bytes (the P3 byte-identity gate).
+/// CONSTRAINT: labels derive ONLY from key-covered state — supersession edges,
+/// `created` and `revalidate_after` live in the note files (indexed → the
+/// content fingerprint), the anchors' presence/touch state lives in `files`
+/// (fingerprint + temporal digest), and the wall-clock-dependent OVERDUE
+/// outcome is folded into the key as the overdue-set digest — so one cache key
+/// always renders the same bytes (the P3 byte-identity gate).
 ///
-/// possibly-stale = some path anchor's file content-changed on a LATER day than
-/// the note's `created` date, observed by a live reindex (`accessed_count >= 2`:
-/// the FIRST stamp is the initial index walk, which timestamps indexing — not
-/// the code's last change — so counting it would mark every pre-Brain note stale).
-// ponytail: two deliberate ceilings. (1) `revalidate_after` is EXCLUDED from
-// labels: it compares against TODAY, so an unchanged cache key would yield
-// different bytes as wall-clock time passes — the byte-identity gate forbids
-// that. Chosen over folding a day-granularity date into the cache key (which
-// stays deterministic but busts every agent's prompt cache once per day); the
-// doctor already surfaces overdue notes as proposals. Upgrade path: fold
-// `today(day)` into the key and label from it. (2) A schema-bump rebuild resets
-// `accessed_count` to 1, forgetting prior staleness until the next real change
-// — fails toward `current`, never a false stale claim (thin over wrong).
+/// possibly-stale (gauntlet S7 `stale-note-labeled-current` — every staleness
+/// signal the doctor knows also hedges the agent-facing label) = any of:
+/// - `overdue`: the note's `revalidate_after` day has passed (mirror of the
+///   doctor's `stale_revalidate`; membership is key-covered via the digest);
+/// - a path anchor's target is ABSENT from the index — moved or deleted, so the
+///   note describes gone state (mirror of the doctor's `broken_anchor`; the
+///   path set is fingerprint-covered);
+/// - some path anchor's file content-changed on a LATER day than the note's
+///   `created` date, observed by a live reindex (`accessed_count >= 2`: the
+///   FIRST stamp is the initial index walk, which timestamps indexing — not
+///   the code's last change — so counting it would mark every pre-Brain note
+///   stale).
+// ponytail: one deliberate ceiling remains — a schema-bump rebuild resets
+// `accessed_count` to 1, forgetting prior EDIT staleness until the next real
+// change — fails toward `current`, never a false stale claim (thin over wrong).
+// (The former `revalidate_after` exclusion is lifted: instead of folding raw
+// `today(day)` into the key — a daily cache bust — only the overdue SET is
+// folded, so the key moves exactly when a label would.)
 fn note_freshness_label(
     conn: Option<&Connection>,
     project_id: &str,
     n: &store::GistNote,
     superseding: &std::collections::HashSet<&str>,
+    overdue: &std::collections::HashSet<&str>,
 ) -> &'static str {
     if matches!(n.superseded_by.as_deref(), Some(s) if !s.is_empty())
         || superseding.contains(n.id.as_str())
     {
         return "historical(superseded)";
     }
-    let Some(created_ms) = n.created.as_deref().and_then(iso_date_to_epoch_ms) else {
-        return "current"; // no (parseable) created date → nothing to compare against
-    };
+    if overdue.contains(n.id.as_str()) {
+        return "possibly-stale";
+    }
+    let created_ms = n.created.as_deref().and_then(iso_date_to_epoch_ms);
     if let Some(c) = conn {
         for a in &n.anchors {
             let Some(p) = path_anchor(a) else { continue };
-            if let Ok(Some((touch_ms, count))) = store::file_touch_with_conn(c, project_id, &p) {
-                // Strictly after the created DAY — frontmatter dates are day-granular,
-                // so a same-day touch is not evidence the code moved past the note.
-                if count >= 2 && touch_ms >= created_ms + DAY_MS {
-                    return "possibly-stale";
+            match store::file_touch_with_conn(c, project_id, &p) {
+                // Anchor target not in the index (moved/deleted → pruned): the
+                // note is about gone state — hedge it. Independent of `created`
+                // (S7a notes need no created date to have a broken anchor).
+                Ok(None) => return "possibly-stale",
+                Ok(Some((touch_ms, count))) => {
+                    // Strictly after the created DAY — frontmatter dates are
+                    // day-granular, so a same-day touch is not evidence the
+                    // code moved past the note.
+                    if let Some(created_ms) = created_ms {
+                        if count >= 2 && touch_ms >= created_ms + DAY_MS {
+                            return "possibly-stale";
+                        }
+                    }
                 }
+                Err(_) => {} // read error → fail toward current (thin over wrong)
             }
         }
     }
     "current"
 }
 
+/// IDs of notes whose `revalidate_after` day is strictly BEFORE `today_ms`
+/// (UTC-midnight epoch ms) — the doctor's `stale_revalidate` comparison
+/// (`rv < today`, day-granular) over parseable ISO dates; unparseable dates
+/// fail toward current, mirroring the label policy. Deterministic given
+/// (`notes`, `today_ms`): notes arrive ORDER BY id, so the digest built from
+/// this is byte-stable — it is folded into the gist cache key so an overdue
+/// transition rotates the key instead of tearing key↔bytes.
+fn overdue_note_ids(notes: &[store::GistNote], today_ms: i64) -> Vec<&str> {
+    notes
+        .iter()
+        .filter(|n| {
+            n.revalidate_after
+                .as_deref()
+                .and_then(iso_date_to_epoch_ms)
+                .is_some_and(|rv_ms| rv_ms < today_ms)
+        })
+        .map(|n| n.id.as_str())
+        .collect()
+}
+
+/// Today as UTC-midnight epoch ms (day granularity — the only wall-clock read
+/// in the gist; its effect on bytes is key-covered via the overdue-set digest).
+fn today_utc_ms() -> i64 {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    ms.div_euclid(DAY_MS) * DAY_MS
+}
+
 /// Parse the `YYYY-MM-DD` (day-granular) prefix of an ISO date/datetime to epoch
 /// milliseconds (UTC midnight). Pure integer civil-date arithmetic
 /// (days-from-civil) — deterministic, no wall clock, no date dependency.
-fn iso_date_to_epoch_ms(s: &str) -> Option<i64> {
+///
+/// `pub(crate)`: this is the ONE date parser for staleness decisions — the
+/// doctor's `stale_revalidate` (memory/doctor.rs) uses it too, so a note the
+/// doctor flags as overdue can never render `[current]` here (and vice versa),
+/// including for malformed frontmatter dates, which fail toward current on
+/// BOTH sides.
+pub(crate) fn iso_date_to_epoch_ms(s: &str) -> Option<i64> {
     let date = s.trim().split(['T', ' ']).next().unwrap_or("");
     let mut it = date.split('-');
     let y: i64 = it.next()?.parse().ok()?;
@@ -332,7 +402,7 @@ fn push_line(out: &mut String, max_chars: usize, line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{intent_excerpt, iso_date_to_epoch_ms, DAY_MS};
+    use super::{intent_excerpt, iso_date_to_epoch_ms, overdue_note_ids, DAY_MS};
 
     /// The label comparison hinges on this pure date math — pin its anchor points
     /// (epoch, day step, leap-day step, datetime tolerance, garbage → None).
@@ -355,6 +425,41 @@ mod tests {
         for bad in ["", "yesterday", "2026-13-01", "2026-00-10", "2026-01-32", "20260620"] {
             assert_eq!(iso_date_to_epoch_ms(bad), None, "must reject {bad:?}");
         }
+    }
+
+    /// Regression (gauntlet S7 `stale-note-labeled-current`, manifestation b):
+    /// the overdue-revalidate set that drives both the `possibly-stale` label
+    /// and the cache-key digest. Doctor-mirroring boundary semantics: overdue
+    /// iff `revalidate_after < today` at DAY granularity (same-day = not yet
+    /// overdue); unparseable/absent dates fail toward current; output order is
+    /// the input (ORDER BY id) order → digest-deterministic.
+    #[test]
+    fn overdue_note_ids_day_boundary_and_garbage() {
+        let note = |id: &str, rv: Option<&str>| crate::modules::brain::store::GistNote {
+            id: id.into(),
+            title: id.into(),
+            note_type: None,
+            created: None,
+            revalidate_after: rv.map(Into::into),
+            supersedes: None,
+            superseded_by: None,
+            anchors: vec![],
+        };
+        let today = iso_date_to_epoch_ms("2026-07-07").unwrap();
+        let notes = vec![
+            note("a-past", Some("2026-07-06")),      // yesterday → overdue
+            note("b-today", Some("2026-07-07")),     // same day → NOT overdue (doctor `<`)
+            note("c-future", Some("2026-07-08")),    // tomorrow → not
+            note("d-garbage", Some("next spring")),  // unparseable → fails toward current
+            note("e-none", None),                    // absent → not
+            note("f-old", Some("2020-01-01T09:00")), // datetime prefix parses → overdue
+        ];
+        assert_eq!(overdue_note_ids(&notes, today), vec!["a-past", "f-old"]);
+        assert_eq!(
+            overdue_note_ids(&notes, today),
+            overdue_note_ids(&notes, today),
+            "deterministic (feeds the cache-key digest)"
+        );
     }
 
     #[test]
