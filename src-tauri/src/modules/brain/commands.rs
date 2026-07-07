@@ -334,6 +334,36 @@ pub async fn brain_detect_changes(
     .await
 }
 
+/// One-call read-only planning bundle: task-text search hits + git-diff
+/// affected files + (when `target` is given) upstream impact of the target
+/// symbol. Pure composition over the existing readers; each leg that cannot
+/// run becomes an `advisories[]` entry and the rest of the bundle still
+/// returns. An unknown project is a caller error (like `brain_detect_changes`);
+/// a not-yet-ready index is a fully-advised soft bundle.
+#[tauri::command]
+pub async fn brain_plan_context(
+    state: State<'_, BrainState>,
+    project: String,
+    task: String,
+    target: Option<String>,
+) -> Result<store::PlanContext, String> {
+    let root = state
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project)
+        .map(|p| p.root)
+        .ok_or_else(|| format!("unknown project: {project}"))?;
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Ok(store::PlanContext::skipped(task, target, "index-not-ready"));
+    };
+    blocking(move || {
+        let root = std::path::Path::new(&root);
+        store::plan_context_readonly(&db, &project, root, &task, target)
+    })
+    .await
+}
+
 /// Whole-brain knowledge graph for the Brain Map: project hubs + (capped) files +
 /// memory notes, with containment/import/anchor edges. Read-only snapshot.
 #[tauri::command]

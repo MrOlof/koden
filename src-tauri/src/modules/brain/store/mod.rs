@@ -4,11 +4,13 @@
 pub mod changes;
 pub mod graph;
 pub mod migrate;
+pub mod plan;
 pub mod schema;
 pub mod sqlite;
 
 pub use changes::{detect_changes_readonly, AffectedFile, DetectMode, DetectedChanges};
 pub use graph::{graph_readonly, BrainGraph};
+pub use plan::{plan_context_readonly, PlanAdvisory, PlanContext};
 
 pub use sqlite::{
     budget_state_readonly, code_impact_readonly, file_count_readonly, file_count_with_conn,
