@@ -300,6 +300,40 @@ pub async fn brain_code_impact(
     .await
 }
 
+/// Map the project's git diff onto the index: affected indexed files + their
+/// first-degree `code_edges` dependents. `mode` defaults to "both" (working ∪
+/// staged); an unknown value is a caller error. A non-git root or unavailable
+/// git is a SOFT result (`skipped_reason`), never an error — fail-open like
+/// every other reader. The git probe is read-only (`diff --name-only`).
+#[tauri::command]
+pub async fn brain_detect_changes(
+    state: State<'_, BrainState>,
+    project: String,
+    mode: Option<String>,
+) -> Result<store::DetectedChanges, String> {
+    let mode = store::DetectMode::parse(mode.as_deref().unwrap_or("both"))
+        .ok_or_else(|| "invalid mode: expected working | staged | both".to_string())?;
+    let root = state
+        .registry
+        .projects()
+        .into_iter()
+        .find(|p| p.id == project)
+        .map(|p| p.root)
+        .ok_or_else(|| format!("unknown project: {project}"))?;
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Ok(store::DetectedChanges::skipped(mode, "index-not-ready"));
+    };
+    blocking(move || {
+        let root = std::path::Path::new(&root);
+        store::detect_changes_readonly(&db, &project, root, mode).unwrap_or_else(|e| {
+            // A missing/locked DB during warmup is not a user error.
+            log::debug!("brain_detect_changes soft error: {e}");
+            store::DetectedChanges::skipped(mode, "index-unavailable")
+        })
+    })
+    .await
+}
+
 /// Whole-brain knowledge graph for the Brain Map: project hubs + (capped) files +
 /// memory notes, with containment/import/anchor edges. Read-only snapshot.
 #[tauri::command]

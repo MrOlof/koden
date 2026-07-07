@@ -1266,7 +1266,7 @@ fn apply_temporal_boost(
     Ok(())
 }
 
-fn open_readonly(db_path: &Path) -> rusqlite::Result<Connection> {
+pub(crate) fn open_readonly(db_path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
