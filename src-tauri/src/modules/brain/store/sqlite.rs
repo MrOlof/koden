@@ -427,6 +427,38 @@ impl SqliteIndex {
         hash: &str,
         size: i64,
     ) -> rusqlite::Result<bool> {
+        // Unchanged-hash early return BEFORE the (comparatively expensive)
+        // tokenize/parse — keeps the serial/incremental no-op path cheap.
+        let unchanged = self
+            .conn
+            .query_row(
+                "SELECT hash FROM files WHERE project_id=?1 AND path=?2",
+                (project_id, rel_path),
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .is_some_and(|old| old == hash);
+        if unchanged {
+            return Ok(false);
+        }
+        self.index_file_prepared(
+            project_id,
+            rel_path,
+            &prepare_file(rel_path, content, hash.to_string(), size),
+        )
+    }
+
+    /// Apply a [prepare_file] result — the WRITE half of [Self::index_file].
+    /// Still no-ops (Ok(false)) on an unchanged hash, so a stale precomputed
+    /// payload can never double-index. Atomic per file. This is the ONLY entry
+    /// the parallel first-index consumer uses: compute happens on worker
+    /// threads, every write stays on the single writer connection.
+    pub fn index_file_prepared(
+        &self,
+        project_id: &str,
+        rel_path: &str,
+        prep: &PreparedFile,
+    ) -> rusqlite::Result<bool> {
         let existing: Option<(String, i64)> = self
             .conn
             .query_row(
@@ -437,22 +469,10 @@ impl SqliteIndex {
             .ok();
 
         if let Some((old_hash, _)) = &existing {
-            if old_hash == hash {
+            if old_hash == &prep.hash {
                 return Ok(false); // unchanged — skip reindex
             }
         }
-
-        let path_tokens = tokenize::tokenize(rel_path).join(" ");
-        let content_tokens = tokenize::tokenize(content).join(" ");
-        // P2: parse once → definitions (the `symbols` FTS column + `code_nodes`)
-        // and raw import specs (`code_imports`). Only runs here on a new/changed
-        // file — the unchanged-hash early return skips it. Edges are NOT touched
-        // here; they're rebuilt as a pure function of imports+files (rebuild_edges).
-        let analysis = analyze_for(rel_path, content);
-        let symbol_tokens = analysis
-            .as_ref()
-            .map(|a| tokenize::tokenize(&a.symbol_names()).join(" "))
-            .unwrap_or_default();
 
         let tx = self.conn.unchecked_transaction()?;
         if let Some((_, old_rowid)) = existing {
@@ -460,14 +480,14 @@ impl SqliteIndex {
         }
         tx.execute(
             "INSERT INTO code_fts(path,symbols,content) VALUES(?1,?2,?3)",
-            (&path_tokens, &symbol_tokens, &content_tokens),
+            (&prep.path_tokens, &prep.symbol_tokens, &prep.content_tokens),
         )?;
         let rowid = tx.last_insert_rowid();
         tx.execute(
             "INSERT INTO files(project_id,path,hash,size,fts_rowid) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(project_id,path) DO UPDATE SET
                 hash=excluded.hash, size=excluded.size, fts_rowid=excluded.fts_rowid",
-            (project_id, rel_path, hash, size, rowid),
+            (project_id, rel_path, prep.hash.as_str(), prep.size, rowid),
         )?;
         // Replace this file's nodes + import specs.
         tx.execute(
@@ -478,22 +498,17 @@ impl SqliteIndex {
             "DELETE FROM code_imports WHERE project_id=?1 AND src_path=?2",
             (project_id, rel_path),
         )?;
-        if let Some(a) = &analysis {
-            for n in &a.nodes {
-                tx.execute(
-                    "INSERT OR IGNORE INTO code_nodes(project_id,path,name,kind,start_line,start_col) VALUES(?1,?2,?3,?4,?5,?6)",
-                    rusqlite::params![project_id, rel_path, n.name, n.kind, n.start_line, n.start_col],
-                )?;
-            }
-            for spec in &a.imports {
-                // Store the normalized resolution base ('' = can never resolve
-                // in-project) so the delta relink can index-match affected imports.
-                let base = import_base(rel_path, spec).unwrap_or_default();
-                tx.execute(
-                    "INSERT OR IGNORE INTO code_imports(project_id,src_path,spec,base) VALUES(?1,?2,?3,?4)",
-                    (project_id, rel_path, spec.as_str(), base.as_str()),
-                )?;
-            }
+        for n in &prep.nodes {
+            tx.execute(
+                "INSERT OR IGNORE INTO code_nodes(project_id,path,name,kind,start_line,start_col) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![project_id, rel_path, n.name, n.kind, n.start_line, n.start_col],
+            )?;
+        }
+        for (spec, base) in &prep.imports {
+            tx.execute(
+                "INSERT OR IGNORE INTO code_imports(project_id,src_path,spec,base) VALUES(?1,?2,?3,?4)",
+                (project_id, rel_path, spec.as_str(), base.as_str()),
+            )?;
         }
         tx.commit()?;
         Ok(true)
@@ -767,6 +782,29 @@ impl SqliteIndex {
         Ok(v)
     }
 
+    /// path → content hash snapshot for a project — read once at the start of a
+    /// full-index pass so the parallel compute workers can skip tokenize/parse
+    /// on unchanged files (the compute-side twin of the writer-side hash-skip
+    /// in [Self::index_file_prepared]). Safe as a pass-long snapshot: the ONE
+    /// writer is the pass itself and each path is written at most once per pass.
+    pub fn existing_hashes(
+        &self,
+        project_id: &str,
+    ) -> rusqlite::Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, hash FROM files WHERE project_id=?1")?;
+        let it = stmt.query_map([project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut m = std::collections::HashMap::new();
+        for x in it {
+            let (p, h) = x?;
+            m.insert(p, h);
+        }
+        Ok(m)
+    }
+
     /// All indexed paths for a project (used by reconcile to detect deletions).
     pub fn existing_paths(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self
@@ -957,6 +995,54 @@ impl SearchIndex for SqliteIndex {
     fn search(&self, project: Option<&str>, query: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
         search_with_conn(&self.conn, project, query, limit)
     }
+}
+
+/// The COMPUTE half of one file's index write: pre-tokenized FTS streams +
+/// parsed definitions + import specs (with their normalized resolution bases).
+/// A pure function of (rel_path, content) with owned fields only, so the
+/// parallel first-index can build it on N compute threads and hand it to the
+/// ONE writer for [SqliteIndex::index_file_prepared] (single-writer invariant).
+pub struct PreparedFile {
+    pub hash: String,
+    pub size: i64,
+    path_tokens: String,
+    symbol_tokens: String,
+    content_tokens: String,
+    nodes: Vec<ast::CodeNode>,
+    /// `(spec, base)` — base precomputed ('' = can never resolve in-project)
+    /// so the delta relink can index-match affected imports.
+    imports: Vec<(String, String)>,
+}
+
+/// Tokenize + parse one file for indexing — no connection touched. P2: parse
+/// once → definitions (the `symbols` FTS column + `code_nodes`) and raw import
+/// specs (`code_imports`). Edges are NOT touched here; they're rebuilt as a
+/// pure function of imports+files (rebuild_edges / relink_edges_delta).
+pub fn prepare_file(rel_path: &str, content: &str, hash: String, size: i64) -> PreparedFile {
+    let path_tokens = tokenize::tokenize(rel_path).join(" ");
+    let content_tokens = tokenize::tokenize(content).join(" ");
+    let analysis = analyze_for(rel_path, content);
+    let symbol_tokens = analysis
+        .as_ref()
+        .map(|a| tokenize::tokenize(&a.symbol_names()).join(" "))
+        .unwrap_or_default();
+    // `None` (non-AST language) flattens to empty vecs — the apply side deletes
+    // stale nodes/imports unconditionally either way, byte-identical to before.
+    let (nodes, imports) = match analysis {
+        Some(a) => {
+            let imports = a
+                .imports
+                .iter()
+                .map(|spec| {
+                    let base = import_base(rel_path, spec).unwrap_or_default();
+                    (spec.clone(), base)
+                })
+                .collect();
+            (a.nodes, imports)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    PreparedFile { hash, size, path_tokens, symbol_tokens, content_tokens, nodes, imports }
 }
 
 /// One-parse AST analysis for a file, or `None` for non-AST languages.

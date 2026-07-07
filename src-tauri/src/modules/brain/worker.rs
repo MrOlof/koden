@@ -547,8 +547,50 @@ enum FileOutcome {
     Unknown,
 }
 
-/// Read → binary-sniff → blake3 → secrets-redact → index one file. Shared by the
-/// full walk (`index_dir`) and the incremental watcher (`index_changed`). On a
+/// A bounded raw read + binary sniff + blake3, classified. The shared front of
+/// both the serial per-file path ([index_one_file]) and the parallel compute
+/// workers ([compute_one_file]).
+enum RawRead {
+    /// Text within the size cap: raw bytes + their freshness hash.
+    Text(Vec<u8>, String),
+    NotIndexable,
+    Absent,
+    Unknown,
+}
+
+fn read_for_index(rel: &str, path: &std::path::Path) -> RawRead {
+    // Bounded read (ADR-010 TOCTOU): the walker's stat-time size check can be
+    // minutes stale, so re-enforce the cap at read time with a take()-bounded
+    // reader — a file that grew past the cap can never balloon memory.
+    use std::io::Read as _;
+    let mut bytes: Vec<u8> = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(f) => {
+            if let Err(e) = f.take(walk::MAX_INDEX_FILE_BYTES + 1).read_to_end(&mut bytes) {
+                log::debug!("brain: read failed for {rel}: {e}");
+                return RawRead::Unknown;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RawRead::Absent,
+        Err(e) => {
+            log::debug!("brain: open failed for {rel}: {e}");
+            return RawRead::Unknown;
+        }
+    }
+    if bytes.len() as u64 > walk::MAX_INDEX_FILE_BYTES {
+        return RawRead::NotIndexable; // grew past the cap since the stat
+    }
+    // Binary sniff — skip files with a NUL in the first window.
+    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
+        return RawRead::NotIndexable;
+    }
+    // Freshness hash is over the RAW bytes (any change reindexes).
+    let file_hash = hash::hash_bytes(&bytes);
+    RawRead::Text(bytes, file_hash)
+}
+
+/// Read → binary-sniff → blake3 → secrets-redact → index one file. The serial
+/// per-file path, used by the incremental watcher (`index_changed`). On a
 /// REAL content change (index_file → Ok(true)) it stamps the temporal recency via
 /// `record_access(now_ms)`; an unchanged no-op (Ok(false)) does NOT re-stamp — so
 /// a warm pass over an unchanged index leaves accessed_at_ms fixed, preserving the
@@ -560,33 +602,12 @@ fn index_one_file(
     path: &std::path::Path,
     now_ms: i64,
 ) -> FileOutcome {
-    // Bounded read (ADR-010 TOCTOU): the walker's stat-time size check can be
-    // minutes stale, so re-enforce the cap at read time with a take()-bounded
-    // reader — a file that grew past the cap can never balloon memory.
-    use std::io::Read as _;
-    let mut bytes: Vec<u8> = Vec::new();
-    match std::fs::File::open(path) {
-        Ok(f) => {
-            if let Err(e) = f.take(walk::MAX_INDEX_FILE_BYTES + 1).read_to_end(&mut bytes) {
-                log::debug!("brain: read failed for {rel}: {e}");
-                return FileOutcome::Unknown;
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FileOutcome::Absent,
-        Err(e) => {
-            log::debug!("brain: open failed for {rel}: {e}");
-            return FileOutcome::Unknown;
-        }
-    }
-    if bytes.len() as u64 > walk::MAX_INDEX_FILE_BYTES {
-        return FileOutcome::NotIndexable; // grew past the cap since the stat
-    }
-    // Binary sniff — skip files with a NUL in the first window.
-    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0) {
-        return FileOutcome::NotIndexable;
-    }
-    // Freshness hash is over the RAW bytes (any change reindexes).
-    let file_hash = hash::hash_bytes(&bytes);
+    let (bytes, file_hash) = match read_for_index(rel, path) {
+        RawRead::Text(bytes, hash) => (bytes, hash),
+        RawRead::NotIndexable => return FileOutcome::NotIndexable,
+        RawRead::Absent => return FileOutcome::Absent,
+        RawRead::Unknown => return FileOutcome::Unknown,
+    };
     let content = String::from_utf8_lossy(&bytes);
     // Secrets gate: redact secret-shaped content before it is tokenized/stored.
     let (redacted, nredact) = secrets::redact(&content);
@@ -604,6 +625,80 @@ fn index_one_file(
             log::debug!("brain: index_file failed for {rel}: {e}");
             FileOutcome::Unknown
         }
+    }
+}
+
+/// Compute-only classification of one file — the parallel half of the full-walk
+/// pipeline. NO store access: everything here (read, sniff, hash, redact,
+/// tokenize, parse) is pure or fs-read-only, so N of these run concurrently
+/// while the single writer applies results in walk order.
+enum ComputedFile {
+    /// Read + hashed + redacted + tokenized/parsed — ready for the writer.
+    Prepared(crate::modules::brain::store::PreparedFile),
+    /// Hash matches the pass-start snapshot — present, nothing to write
+    /// (mirrors `index_file`'s Ok(false), which also skips `record_access`).
+    Unchanged,
+    NotIndexable,
+    Absent,
+    Unknown,
+}
+
+/// The compute worker body: read → sniff → hash → (snapshot skip) → redact →
+/// tokenize/parse. `known_hash` is the project's pass-start hash for this rel;
+/// matching it skips the expensive tokenize/parse exactly where the serial path's
+/// writer-side hash check used to.
+fn compute_one_file(
+    rel: &str,
+    path: &std::path::Path,
+    known_hash: Option<&str>,
+) -> ComputedFile {
+    let (bytes, file_hash) = match read_for_index(rel, path) {
+        RawRead::Text(bytes, hash) => (bytes, hash),
+        RawRead::NotIndexable => return ComputedFile::NotIndexable,
+        RawRead::Absent => return ComputedFile::Absent,
+        RawRead::Unknown => return ComputedFile::Unknown,
+    };
+    if known_hash == Some(file_hash.as_str()) {
+        return ComputedFile::Unchanged;
+    }
+    let content = String::from_utf8_lossy(&bytes);
+    // Secrets gate: redact secret-shaped content before it is tokenized/stored.
+    let (redacted, nredact) = secrets::redact(&content);
+    if nredact > 0 {
+        log::debug!("brain: redacted {nredact} secret-shaped span(s) in {rel}");
+    }
+    let size = bytes.len() as i64;
+    drop(bytes); // raw bytes done — cap in-flight memory to the redacted text
+    ComputedFile::Prepared(crate::modules::brain::store::prepare_file(
+        rel, &redacted, file_hash, size,
+    ))
+}
+
+/// Apply one computed result on the writer thread. Mirrors the tail of
+/// [index_one_file]: recency advances only on a REAL change (Ok(true)).
+fn apply_computed(
+    index: &SqliteIndex,
+    project_id: &str,
+    rel: &str,
+    computed: ComputedFile,
+    now_ms: i64,
+) -> FileOutcome {
+    match computed {
+        ComputedFile::Prepared(prep) => match index.index_file_prepared(project_id, rel, &prep) {
+            Ok(true) => {
+                let _ = index.record_access(project_id, rel, now_ms);
+                FileOutcome::Indexed
+            }
+            Ok(false) => FileOutcome::Indexed, // raced-unchanged no-op — present
+            Err(e) => {
+                log::debug!("brain: index_file failed for {rel}: {e}");
+                FileOutcome::Unknown
+            }
+        },
+        ComputedFile::Unchanged => FileOutcome::Indexed, // present, recency unchanged
+        ComputedFile::NotIndexable => FileOutcome::NotIndexable,
+        ComputedFile::Absent => FileOutcome::Absent,
+        ComputedFile::Unknown => FileOutcome::Unknown,
     }
 }
 
@@ -625,8 +720,44 @@ pub fn index_dir(index: &SqliteIndex, project_id: &str, root: &std::path::Path) 
     index_walked(index, project_id, root, walk::walk_files(root))
 }
 
+/// Parallel full-walk tuning. Compute workers are `available_parallelism`
+/// leaving one core for the writer, clamped:
+/// ponytail: fixed ceiling of 8 workers — the writer is a single SQLite
+/// connection, so past a handful of parsers it becomes the bottleneck anyway;
+/// lift to a setting only if a monster-repo profile shows headroom.
+const PAR_MAX_WORKERS: usize = 8;
+/// Bounded results channel (backpressure between compute and the writer).
+const PAR_RESULTS_CAP: usize = 16;
+/// Reorder-buffer bound: a worker may not START file `i` until the writer has
+/// applied file `i - PAR_MAX_LEAD`, so compute leads the writer by at most this
+/// many files. The channel cap alone does NOT bound memory: under head-of-line
+/// skew (walk-first file is a slow ~1 MB parse) the consumer drains every result
+/// into the `pending` reorder map without applying any, and peak RAM approaches
+/// a tokenized copy of the whole repo. With the lead cap, in-flight payloads
+/// (in workers + channel + `pending`) are hard-capped at PAR_MAX_LEAD total.
+/// ponytail: 32 = channel cap + 2× max workers of headroom; profile a monster
+/// repo before raising.
+const PAR_MAX_LEAD: usize = 32;
+
+fn par_workers(files: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1)) // leave a core for the writer/consumer
+        .unwrap_or(1)
+        .clamp(1, PAR_MAX_WORKERS)
+        .min(files.max(1))
+}
+
 /// Pipeline body, parametrized over the walk outcome so tests can drive the
 /// reconcile gate directly (a real >MAX_SCANNED repo is too heavy for CI).
+///
+/// The per-file compute (read+hash+redact+tokenize+parse — the wall-clock bulk
+/// of a first index) fans out over [par_workers] scoped threads; ALL writes stay
+/// on the caller's thread, which applies results IN WALK ORDER via stable
+/// sequence numbers — so the single-writer invariant holds and the resulting DB
+/// (incl. FTS insertion order) is byte-identical to the old serial pass.
+/// The incremental watcher path ([index_changed]) deliberately stays serial:
+/// deltas are a handful of files, the store's hash-skip already makes no-ops
+/// cheap, and thread fan-out would add latency/machinery for no wall-clock win.
 fn index_walked(
     index: &SqliteIndex,
     project_id: &str,
@@ -636,22 +767,93 @@ fn index_walked(
     let now_ms = now_epoch_ms(); // one recency stamp for everything changed in this pass
     let mut indexed = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in walked.files {
-        let rel = rel_path(root, &path);
-        match index_one_file(index, project_id, &rel, &path, now_ms) {
-            FileOutcome::Indexed => {
-                seen.insert(rel);
-                indexed += 1;
+    // Pass-start hash snapshot: lets compute workers skip tokenize/parse on
+    // unchanged files (the compute-side twin of the writer-side hash-skip).
+    // Fail-open: an error just means workers prepare everything and the writer's
+    // own hash check still no-ops the unchanged ones.
+    let known_hashes = index.existing_hashes(project_id).unwrap_or_default();
+    // Walk order is the deterministic apply sequence; rels are precomputed so
+    // both sides of the pipeline agree on file identity.
+    let files = walked.files;
+    let rels: Vec<String> = files.iter().map(|p| rel_path(root, p)).collect();
+    let n_workers = par_workers(files.len());
+    if !files.is_empty() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        // Writer progress (files applied so far) + condvar lead-capped workers
+        // sleep on. Set to usize::MAX on consumer exit/unwind so waiting
+        // workers always get released and the scope can join.
+        let applied = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
+        let (ctx, crx) = mpsc::sync_channel::<(usize, ComputedFile)>(PAR_RESULTS_CAP);
+        std::thread::scope(|s| {
+            for _ in 0..n_workers {
+                let ctx = ctx.clone();
+                let (next, files, rels, known_hashes, applied) =
+                    (&next, &files, &rels, &known_hashes, &applied);
+                s.spawn(move || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= files.len() {
+                        break;
+                    }
+                    // Lead cap: park until the writer is within PAR_MAX_LEAD
+                    // files, bounding the consumer's reorder buffer. Deadlock-
+                    // free: the worker holding the lowest unapplied index never
+                    // waits (i < applied + PAR_MAX_LEAD holds for it).
+                    {
+                        let mut done = applied.0.lock().unwrap_or_else(|e| e.into_inner());
+                        while i >= done.saturating_add(PAR_MAX_LEAD) {
+                            done = applied.1.wait(done).unwrap_or_else(|e| e.into_inner());
+                        }
+                    }
+                    let known = known_hashes.get(&rels[i]).map(String::as_str);
+                    let computed = compute_one_file(&rels[i], &files[i], known);
+                    if ctx.send((i, computed)).is_err() {
+                        break; // consumer gone (unwind) — stop producing
+                    }
+                });
             }
-            // Unknown (read/store error): the file may well exist — keep any
-            // last-good row out of the deletion set (ADR-010 positive evidence).
-            FileOutcome::Unknown => {
-                seen.insert(rel);
+            drop(ctx); // the consumer loop ends when the last worker finishes
+            // On any consumer exit (normal or unwind) release lead-capped
+            // workers, else they'd wait forever and the scope would never join.
+            struct ReleaseWorkers<'a>(&'a (std::sync::Mutex<usize>, std::sync::Condvar));
+            impl Drop for ReleaseWorkers<'_> {
+                fn drop(&mut self) {
+                    *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = usize::MAX;
+                    self.0 .1.notify_all();
+                }
             }
-            // NotIndexable: present but excluded (binary/oversize) — a stale row
-            // is pruned, matching a full rebuild. Absent: positively gone.
-            FileOutcome::NotIndexable | FileOutcome::Absent => {}
-        }
+            let _release = ReleaseWorkers(&applied);
+            // Single consumer = THIS thread (the one writer). Results arrive in
+            // completion order; a small reorder buffer re-sequences them so
+            // writes land in walk order. Bounded: the lead cap above keeps
+            // `pending` (plus channel + in-worker results) at <= PAR_MAX_LEAD.
+            let mut pending: std::collections::HashMap<usize, ComputedFile> =
+                std::collections::HashMap::new();
+            let mut next_apply = 0usize;
+            for (i, computed) in crx {
+                pending.insert(i, computed);
+                while let Some(c) = pending.remove(&next_apply) {
+                    let rel = &rels[next_apply];
+                    match apply_computed(index, project_id, rel, c, now_ms) {
+                        FileOutcome::Indexed => {
+                            seen.insert(rel.clone());
+                            indexed += 1;
+                        }
+                        // Unknown (read/store error): the file may well exist — keep any
+                        // last-good row out of the deletion set (ADR-010 positive evidence).
+                        FileOutcome::Unknown => {
+                            seen.insert(rel.clone());
+                        }
+                        // NotIndexable: present but excluded (binary/oversize) — a stale row
+                        // is pruned, matching a full rebuild. Absent: positively gone.
+                        FileOutcome::NotIndexable | FileOutcome::Absent => {}
+                    }
+                    next_apply += 1;
+                    // Publish writer progress; wakes lead-capped workers.
+                    *applied.0.lock().unwrap_or_else(|e| e.into_inner()) = next_apply;
+                    applied.1.notify_all();
+                }
+            }
+        });
     }
     // Reconcile deletions: prune index rows for files no longer present on disk
     // (CONCEPT Flow B delta; EXECUTION_PLAN §3 SearchIndex::remove). Without this,
@@ -698,6 +900,10 @@ fn index_project(index: &SqliteIndex, proj: &Project) {
 /// one project: existing text files are re-indexed (the hash-skip makes no-ops
 /// cheap), vanished files are pruned. Touches ONLY the given paths — the P1
 /// freshness gate ("an out-of-band edit reindexes only the changed file").
+/// Deliberately SERIAL (unlike the parallel full walk in [index_walked]): a
+/// watcher delta is a handful of files, the store-side hash-skip keeps no-op
+/// saves cheap without any pre-pass snapshot, and thread fan-out here would be
+/// pure overhead.
 pub fn index_changed(
     index: &SqliteIndex,
     project_id: &str,
@@ -1321,6 +1527,147 @@ mod tests {
             !paths.contains(&"sub/zz.txt".to_string()),
             ".kodenignore'd child must not enter the index even when the subtree walk over-yields it"
         );
+    }
+
+    /// Parallel first-index determinism: indexing the SAME fixture into two
+    /// fresh stores yields identical derived content — fingerprint (path+hash
+    /// set), node keys, resolved edges, and search hit order — regardless of
+    /// worker completion order (the sequence-numbered apply is the guarantee).
+    #[test]
+    fn parallel_index_dir_is_deterministic() {
+        let work = tempfile::tempdir().unwrap();
+        let root = work.path();
+        // Enough files to actually fan out over every worker, with real parse
+        // targets and an in-project import chain so nodes + edges are exercised.
+        // Deliberately > 2×PAR_MAX_LEAD so compute workers cross the lead cap
+        // and the wait/notify handshake is exercised (deadlock regression).
+        for i in 0..80usize {
+            let dir = root.join(format!("m{}", i % 5));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("f{i:02}.ts")),
+                format!(
+                    "import {{ f{prev:02} }} from './f{prev:02}';\n\
+                     export function f{i:02}() {{ return {i}; }}\n",
+                    prev = i.saturating_sub(1)
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("lib.rs"), "pub fn rustSide() -> u8 { 7 }").unwrap();
+
+        let s1 = tempfile::tempdir().unwrap();
+        let s2 = tempfile::tempdir().unwrap();
+        let i1 = SqliteIndex::open(&s1.path().join("a.sqlite")).unwrap();
+        let i2 = SqliteIndex::open(&s2.path().join("b.sqlite")).unwrap();
+        let st1 = index_dir(&i1, "p", root);
+        let st2 = index_dir(&i2, "p", root);
+        assert_eq!(st1.indexed, 81);
+        assert_eq!(st2.indexed, 81);
+        assert_eq!(
+            i1.project_fingerprint("p").unwrap(),
+            i2.project_fingerprint("p").unwrap(),
+            "two first-index runs over the same tree must fingerprint identically"
+        );
+        assert_eq!(i1.project_node_keys("p").unwrap(), i2.project_node_keys("p").unwrap());
+        assert_eq!(i1.project_edges("p").unwrap(), i2.project_edges("p").unwrap());
+        use crate::modules::brain::store::SearchIndex as _;
+        let hits = |idx: &SqliteIndex, q: &str| -> Vec<String> {
+            idx.search(Some("p"), q, 10).unwrap().into_iter().map(|h| h.path).collect()
+        };
+        for q in ["f07", "rustside", "return"] {
+            assert_eq!(hits(&i1, q), hits(&i2, q), "hit ORDER must match for '{q}'");
+        }
+        // And a warm second pass over unchanged content is a full no-op set:
+        // same fingerprint, nothing pruned (the Unchanged fast-path kept them).
+        let warm = index_dir(&i1, "p", root);
+        assert_eq!(warm.pruned, 0);
+        assert_eq!(
+            i1.project_fingerprint("p").unwrap(),
+            i2.project_fingerprint("p").unwrap(),
+            "warm pass must not change derived state"
+        );
+    }
+
+    /// One bad file in a parallel batch (vanished before read / binary) must not
+    /// poison its neighbors: every readable text file still indexes, the binary
+    /// is excluded, and only positive absence feeds reconcile.
+    #[test]
+    fn error_file_in_batch_does_not_poison_others() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let root = work.path();
+        for i in 0..10usize {
+            std::fs::write(root.join(format!("ok{i}.ts")), format!("export const k{i} = {i};"))
+                .unwrap();
+        }
+        std::fs::write(root.join("blob.bin"), b"bin\x00ary").unwrap();
+        // A path the walk "saw" that is gone by read time → open() NotFound →
+        // Absent — positive evidence, safe to (not) index; must not poison others.
+        let ghost = root.join("ghost.ts");
+        let walked = walk::Walked {
+            files: {
+                let mut v: Vec<std::path::PathBuf> = (0..10)
+                    .map(|i| root.join(format!("ok{i}.ts")))
+                    .collect();
+                v.push(root.join("blob.bin"));
+                v.push(ghost.clone());
+                v
+            },
+            complete: true,
+        };
+        let stats = index_walked(&index, "p", root, walked);
+        assert_eq!(stats.indexed, 10, "all 10 good files index despite bad batch-mates");
+        let paths = index.existing_paths("p").unwrap();
+        assert_eq!(paths.len(), 10);
+        assert!(!paths.contains(&"blob.bin".to_string()), "binary excluded");
+        assert!(!paths.contains(&"ghost.ts".to_string()), "absent file never indexed");
+    }
+
+    /// Synthetic ~2k-file first-index wall-clock probe (debug build; relative
+    /// numbers only — the release SLA re-measure lives in the sweep step). Run:
+    /// `cargo test --lib bench_first_index_2k -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_first_index_2k() {
+        let work = tempfile::tempdir().unwrap();
+        let root = work.path();
+        for i in 0..2000usize {
+            let dir = root.join(format!("mod{:02}", i % 40));
+            std::fs::create_dir_all(&dir).unwrap();
+            // Realistic-ish TS: defs to parse, an in-project import, ~1 KB body.
+            let body = format!(
+                "import {{ helper{prev} }} from './file{prev:04}';\n\
+                 export interface Shape{i} {{ id: number; label: string; }}\n\
+                 export function helper{i}(input: Shape{i}): string {{\n\
+                     const normalized = input.label.trim().toLowerCase();\n\
+                     return `${{input.id}}:${{normalized}}`;\n\
+                 }}\n\
+                 export class Service{i} {{\n\
+                     private cache = new Map<number, string>();\n\
+                     resolve(shape: Shape{i}): string {{\n\
+                         const hit = this.cache.get(shape.id);\n\
+                         if (hit !== undefined) return hit;\n\
+                         const out = helper{i}(shape);\n\
+                         this.cache.set(shape.id, out);\n\
+                         return out;\n\
+                     }}\n\
+                 }}\n\
+                 // filler: {filler}\n",
+                prev = i.saturating_sub(1),
+                i = i,
+                filler = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(8),
+            );
+            std::fs::write(dir.join(format!("file{i:04}.ts")), body).unwrap();
+        }
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        let t0 = std::time::Instant::now();
+        let stats = index_dir(&index, "bench", root);
+        let elapsed = t0.elapsed();
+        println!("bench_first_index_2k: indexed {} files in {elapsed:?}", stats.indexed);
+        assert_eq!(stats.indexed, 2000);
     }
 
     /// ADR-010: a PARTIAL walk (scan cap hit / unreadable subtree) must never feed

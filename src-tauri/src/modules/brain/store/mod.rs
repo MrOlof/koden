@@ -18,6 +18,7 @@ pub use sqlite::{
     librarian_ledger_readonly,
     list_notes_readonly, list_notes_with_conn,
     list_proposals_readonly, open_readonly_snapshot, pending_proposals_readonly,
+    prepare_file, PreparedFile,
     project_fingerprint_readonly,
     project_fingerprint_with_conn,
     project_temporal_digest_with_conn, search_readonly, search_with_conn, search_with_weights,
