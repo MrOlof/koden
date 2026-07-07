@@ -22,6 +22,7 @@ use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::reflect::{
     reflect_with_client, ReflectConfig, ReflectReason, ReflectClient, ReflectResponse,
 };
+use koden_lib::modules::brain::ast::ImpactDirection;
 use koden_lib::modules::brain::resume::{record_event, recover_all, ResumeRecord, SessionKey};
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, graph_readonly, list_proposals_readonly,
@@ -118,7 +119,9 @@ fn run_all(root: &Path) -> Report {
     let db = store.join("index.sqlite");
     let syms = get_symbol_readonly(&db, PID, "loginHandler").unwrap_or_default();
     r.check("AST symbol", syms.iter().any(|s| s.path.ends_with("login.ts")), format!("{} def site(s)", syms.len()));
-    let impact = code_impact_readonly(&db, PID, "loginHandler", 5).unwrap_or_default();
+    let impact =
+        code_impact_readonly(&db, PID, "loginHandler", 5, ImpactDirection::Upstream, 200, false)
+            .unwrap_or_default();
     r.check("code impact", impact.ast_dependents.iter().any(|p| p.ends_with("session.ts")),
         format!("dependents: {:?}", impact.ast_dependents));
 
@@ -254,7 +257,11 @@ fn main() {
             let idx = open(&store);
             index_dir(&idx, PID, &root);
             let sym = args.get(3).cloned().unwrap_or_default();
-            let i = code_impact_readonly(&store.join("index.sqlite"), PID, &sym, 5).unwrap_or_default();
+            let i = code_impact_readonly(
+                &store.join("index.sqlite"), PID, &sym, 5,
+                ImpactDirection::Upstream, 200, false,
+            )
+            .unwrap_or_default();
             println!("{sym}: defined_in={:?}\n  ast_dependents={:?}\n  lexical={:?}", i.defined_in, i.ast_dependents, i.lexical_candidates);
         }
         other => {
