@@ -149,8 +149,15 @@ fn build_gist_on_conn(
     // Both retrieval legs run up-front so the known-unknowns section can name
     // exactly which came back empty (ADR-011). (`notes` already fetched above —
     // the overdue-set digest in the cache key derives from it.)
+    // Test paths are excluded (gauntlet S2 `no-test-exclusion-in-gist-search`):
+    // the gist's MAX_FILES budget is agent-facing PRODUCTION context — the
+    // plan.rs `exclude_tests` rationale ("planning wants the production blast
+    // radius") applied to the file list, where tests/fixtures otherwise
+    // lexically outrank the code they exercise and spend the whole budget.
     let hits = conn
-        .and_then(|c| store::search_with_conn(c, Some(project_id), intent, MAX_FILES).ok())
+        .and_then(|c| {
+            store::search_excluding_tests_with_conn(c, Some(project_id), intent, MAX_FILES).ok()
+        })
         .unwrap_or_default();
 
     // Known-unknowns (ADR-011): an empty retrieval leg is stated explicitly so an

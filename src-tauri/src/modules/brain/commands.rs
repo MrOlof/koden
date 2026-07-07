@@ -156,25 +156,36 @@ pub async fn brain_index_status(state: State<'_, BrainState>) -> Result<BrainSta
 }
 
 /// Lexical (BM25 + weighted RRF) search across code (and, from P1, notes).
-/// `project = None` searches every registered project.
+/// `project = None` searches every registered project. `exclude_tests` (default
+/// false — interactive search is unchanged) drops conventional test paths
+/// BEFORE the limit cut, mirroring the `brain_code_impact` knob.
 #[tauri::command]
 pub async fn brain_search(
     state: State<'_, BrainState>,
     project: Option<String>,
     query: String,
     limit: Option<usize>,
+    exclude_tests: Option<bool>,
 ) -> Result<Vec<Hit>, String> {
     // Fail-open: not-ready brain → empty, not an error.
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
         return Ok(Vec::new());
     };
     let limit = limit.unwrap_or(20).clamp(1, 200);
-    blocking(move || match store::search_readonly(&db, project.as_deref(), &query, limit) {
-        Ok(hits) => hits,
-        // A missing/locked DB during warmup is not a user error.
-        Err(e) => {
-            log::debug!("brain_search soft error: {e}");
-            Vec::new()
+    let exclude_tests = exclude_tests.unwrap_or(false);
+    blocking(move || {
+        let res = if exclude_tests {
+            store::search_readonly_excluding_tests(&db, project.as_deref(), &query, limit)
+        } else {
+            store::search_readonly(&db, project.as_deref(), &query, limit)
+        };
+        match res {
+            Ok(hits) => hits,
+            // A missing/locked DB during warmup is not a user error.
+            Err(e) => {
+                log::debug!("brain_search soft error: {e}");
+                Vec::new()
+            }
         }
     })
     .await

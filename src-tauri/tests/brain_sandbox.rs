@@ -572,6 +572,43 @@ fn gist_known_unknowns_names_empty_legs() {
     assert!(!g3.bytes.contains("Known unknowns"), "all legs hit → no section: {}", g3.bytes);
 }
 
+/// Regression (gauntlet S2 `no-test-exclusion-in-gist-search`): the gist's
+/// "Relevant files" budget is agent-facing PRODUCTION context — test/fixture
+/// files that lexically outrank the code they exercise must not spend it
+/// (observed: 4 of the top 5 gist files for "pem redaction secrets gate" were
+/// tests/*.rs). Negative control: interactive search still surfaces the test
+/// file — the exclusion is scoped to the gist path, not ranking generally.
+#[test]
+fn gist_relevant_files_exclude_test_paths() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    // The test file matches "login" in path + symbols + content, so it outranks
+    // the production file — the S2 defect shape.
+    write(root, "tests/login.test.ts", b"// login spec: login login\nexport function loginSpec() {}");
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+
+    // Negative control: the plain search path still sees the test file.
+    let hits = idx.search(Some(PID), "login", 10).expect("search");
+    assert!(
+        hits.iter().any(|h| h.path == "tests/login.test.ts"),
+        "control: interactive search must keep test files: {hits:?}"
+    );
+
+    let g = build_gist(&db, PID, "proj", "login", 800);
+    assert!(g.bytes.contains("## Relevant files"), "{}", g.bytes);
+    assert!(g.bytes.contains("src/auth/login.ts"), "production file must render: {}", g.bytes);
+    assert!(!g.bytes.contains("login.test.ts"), "test file spent the gist budget: {}", g.bytes);
+    assert!(!g.sources.iter().any(|s| s.contains("login.test.ts")), "{:?}", g.sources);
+    // Byte-identity gate still holds with the filter in the pipeline.
+    let g2 = build_gist(&db, PID, "proj", "login", 800);
+    assert_eq!(g.bytes, g2.bytes);
+    assert_eq!(g.fingerprint, g2.fingerprint);
+}
+
 /// Regression (gauntlet S9 `secret-intent-echoed-to-gist`): a secret-shaped USER
 /// INTENT must not be echoed into the gist or persisted to the agent prompt
 /// file. The intent is the one gist input that is not index-derived; a pasted

@@ -58,7 +58,14 @@
 ///     `temporal_boost_bounded_probe_matches_full_scan`); the bump exists for the
 ///     DDL change — `code_imports` is DERIVED, so the upgrade drop/rebuild
 ///     backfills `base`. Key rotation side effect as per the v6 note.
-pub const SCHEMA_VERSION: i64 = 13;
+/// v14: no DDL change — gist SELECTION semantics changed (gauntlet S2
+///     `no-test-exclusion-in-gist-search`): conventional test paths
+///     (`is_test_path`, the code_impact `exclude_tests` idiom) are now excluded
+///     from the gist's "Relevant files" budget. As with v12, the bump rotates
+///     every gist cache key so one key never mixes pre- and post-filter bytes
+///     (the byte-identity gate holds per key) — one-time post-upgrade
+///     agent-prompt-cache miss, expected.
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Idempotent base DDL (safe to run on every open).
 pub const DDL: &str = r#"

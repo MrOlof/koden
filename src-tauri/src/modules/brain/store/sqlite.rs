@@ -1537,6 +1537,33 @@ pub fn search_with_conn(
     search_with_weights(conn, project, query, limit, &SearchWeights::default())
 }
 
+/// [search_with_conn] with conventional test paths excluded — the code_impact
+/// `exclude_tests` knob (see [is_test_path]) applied to the SEARCH path
+/// (gauntlet S2 `no-test-exclusion-in-gist-search`). Test rows are dropped
+/// BEFORE the limit cut, so an agent-facing consumer (the gist's "Relevant
+/// files" budget) still receives up to `limit` PRODUCTION hits instead of
+/// spending its file budget on tests/fixtures that lexically outrank them.
+pub fn search_excluding_tests_with_conn(
+    conn: &Connection,
+    project: Option<&str>,
+    query: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<Hit>> {
+    search_core(conn, project, query, limit, &SearchWeights::default(), true)
+}
+
+/// [search_readonly] with conventional test paths excluded — the fresh-r/o-
+/// connection twin of [search_excluding_tests_with_conn] (command-thread path).
+pub fn search_readonly_excluding_tests(
+    db_path: &Path,
+    project: Option<&str>,
+    query: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<Hit>> {
+    let conn = open_readonly(db_path)?;
+    search_excluding_tests_with_conn(&conn, project, query, limit)
+}
+
 /// Core hybrid search with EXPLICIT weights (the calibration seam). Identical to
 /// `search_with_conn` when given `SearchWeights::default()` — proven by
 /// `search_with_weights_defaults_equal_search_with_conn`.
@@ -1546,6 +1573,23 @@ pub fn search_with_weights(
     query: &str,
     limit: usize,
     w: &SearchWeights,
+) -> rusqlite::Result<Vec<Hit>> {
+    search_core(conn, project, query, limit, w, false)
+}
+
+/// The ONE ranked-retrieval pipeline behind every search entry point.
+/// `exclude_tests` applies [is_test_path] AFTER fusion/re-ranks but BEFORE the
+/// limit cut (the same filter point as code_impact's rows), drawing replacements
+/// from the per-leg overfetch pool — `false` is byte-identical to the historical
+/// behavior. Deterministic either way (pure filter over an ordered list), so the
+/// gist byte-identity gate is preserved.
+fn search_core(
+    conn: &Connection,
+    project: Option<&str>,
+    query: &str,
+    limit: usize,
+    w: &SearchWeights,
+    exclude_tests: bool,
 ) -> rusqlite::Result<Vec<Hit>> {
     let q_tokens = query_tokens(query);
     if q_tokens.is_empty() {
@@ -1593,7 +1637,6 @@ pub fn search_with_weights(
 
     let hits = fused
         .into_iter()
-        .take(limit)
         .filter_map(|(id, score)| {
             id.split_once('\u{0}').map(|(proj, path)| Hit {
                 project: proj.to_string(),
@@ -1601,6 +1644,8 @@ pub fn search_with_weights(
                 score,
             })
         })
+        .filter(|h| !exclude_tests || !is_test_path(&h.path))
+        .take(limit)
         .collect();
     Ok(hits)
 }
@@ -3011,6 +3056,47 @@ mod tests {
             !f.lexical_candidates.contains(&"tests/lex.ts".to_string()),
             "lexical tier is filtered too: {:?}",
             f.lexical_candidates
+        );
+    }
+
+    /// Regression (gauntlet S2 `no-test-exclusion-in-gist-search`): the search
+    /// path carries the same `exclude_tests` knob as code_impact. Test-convention
+    /// rows are dropped BEFORE the limit cut, so a capped agent-facing consumer
+    /// (the gist's MAX_FILES budget) gets a FULL budget of production hits even
+    /// when tests lexically outrank them. Negative control: the default path is
+    /// unchanged and still surfaces the test files.
+    #[test]
+    fn search_excluding_tests_drops_test_paths_before_the_limit_cut() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        // The test files match "redaction gate" in PATH + SYMBOLS + content — they
+        // outrank the content-only production files (the observed S2 shape, where
+        // tests/*.rs took 4 of the gist's top 5 slots).
+        idx.index_file("p", "tests/redaction_gate.rs", "fn redaction_gate() { /* redaction gate */ }", "t1", 44).unwrap();
+        idx.index_file("p", "src/gate.test.ts", "export const redactionGate = 1; // redaction gate", "t2", 49).unwrap();
+        idx.index_file("p", "src/secrets.rs", "// the redaction gate lives here", "p1", 32).unwrap();
+        idx.index_file("p", "src/scan.rs", "// feeds the redaction gate", "p2", 27).unwrap();
+
+        // Negative control: knob OFF — the defect shape (a test file at rank 1,
+        // tests inside the cut) is really present, and behavior is unchanged.
+        let all = search_with_conn(&idx.conn, Some("p"), "redaction gate", 2).unwrap();
+        assert!(is_test_path(&all[0].path), "control: a test file should outrank: {all:?}");
+
+        // Knob ON with the SAME limit: zero test paths AND a still-full budget —
+        // both production files, proving the filter runs before the cut (a
+        // post-cut filter would return fewer than `limit` hits here).
+        let prod = search_excluding_tests_with_conn(&idx.conn, Some("p"), "redaction gate", 2).unwrap();
+        assert_eq!(prod.len(), 2, "budget must stay full: {prod:?}");
+        assert!(prod.iter().all(|h| !is_test_path(&h.path)), "test path leaked: {prod:?}");
+        let mut got: Vec<&str> = prod.iter().map(|h| h.path.as_str()).collect();
+        got.sort();
+        assert_eq!(got, vec!["src/scan.rs", "src/secrets.rs"]);
+
+        // Deterministic (the gist byte-identity gate rides on this).
+        let again = search_excluding_tests_with_conn(&idx.conn, Some("p"), "redaction gate", 2).unwrap();
+        assert_eq!(
+            prod.iter().map(|h| (&h.path, h.score)).collect::<Vec<_>>(),
+            again.iter().map(|h| (&h.path, h.score)).collect::<Vec<_>>(),
         );
     }
 
