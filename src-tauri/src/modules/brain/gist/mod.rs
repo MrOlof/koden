@@ -279,8 +279,19 @@ fn iso_date_to_epoch_ms(s: &str) -> Option<i64> {
 
 /// Deterministic bounded excerpt of the intent for the known-unknowns line —
 /// synthesized cold-start intents (project name + note titles) can run long.
+///
+/// Secret-safe (the module contract above): the intent is the ONE gist input
+/// that is not index-derived, so it must be redacted at RENDER time — a pasted
+/// secret never matches the (pre-redacted) index, which makes it reliably take
+/// exactly this no-hits path and, unredacted, land verbatim in the persisted
+/// agent prompt file. Redaction runs BEFORE truncation so a cut can't split a
+/// token past detector recognition. `secrets::redact` is a deterministic pure
+/// function, so byte-identity holds; the cache key still folds the RAW intent
+/// (key/byte consistency is preserved — same raw intent → same key → same
+/// redacted bytes).
 fn intent_excerpt(intent: &str) -> String {
-    let t = intent.trim();
+    let (redacted, _) = crate::modules::brain::secrets::redact(intent);
+    let t = redacted.trim();
     if t.chars().count() <= EXCERPT_CHARS {
         return t.to_string();
     }
@@ -354,5 +365,30 @@ mod tests {
         assert!(e.chars().count() <= super::EXCERPT_CHARS + 1, "bounded: {}", e.len());
         assert!(e.ends_with('…'));
         assert_eq!(intent_excerpt(&long), e, "deterministic");
+    }
+
+    /// Regression (gauntlet S9 `secret-intent-echoed-to-gist`): a secret-shaped
+    /// intent must NOT survive into the rendered excerpt — it reliably takes the
+    /// known-unknowns no-hits path and would otherwise persist verbatim to the
+    /// agent prompt file. Redaction must run BEFORE truncation (a probe placed
+    /// past the cut must still be caught by whole-intent redaction), and benign
+    /// intents must pass through untouched (no over-redaction).
+    #[test]
+    fn intent_excerpt_redacts_secret_shaped_intent() {
+        let probe = "sk-ProbeEcho991Zx8Kt5Rm7Vb4Np2Cj6L";
+        let e = intent_excerpt(&format!("why does auth fail with {probe}?"));
+        assert!(!e.contains(probe), "secret echoed into excerpt: {e}");
+        assert!(e.contains("REDACTED"), "redaction marker missing: {e}");
+        // Redact-before-truncate: the secret STRADDLES the EXCERPT_CHARS cut. A
+        // truncate-first implementation would clip the token mid-shape, leaving a
+        // partial prefix too short for the detector — and leak it. Whole-intent
+        // redaction (then truncation) never renders any byte of the token.
+        let pad = "p".repeat(super::EXCERPT_CHARS - 10);
+        let straddling = format!("{pad} {probe}");
+        let e2 = intent_excerpt(&straddling);
+        assert!(!e2.contains("sk-Probe"), "truncation leaked a secret prefix: {e2}");
+        // Deterministic (byte-identity gate) and no over-redaction of benign text.
+        assert_eq!(intent_excerpt(&straddling), e2);
+        assert_eq!(intent_excerpt("stripe checkout flow"), "stripe checkout flow");
     }
 }

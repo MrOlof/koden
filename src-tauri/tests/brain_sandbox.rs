@@ -572,6 +572,50 @@ fn gist_known_unknowns_names_empty_legs() {
     assert!(!g3.bytes.contains("Known unknowns"), "all legs hit → no section: {}", g3.bytes);
 }
 
+/// Regression (gauntlet S9 `secret-intent-echoed-to-gist`): a secret-shaped USER
+/// INTENT must not be echoed into the gist or persisted to the agent prompt
+/// file. The intent is the one gist input that is not index-derived; a pasted
+/// secret never matches the (pre-redacted) index, so it RELIABLY takes the
+/// known-unknowns "No code hits" path — which previously rendered it verbatim
+/// via `intent_excerpt` and `write_gist` landed it on disk, violating the
+/// module's secret-safe contract. Negative control: a benign no-hit intent is
+/// still echoed intact (no over-redaction of the absence claim).
+#[test]
+fn gist_secret_shaped_intent_not_echoed() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "src/auth/login.ts", b"export function loginHandler() {}");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+
+    let probe = "sk-ProbeEcho991Zx8Kt5Rm7Vb4Np2Cj6L";
+    let g1 = build_gist(&db, PID, "proj", probe, 2000);
+    assert!(g1.bytes.contains("No code hits for"), "probe must take the no-hits path: {}", g1.bytes);
+    assert!(!g1.bytes.contains(probe), "secret intent echoed into gist: {}", g1.bytes);
+    assert!(g1.bytes.contains("REDACTED"), "redaction marker missing: {}", g1.bytes);
+    // Byte-identity gate unmoved: redaction is deterministic per cache key.
+    let g2 = build_gist(&db, PID, "proj", probe, 2000);
+    assert_eq!(g1.bytes, g2.bytes, "redacted gist must stay byte-identical");
+    assert_eq!(g1.fingerprint, g2.fingerprint);
+
+    // The persisted agent prompt file must be clean too (the disk half of S9).
+    let out = store.path().join("agent-echo.txt");
+    let gw = write_gist(&db, PID, "proj", probe, 2000, &out).unwrap();
+    let on_disk = std::fs::read_to_string(&out).unwrap();
+    assert!(!gw.bytes.contains(probe) && !on_disk.contains(probe), "secret persisted: {on_disk}");
+
+    // NEGATIVE CONTROL: a benign no-hit intent still renders verbatim.
+    let gb = build_gist(&db, PID, "proj", "quantumflux telemetry", 2000);
+    assert!(
+        gb.bytes.contains("- No code hits for \"quantumflux telemetry\"."),
+        "benign intent over-redacted: {}",
+        gb.bytes
+    );
+    assert!(!gb.bytes.contains("REDACTED"), "benign intent must not be redacted: {}", gb.bytes);
+}
+
 /// ADR-011 gist upgrade 2 (per-claim freshness labels): a note whose ANCHORED
 /// file content-changed after the note's `created` date is marked possibly-stale;
 /// supersession edges (either direction) mark historical(superseded); everything
