@@ -11,6 +11,11 @@
 //!   cargo run --example brain_cli -- gist   <dir> <intent…>
 //!   cargo run --example brain_cli -- doctor <dir>
 //!   cargo run --example brain_cli -- impact <dir> <symbol>
+//!   cargo run --example brain_cli -- watch  <dir> <store>   # arm the REAL watcher; index deltas until <store>/STOP exists
+//!   cargo run --example brain_cli -- query  <store> <query…> # search an existing store (no reindex — cross-process reads)
+//!   cargo run --example brain_cli -- reflect-hang <dir> <store>  # $0 Librarian round that HANGS inside the LLM call (crash-sim kill window)
+//!   cargo run --example brain_cli -- sweep <store>               # the boot sweep (worker brain_loop step): fold orphaned reservations
+//!   cargo run --example brain_cli -- reflect-live <dir> <store> <ceiling-usd>  # ONE real paid Librarian round behind the budget/delta/reject gates
 //!
 //! `all` exits 0 only if every check passes — a real end-to-end smoke.
 
@@ -28,9 +33,318 @@ use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, graph_readonly, list_proposals_readonly,
     search_readonly, semantic_meta_readonly, SqliteIndex,
 };
-use koden_lib::modules::brain::worker::index_dir;
+use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
 const PID: &str = "cli";
+
+/// `watch <dir> <store>` — the live-context-engine loop as a real PROCESS:
+/// arm the REAL recursive watcher (freshness::watch::spawn) over `dir`, warm-index,
+/// then dispatch coalesced `BrainEvent`s to the real worker fns (`Fs` →
+/// `index_changed`, `Rescan` → `index_dir`), printing one line per pass (the
+/// observable coalescing counter). Exits when `<store>/STOP` appears.
+fn run_watch(root: &Path, store: &Path) {
+    use koden_lib::modules::brain::events::BrainEvent;
+    use koden_lib::modules::brain::freshness::watch;
+    use koden_lib::modules::fs::to_canon;
+    use std::io::Write as _;
+
+    let idx = open(store);
+    let canon = to_canon(std::fs::canonicalize(root).expect("canonicalize root"));
+    let (tx, rx) = std::sync::mpsc::channel::<BrainEvent>();
+    // Arm BEFORE the warm walk, exactly like brain_loop step 6.
+    let watcher = watch::spawn(vec![(PID.to_string(), canon)], tx);
+    if watcher.is_none() {
+        eprintln!("FATAL: watcher failed to arm");
+        std::process::exit(1);
+    }
+    let stats = index_dir(&idx, PID, root);
+    let notes = scan_project_memory(&idx, PID, root);
+    println!("READY indexed={} pruned={} notes={notes}", stats.indexed, stats.pruned);
+    let _ = std::io::stdout().flush();
+    let stop = store.join("STOP");
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            Ok(BrainEvent::Fs { project, changed }) if project == PID => {
+                let s = index_changed(&idx, PID, root, &changed);
+                println!("FS paths={} indexed={} pruned={}", changed.len(), s.indexed, s.pruned);
+            }
+            Ok(BrainEvent::Rescan { .. }) => {
+                let s = index_dir(&idx, PID, root);
+                println!("RESCAN indexed={} pruned={}", s.indexed, s.pruned);
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        let _ = std::io::stdout().flush();
+        if stop.exists() {
+            break;
+        }
+    }
+    drop(watcher);
+    println!("STOPPED");
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// A ReflectClient that announces the call then HANGS — giving a crash sim a
+/// deterministic kill window BETWEEN the durable budget reservation (committed
+/// before `complete` is invoked) and the reconcile/proposal write after it.
+struct HangLlm;
+impl ReflectClient for HangLlm {
+    fn complete(&self, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<ReflectResponse, String> {
+        use std::io::Write as _;
+        println!("LLM_CALL_STARTED");
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        Ok(ReflectResponse {
+            json_text: r#"{"proposals":[]}"#.into(),
+            input_tokens: 1,
+            output_tokens: 1,
+        })
+    }
+}
+
+/// `reflect-hang <dir> <store>` — index + scan notes, set a $1 ceiling via the
+/// real budget path, then run the REAL reflect pipeline with [HangLlm]. The
+/// reservation row commits, LLM_CALL_STARTED prints, and the process sits inside
+/// the "network call" until it is killed (or 300 s pass).
+fn run_reflect_hang(root: &Path, store: &Path) {
+    use std::io::Write as _;
+    let idx = open(store);
+    let s = index_dir(&idx, PID, root);
+    let notes = scan_project_memory(&idx, PID, root);
+    println!("INDEXED {} NOTES {notes}", s.indexed);
+    let _ = std::io::stdout().flush();
+    idx.set_budget_ceiling(1.0, now_ms()).expect("set ceiling");
+    let out = reflect_with_client(&idx, &HangLlm, &ReflectConfig::default(), PID, None, now_ms());
+    // Only reached if nobody killed us.
+    println!("REFLECT_DONE reason={:?} spent={:.6}", out.reason, out.spent_usd);
+}
+
+/// `sweep <store>` — exactly what the GUI worker does at boot (worker.rs
+/// brain_loop): charge any orphaned 'reserved' ledger row at its estimate.
+fn run_sweep(store: &Path) {
+    let idx = open(store);
+    match idx.sweep_orphaned_reservations(now_ms()) {
+        Ok(n) => println!("SWEPT {n}"),
+        Err(e) => {
+            eprintln!("SWEEP_ERR {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `reflect-live <dir> <store> <ceiling>` — ONE real paid Librarian round against
+/// the configured provider (fresh-store default: Anthropic Haiku), driven through
+/// the same gates the autonomous path uses. The key is read from the app's OWN
+/// location (keyring service `koden-ai`, per-provider account — the exact path
+/// `secrets::read_secret` takes on Windows/macOS) and is NEVER printed.
+/// Exit codes: 0 = all gates behaved; 3 = no key (blocked); 4 = a gate misfired;
+/// 5 = the paid round itself did not return Ok.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
+    use std::cell::RefCell;
+
+    use koden_lib::modules::brain::memory::proposal::reject_signature;
+    use koden_lib::modules::brain::reflect::{
+        librarian, llm::AnthropicClient, reflect_auto_with_client, ReflectReason, KEYRING_SERVICE,
+    };
+
+    let mut failed = false;
+    let mut gate = |name: &str, ok: bool, detail: String| {
+        println!("{name} {} {detail}", if ok { "pass" } else { "FAIL" });
+        if !ok {
+            failed = true;
+        }
+    };
+
+    // Fresh stores seed brain_librarian to the Anthropic Haiku default; use the
+    // same ReflectConfig::default() (identical values) for rates + model.
+    let cfg = ReflectConfig::default();
+    let account = librarian::keyring_account_for(&cfg.provider);
+    let key = keyring::Entry::new(KEYRING_SERVICE, account)
+        .ok()
+        .and_then(|e| e.get_password().ok())
+        .filter(|k| !k.is_empty());
+    let Some(key) = key else {
+        println!("KEY absent service={KEYRING_SERVICE} account={account}");
+        std::process::exit(3);
+    };
+    println!("KEY present provider={} model={}", cfg.provider, cfg.model);
+
+    let idx = open(store);
+    let s = index_dir(&idx, PID, root);
+    let notes = scan_project_memory(&idx, PID, root);
+    println!("INDEXED {} NOTES {notes}", s.indexed);
+
+    /// Real Anthropic client + a tap that records whether/what the provider
+    /// actually returned — the observable for "this gate made NO network call".
+    struct Recording {
+        inner: AnthropicClient,
+        last: RefCell<Option<String>>,
+    }
+    impl ReflectClient for Recording {
+        fn complete(&self, m: &str, s: &str, u: &str, t: u32) -> Result<ReflectResponse, String> {
+            let r = self.inner.complete(m, s, u, t)?;
+            *self.last.borrow_mut() = Some(r.json_text.clone());
+            Ok(r)
+        }
+    }
+    let client = Recording { inner: AnthropicClient::new(key), last: RefCell::new(None) };
+
+    // GATE 1 — pre-flight budget gate: fresh store ceiling = 0.0 → Disabled,
+    // $0, and the provider is NEVER contacted.
+    let (g1, _) = reflect_auto_with_client(&idx, &client, &cfg, PID, None, now_ms(), None);
+    gate(
+        "GATE1_DISABLED",
+        matches!(g1.reason, ReflectReason::Disabled)
+            && g1.spent_usd == 0.0
+            && client.last.borrow().is_none(),
+        format!("reason={:?} spent={:.6}", g1.reason, g1.spent_usd),
+    );
+
+    // Arm the budget via the REAL path (same fn the settings command uses).
+    idx.set_budget_ceiling(ceiling, now_ms()).expect("set ceiling");
+    println!("CEILING {ceiling}");
+
+    // ROUND 1 — the ONE paid call.
+    let (r1, digest_hash) = reflect_auto_with_client(&idx, &client, &cfg, PID, None, now_ms(), None);
+    let round1_json = client.last.borrow().clone();
+    let (ceil_now, spent) = idx.budget_state();
+    println!(
+        "ROUND1 reason={:?} proposals={} spent={:.6} total_spent={:.6} ceiling={ceil_now}",
+        r1.reason,
+        r1.proposals.len(),
+        r1.spent_usd,
+        spent
+    );
+    for p in &r1.proposals {
+        println!("P1 action={} sig={} title={}", p.action.as_str(), p.signature, p.title);
+    }
+    if !matches!(r1.reason, ReflectReason::Ok) {
+        println!("S11_ABORT round1 did not return Ok");
+        std::process::exit(5);
+    }
+
+    // GATE 2 — delta gate: byte-identical digest → Unchanged, $0, no call.
+    *client.last.borrow_mut() = None;
+    let (g2, _) =
+        reflect_auto_with_client(&idx, &client, &cfg, PID, None, now_ms(), digest_hash.as_deref());
+    gate(
+        "GATE2_UNCHANGED",
+        matches!(g2.reason, ReflectReason::Unchanged)
+            && g2.spent_usd == 0.0
+            && client.last.borrow().is_none(),
+        format!("reason={:?} spent={:.6}", g2.reason, g2.spent_usd),
+    );
+
+    // GATE 3 — ceiling gate: lower the ceiling to exactly what's spent →
+    // OverBudget rejected in the reserve txn, BEFORE any network I/O.
+    idx.set_budget_ceiling(spent, now_ms()).expect("lower ceiling");
+    let (g3, _) = reflect_auto_with_client(&idx, &client, &cfg, PID, None, now_ms(), None);
+    gate(
+        "GATE3_OVERBUDGET",
+        matches!(g3.reason, ReflectReason::OverBudget)
+            && g3.spent_usd == 0.0
+            && client.last.borrow().is_none(),
+        format!("reason={:?} spent={:.6}", g3.reason, g3.spent_usd),
+    );
+    idx.set_budget_ceiling(ceiling, now_ms()).expect("restore ceiling");
+
+    // GATE 4 — reject-signature gate, $0 (free-rate replay config, no network).
+    // The reject signature normalizes the title (djb2 of scope|action|lowercased
+    // title) while the queue PK is the exact-title join — so a CASE-FLIPPED
+    // resubmission dodges the PK dedup and can ONLY be stopped by the reject gate.
+    if let Some(p0) = r1.proposals.first() {
+        struct Replay(String);
+        impl ReflectClient for Replay {
+            fn complete(&self, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<ReflectResponse, String> {
+                Ok(ReflectResponse { json_text: self.0.clone(), input_tokens: 1, output_tokens: 1 })
+            }
+        }
+        let free = ReflectConfig {
+            model: "replay-control".into(),
+            in_rate: 0.0,
+            out_rate: 0.0,
+            ..ReflectConfig::default()
+        };
+        let kind = match p0.action.as_str() {
+            "create" => "insight",
+            "archive" => "stale",
+            _ => "conflict", // update; supersede never originates from reflect
+        };
+        let item = |title: &str| {
+            serde_json::json!({"proposals":[{"kind":kind,"title":title,"detail":"reject-sig control","scope":"project","confidence":"high"}]})
+                .to_string()
+        };
+        let flipped: String = p0
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_lowercase() {
+                    c.to_uppercase().next().unwrap_or(c)
+                } else {
+                    c.to_lowercase().next().unwrap_or(c)
+                }
+            })
+            .collect();
+        if flipped == p0.title {
+            println!("GATE4_SKIPPED title has no case to flip");
+        } else {
+            // Negative control FIRST: an unrelated title enqueues fine, proving
+            // the replay path can insert at all.
+            let neg = reflect_with_client(
+                &idx,
+                &Replay(item("Unrelated control proposal zk9q")),
+                &free,
+                PID,
+                None,
+                now_ms(),
+            );
+            gate(
+                "GATE4_NEG_ENQUEUES",
+                matches!(neg.reason, ReflectReason::Ok) && neg.proposals.len() == 1 && neg.spent_usd == 0.0,
+                format!("reason={:?} props={} spent={:.6}", neg.reason, neg.proposals.len(), neg.spent_usd),
+            );
+            // Reject round-1's first proposal through the REAL resolve path.
+            idx.resolve_proposal(PID, &p0.signature, true).expect("reject proposal");
+            let rej = reject_signature(p0.action, p0.target_id.as_deref(), &p0.title);
+            gate(
+                "GATE4_SIG_PERSISTED",
+                idx.is_rejected(PID, &rej).unwrap_or(false),
+                format!("reject_sig={rej}"),
+            );
+            // The case-flipped resubmission must be swallowed by the reject gate.
+            let r2 = reflect_with_client(&idx, &Replay(item(&flipped)), &free, PID, None, now_ms());
+            gate(
+                "GATE4_REJECTSIG",
+                matches!(r2.reason, ReflectReason::Ok) && r2.proposals.is_empty() && r2.spent_usd == 0.0,
+                format!("reason={:?} props={} spent={:.6}", r2.reason, r2.proposals.len(), r2.spent_usd),
+            );
+        }
+    } else {
+        println!("GATE4_SKIPPED round1 returned no proposals");
+        let _ = round1_json; // kept for parity with the recording tap
+    }
+
+    let (_, final_spent) = idx.budget_state();
+    println!("S11_DONE final_spent={final_spent:.6}");
+    if failed {
+        std::process::exit(4);
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn run_reflect_live(_root: &Path, _store: &Path, _ceiling: f64) {
+    println!("KEY absent (no keyring backend on this target)");
+    std::process::exit(3);
+}
 
 /// A deterministic fake LLM so `reflect` runs offline / $0 — returns one proposal.
 struct FakeLlm;
@@ -92,7 +406,10 @@ impl Report {
 }
 
 fn open(store: &Path) -> SqliteIndex {
-    SqliteIndex::open(&store.join("index.sqlite")).expect("open store")
+    // Production parity: the GUI worker boots via `open_with_recovery` (ADR-010
+    // cluster 4 — BUSY retry + corrupt rename-aside + salvage), so the headless
+    // CLI must too, or a recovered-in-prod store bricks the CLI.
+    SqliteIndex::open_with_recovery(&store.join("index.sqlite")).expect("open store")
 }
 
 fn run_all(root: &Path) -> Report {
@@ -189,6 +506,63 @@ fn run_all(root: &Path) -> Report {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("all");
+
+    // Process-boundary subcommands with their own arg shapes.
+    match cmd {
+        "watch" => {
+            let (Some(dir), Some(store)) = (args.get(2), args.get(3)) else {
+                eprintln!("usage: brain_cli watch <dir> <store>");
+                std::process::exit(2);
+            };
+            run_watch(Path::new(dir), Path::new(store));
+            return;
+        }
+        "reflect-hang" => {
+            let (Some(dir), Some(store)) = (args.get(2), args.get(3)) else {
+                eprintln!("usage: brain_cli reflect-hang <dir> <store>");
+                std::process::exit(2);
+            };
+            run_reflect_hang(Path::new(dir), Path::new(store));
+            return;
+        }
+        "sweep" => {
+            let Some(store) = args.get(2) else {
+                eprintln!("usage: brain_cli sweep <store>");
+                std::process::exit(2);
+            };
+            run_sweep(Path::new(store));
+            return;
+        }
+        "reflect-live" => {
+            let (Some(dir), Some(store), Some(ceiling)) = (args.get(2), args.get(3), args.get(4))
+            else {
+                eprintln!("usage: brain_cli reflect-live <dir> <store> <ceiling-usd>");
+                std::process::exit(2);
+            };
+            let ceiling: f64 = ceiling.parse().expect("ceiling must be a number");
+            assert!(
+                ceiling > 0.0 && ceiling <= 1.0,
+                "sim guard: ceiling must be in (0, 1] USD"
+            );
+            run_reflect_live(Path::new(dir), Path::new(store), ceiling);
+            return;
+        }
+        "query" => {
+            let Some(store) = args.get(2) else {
+                eprintln!("usage: brain_cli query <store> <query…>");
+                std::process::exit(2);
+            };
+            let q = args[3..].join(" ");
+            let hits = search_readonly(&Path::new(store).join("index.sqlite"), Some(PID), &q, 20)
+                .unwrap_or_default();
+            for h in &hits {
+                println!("{:>7.3}  {}", h.score, h.path);
+            }
+            println!("HITS {}", hits.len());
+            return;
+        }
+        _ => {}
+    }
     // dir arg (optional for `all`); `all` with no dir uses the built-in fixture.
     let dir_arg = args.get(2).cloned();
 
