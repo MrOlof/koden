@@ -9,9 +9,13 @@
 //! still returns — fail-open, like every other command reader. Advisory
 //! `reason` vocabulary is closed: "index-unavailable" (a leg's read failed),
 //! "no-target" (impact skipped — no symbol given), "index-not-ready" (command
-//! layer, before the DB exists), or a `DetectedChanges::skipped_reason` class
+//! layer, before the DB exists), a `DetectedChanges::skipped_reason` class
 //! mirrored from the changes leg ("not-a-git-repo" | "git-not-available" |
-//! "git-error").
+//! "git-error"), or — when the search leg SUCCEEDS with zero hits — an
+//! empty-result explanation ("no-searchable-tokens" | "index-empty" |
+//! "matches-other-projects" | "no-token-match", see
+//! [`super::sqlite::explain_empty_search_readonly`]) so a planner knows
+//! whether to rephrase, wait, widen the scope, or accept the absence.
 
 use std::path::Path;
 
@@ -89,10 +93,21 @@ pub fn plan_context_readonly(
 ) -> PlanContext {
     let mut advisories = Vec::new();
 
-    // (a) Task-text search, capped.
+    // (a) Task-text search, capped. Zero hits is a SUCCESS the planner still
+    // needs explained — classify it so the agent's next move is informed
+    // (rephrase vs wait vs widen scope vs accept absence). Fallback class on a
+    // (rare) explain probe error: "no-token-match" — the generic honest one.
     let search_hits =
         match super::sqlite::search_readonly(db_path, Some(project), task, PLAN_SEARCH_CAP) {
-            Ok(hits) => hits,
+            Ok(hits) => {
+                if hits.is_empty() {
+                    let reason =
+                        super::sqlite::explain_empty_search_readonly(db_path, project, task)
+                            .unwrap_or("no-token-match");
+                    advisories.push(PlanAdvisory::new("search", reason));
+                }
+                hits
+            }
             Err(e) => {
                 log::debug!("plan_context search leg soft error: {e}");
                 advisories.push(PlanAdvisory::new("search", "index-unavailable"));

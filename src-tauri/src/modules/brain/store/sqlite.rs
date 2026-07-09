@@ -1905,6 +1905,38 @@ pub fn search_readonly(
     search_with_conn(&conn, project, query, limit)
 }
 
+/// Why did a PROJECT-scoped search return zero hits? Closed vocabulary, one
+/// class per distinct next-move an agent should take (adopted from NorrGit's
+/// explanatory empty results): "no-searchable-tokens" (the query tokenized to
+/// nothing — symbols/stopwords only → rephrase with identifiers),
+/// "index-empty" (the project has no indexed files yet → wait for indexing),
+/// "matches-other-projects" (the same query hits when unscoped → drop or fix
+/// the project filter), "no-token-match" (tokens are fine, nothing in this
+/// project matches any of them → the concept genuinely isn't here). Only ever
+/// called AFTER an empty result, so the extra unscoped probe (limit 1) is
+/// off the hot path.
+pub fn explain_empty_search_readonly(
+    db_path: &Path,
+    project: &str,
+    query: &str,
+) -> rusqlite::Result<&'static str> {
+    if query_tokens(query).is_empty() {
+        return Ok("no-searchable-tokens");
+    }
+    let conn = open_readonly(db_path)?;
+    let files: i64 =
+        conn.query_row("SELECT COUNT(*) FROM files WHERE project_id=?1", [project], |r| {
+            r.get(0)
+        })?;
+    if files == 0 {
+        return Ok("index-empty");
+    }
+    if !search_with_conn(&conn, None, query, 1)?.is_empty() {
+        return Ok("matches-other-projects");
+    }
+    Ok("no-token-match")
+}
+
 /// Project aggregate fingerprint over a caller-supplied connection (gist cache
 /// key). Use `*_with_conn` variants when several reads must share one snapshot.
 pub fn project_fingerprint_with_conn(conn: &Connection, project_id: &str) -> rusqlite::Result<String> {

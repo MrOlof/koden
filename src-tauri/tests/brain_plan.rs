@@ -143,6 +143,39 @@ fn git_backed_happy_path_has_no_advisories() {
     assert!(!got.search_hits.is_empty(), "'planner' matches indexed content");
 }
 
+/// An EMPTY-but-successful search leg is explained in `advisories` with the
+/// closed empty-result vocabulary — one class per distinct agent next-move.
+/// (The non-empty tests above are the negative control: no search advisory.)
+#[test]
+fn empty_search_leg_is_explained_by_class() {
+    if skip_if_no_git() {
+        return;
+    }
+    let (_store, db) = seeded_index();
+    let plain = tempfile::tempdir().expect("plain root");
+    let search_adv = |task: &str, project: &str| {
+        plan_context_readonly(&db, project, plain.path(), task, None)
+            .advisories
+            .into_iter()
+            .find(|a| a.subtool == "search")
+            .map(|a| a.reason)
+    };
+
+    // Tokens fine, concept absent from every project → the honest "not here".
+    assert_eq!(search_adv("zebrafish quantum blockchain", PID).as_deref(), Some("no-token-match"));
+    // Query tokenizes to nothing (symbols only) → rephrase with identifiers.
+    assert_eq!(search_adv("=== !!! ...", PID).as_deref(), Some("no-searchable-tokens"));
+    // Unknown project id: 0 files rows → the index-empty class, not no-match.
+    assert_eq!(search_adv("planner", "ghost-project").as_deref(), Some("index-empty"));
+    // Content exists — but only under ANOTHER project id → widen/fix the scope.
+    let idx = SqliteIndex::open(&db).expect("reopen index");
+    idx.index_file("other", "src/z.ts", "export const zzuniqtok = 1;\n", "src/z.ts", 30)
+        .expect("index_file");
+    assert_eq!(search_adv("zzuniqtok", PID).as_deref(), Some("matches-other-projects"));
+    // Negative control: a matching query carries NO search advisory.
+    assert_eq!(search_adv("planner", PID), None);
+}
+
 #[test]
 fn bundle_is_deterministic_across_runs() {
     if skip_if_no_git() {
