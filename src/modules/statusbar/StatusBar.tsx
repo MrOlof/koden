@@ -61,7 +61,7 @@ export function StatusBar({
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <AgentStatusPill onClick={onOpenMini} />
-        {/* The launcher moved to the header ("Koden AI" button); the status bar only
+        {/* The launcher moved to the header ("Koden" button); the status bar only
             shows the inline controls while the panel is open. */}
         {panelOpen && hasComposer ? <AiStatusBarControls /> : null}
       </div>

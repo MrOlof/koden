@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { resolveCssColorToHex } from "@/styles/tokens";
 import {
   ArrowDown01Icon,
   ArrowUp01Icon,
@@ -57,17 +58,30 @@ function loadInitialMode(): Mode {
   }
 }
 
-// Visible match highlight: a warm yellow wash for all matches and a stronger,
-// more saturated amber for the active match — mirrors the block-search accent
-// (rgba(255,193,84,…)) but as the #RRGGBB the SearchAddon decorations require.
-// The overview-ruler keys are mandatory in the addon's option type.
-const FIND_DECORATIONS = {
-  matchBackground: "#5a4a1f",
-  matchOverviewRuler: "#ffc154",
-  activeMatchBackground: "#d18616",
-  activeMatchBorder: "#ffc154",
-  activeMatchColorOverviewRuler: "#ffc154",
-} as const;
+// Visible match highlight: a muted wash for all matches and a stronger,
+// more saturated amber for the active match, both mixed from the SAME token
+// as the block-search accent (.bt-match's --terminal-ansi-yellow) so the two
+// "find in terminal" affordances read as one system. SearchAddon decorations
+// structurally require #RRGGBB (no CSS var support), so each is resolved at
+// call-time via resolveCssColorToHex instead of being pinned to a hardcoded
+// value that would go stale across theme switches.
+function findDecorations() {
+  const yellow = "var(--terminal-ansi-yellow)";
+  const bg = "var(--terminal-background)";
+  return {
+    matchBackground: resolveCssColorToHex(
+      `color-mix(in srgb, ${yellow} 35%, ${bg})`,
+      "#5a4a1f",
+    ),
+    matchOverviewRuler: resolveCssColorToHex(yellow, "#cfa964"),
+    activeMatchBackground: resolveCssColorToHex(
+      `color-mix(in srgb, ${yellow} 70%, ${bg})`,
+      "#d18616",
+    ),
+    activeMatchBorder: resolveCssColorToHex(yellow, "#cfa964"),
+    activeMatchColorOverviewRuler: resolveCssColorToHex(yellow, "#cfa964"),
+  } as const;
+}
 
 type Props = {
   /** The leaf whose command history this popover shows. */
@@ -285,7 +299,7 @@ function FindMode({ leafId }: { leafId: number }) {
       if (next) {
         addon.findNext(next, {
           incremental: true,
-          decorations: FIND_DECORATIONS,
+          decorations: findDecorations(),
         });
       } else {
         addon.clearDecorations();
@@ -298,7 +312,7 @@ function FindMode({ leafId }: { leafId: number }) {
   const step = useCallback(
     (forward: boolean) => {
       if (!addon || !query) return;
-      const opts = { decorations: FIND_DECORATIONS };
+      const opts = { decorations: findDecorations() };
       if (forward) addon.findNext(query, opts);
       else addon.findPrevious(query, opts);
       // Keep focus in the input while stepping with the arrow buttons.

@@ -219,11 +219,11 @@ export function Header({
         size="sm"
         variant="outline"
         onClick={openMini}
-        title="Koden Brain — chat about your code & projects"
+        title="Koden — chat about your code & projects"
         className="h-7 shrink-0 gap-1.5 rounded-md px-2 text-[12px]"
       >
         <HugeiconsIcon icon={Brain02Icon} size={14} strokeWidth={1.75} />
-        {compact ? null : "Koden Brain"}
+        {compact ? null : "Koden"}
       </Button>
 
       <SearchInline ref={searchRef} target={searchTarget} compact={compact} />

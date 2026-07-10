@@ -290,7 +290,7 @@ function Header({
       <div className="flex min-w-0 items-center gap-1.5">
         <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-semibold">
           <HugeiconsIcon icon={Brain02Icon} size={14} strokeWidth={1.75} />
-          Koden Brain
+          Koden
         </span>
         {messages !== undefined ? (
           <ContextIndicator messages={messages} />

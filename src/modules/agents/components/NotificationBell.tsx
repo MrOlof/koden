@@ -1,5 +1,11 @@
 import { Button } from "@/components/ui/button";
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+} from "@/components/ui/empty";
+import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -217,11 +223,18 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
         </div>
 
         {empty ? (
-          <div className="border-t border-border/60 px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
-            No agent activity yet.
-            <br />
-            Run the Koden agent or Claude Code to track it here.
-          </div>
+          <Empty className="border-t border-border/60 p-5">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <HugeiconsIcon icon={Notification01Icon} />
+              </EmptyMedia>
+              <EmptyDescription>
+                No agent activity yet.
+                <br />
+                Run the Koden agent or Claude Code to track it here.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : (
           <div className="max-h-80 overflow-y-auto border-t border-border/60 p-1">
             {localAgent ? (

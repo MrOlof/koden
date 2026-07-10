@@ -78,3 +78,26 @@ export function readTerminalTokens(): TerminalTokens {
   }
   return out;
 }
+
+function rgbToHex(css: string): string | null {
+  const m = css.match(/(\d+(?:\.\d+)?)/g);
+  if (!m || m.length < 3) return null;
+  const h = (n: string) =>
+    Math.max(0, Math.min(255, Math.round(Number(n))))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${h(m[0])}${h(m[1])}${h(m[2])}`;
+}
+
+// xterm decoration options (overviewRulerOptions.color, SearchAddon
+// decorations) structurally require literal #RRGGBB and can't take a CSS
+// var, so callers resolve a token (or a color-mix() expression built from
+// tokens) to hex at apply-time instead of inlining a value that goes stale
+// across theme switches. No-DOM guard so this stays a safe no-op in the
+// (document-less) unit test environment.
+export function resolveCssColorToHex(cssColor: string, fallback: string): string {
+  if (typeof document === "undefined") return fallback;
+  const el = getProbe();
+  el.style.color = cssColor;
+  return rgbToHex(getComputedStyle(el).color) ?? fallback;
+}

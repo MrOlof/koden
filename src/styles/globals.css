@@ -309,8 +309,8 @@ html[data-chrome="borderless"] #settings-root {
   white-space: nowrap;
 }
 .koden-link-badge-copy {
-  color: #fff;
-  background: var(--terminal-ansi-green, #22c55e);
+  color: var(--primary-foreground);
+  background: var(--terminal-ansi-green);
 }
 
 .cm-editor,

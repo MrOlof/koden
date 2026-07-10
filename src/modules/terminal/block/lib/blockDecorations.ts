@@ -2,6 +2,7 @@ import {
   createShellIntegrationState,
   registerCwdHandler,
 } from "@/modules/terminal/lib/osc-handlers";
+import { resolveCssColorToHex } from "@/styles/tokens";
 import type { IDecoration, IMarker, Terminal } from "@xterm/xterm";
 import { blockIndexAt, computeRange, type LineRange } from "./blockRange";
 import {
@@ -14,9 +15,17 @@ import {
 import { readRangeText } from "./readBlock";
 import type { BlockMeta } from "./types";
 
-const OK_RULER = "#5fb3b3";
-const FAIL_RULER = "#e5706b";
 const MAX_BLOCKS = 1000;
+
+// The overview-ruler mark on a finished block's end line: OK tracks the
+// spruce wire (the single accent), FAIL tracks --destructive (same family as
+// .bt-divider-fail). Resolved at apply-time, not pinned to a hardcoded hex.
+function okRulerColor(): string {
+  return resolveCssColorToHex("var(--primary)", "#5b8a6f");
+}
+function failRulerColor(): string {
+  return resolveCssColorToHex("var(--destructive)", "#e5706b");
+}
 
 type Entry = {
   id: string;
@@ -508,7 +517,7 @@ export class BlockDecorations {
       this.term.registerDecoration({
         marker: endMarker,
         width: 1,
-        overviewRulerOptions: { color: ok ? OK_RULER : FAIL_RULER },
+        overviewRulerOptions: { color: ok ? okRulerColor() : failRulerColor() },
       }) ?? null;
     this.entries.push({
       id: lb.id,

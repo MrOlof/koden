@@ -115,10 +115,14 @@
   background: color-mix(in srgb, var(--destructive, #e5706b) 50%, transparent);
 }
 
+/* Amber wash, one token: matches the terminal-history "Find in terminal"
+ * decorations (TerminalHistoryPopover.tsx), which resolve the same
+ * --terminal-ansi-yellow to literal hex since xterm's SearchAddon can't take
+ * a CSS var. This is plain DOM styling so it can reference the var directly. */
 .bt-match {
-  background: rgba(255, 193, 84, 0.5);
+  background: color-mix(in srgb, var(--terminal-ansi-yellow, #cfa964) 50%, transparent);
   border-radius: 2px;
-  box-shadow: 0 0 0 1px rgba(255, 193, 84, 0.7);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--terminal-ansi-yellow, #cfa964) 70%, transparent);
   pointer-events: none;
 }
 

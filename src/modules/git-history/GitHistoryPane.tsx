@@ -1,5 +1,12 @@
 import { Button } from "@/components/ui/button";
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
   Popover,
   PopoverAnchor,
   PopoverContent,
@@ -16,6 +23,7 @@ import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
   Copy01Icon,
   File02Icon,
+  GitCommitIcon,
   LinkSquare02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -124,15 +132,21 @@ function authorInitials(name: string): string {
   return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
 }
 
-const AUTHOR_TINTS = [
-  "#7aa2f7", // soft blue
-  "#bb9af7", // soft purple
-  "#9ece6a", // soft green
-  "#e0af68", // soft amber
-  "#f7768e", // soft rose
-  "#73daca", // soft teal
-  "#ff9e64", // soft orange
-  "#b4f9f8", // pale cyan
+// Author avatar hues come from the app's OWN theme-aware terminal ANSI
+// palette (CSS vars, so they track theme + light/dark live) instead of a
+// pasted-in Tokyo Night literal set. Both the dark palette (bright pastels)
+// and its light port (darkened for #f2f1ec legibility, ADR-014 SS2) are tuned
+// so var(--background) text stays readable on top either way. Red / bright
+// red are skipped so an avatar never reads as an error/destructive state.
+const AUTHOR_TINT_VARS = [
+  "--terminal-ansi-blue",
+  "--terminal-ansi-magenta",
+  "--terminal-ansi-green",
+  "--terminal-ansi-yellow",
+  "--terminal-ansi-cyan",
+  "--terminal-ansi-bright-blue",
+  "--terminal-ansi-bright-magenta",
+  "--terminal-ansi-bright-cyan",
 ];
 
 function authorTint(key: string): string {
@@ -140,7 +154,7 @@ function authorTint(key: string): string {
   for (let i = 0; i < key.length; i++) {
     hash = (hash * 31 + key.charCodeAt(i)) | 0;
   }
-  return AUTHOR_TINTS[Math.abs(hash) % AUTHOR_TINTS.length];
+  return `var(${AUTHOR_TINT_VARS[Math.abs(hash) % AUTHOR_TINT_VARS.length]})`;
 }
 
 function compactDate(secs: number): string {
@@ -527,12 +541,15 @@ export function GitHistoryPane({
             </Button>
           </CenterPlaceholder>
         ) : commits.length === 0 ? (
-          <CenterPlaceholder>
-            <div className="text-[13px] font-medium">No commits yet</div>
-            <div className="max-w-md text-[11px] leading-relaxed text-muted-foreground">
-              This branch has no commits.
-            </div>
-          </CenterPlaceholder>
+          <Empty className="flex-1 border-none">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <HugeiconsIcon icon={GitCommitIcon} />
+              </EmptyMedia>
+              <EmptyTitle>No commits yet</EmptyTitle>
+              <EmptyDescription>This branch has no commits.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         ) : (
           <>
             <div

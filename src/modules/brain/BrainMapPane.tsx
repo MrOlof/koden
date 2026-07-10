@@ -12,6 +12,21 @@ import { type BrainGraph, brainGraph } from "./lib/bindings";
 // with real Brain data: projects/files come from brainGraph, recency from each
 // file's mtime, agents from the orchestration roster, and live edits from the real
 // fs:changed event. Dark by design — not theme-following.
+//
+// ADR-014 (Koden Svart) SS6 asked this to at least respect the active theme's
+// bg/fg/accent where feasible. Evaluated and kept as-is: every DOM overlay
+// here (header, search pill, legend, detail panel, tooltip) is a glass-on-
+// near-black HUD where every border/fill is an rgba(255,255,255,X) or
+// rgba(0,0,0,X) mix hand-tuned against the fixed #03040a backdrop, and the
+// WebGL layer below it is a categorical data palette (project lobe hue,
+// node type, agent status, recency) that needs 8-12 simultaneously
+// distinguishable hues no single-accent monochrome theme can supply. Swapping
+// only the container bg to var(--background) would be a no-op in dark mode
+// (#0a0b0b vs #03040a, imperceptible) but would make every white-glass
+// overlay illegible against the Svart light port's #f2f1ec, and there's no
+// way to verify a full rgba repaint without a GUI run this phase doesn't do.
+// Documenting per SS6's "if truly infeasible, skip" rather than shipping an
+// unverified partial repaint.
 
 const HUB_PALETTE = [
   "#4d8dff",

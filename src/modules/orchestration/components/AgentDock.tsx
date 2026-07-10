@@ -20,6 +20,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+} from "@/components/ui/empty";
 import { cn } from "@/lib/utils";
 import { useRetryStore } from "@/modules/agents/store/retryStore";
 import type { Tab } from "@/modules/tabs";
@@ -408,13 +414,18 @@ export function AgentDock({
           <AgentTopologyView onActivateAgent={onActivateAgent} />
         </div>
       ) : list.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-5 text-center">
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            No agents yet. Start the Director from the buttons above — blank to
-            spawn agents as you go, or pick a team template — then give it a
-            goal.
-          </p>
-        </div>
+        <Empty className="flex-1 border-none p-5">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <HugeiconsIcon icon={UserGroupIcon} />
+            </EmptyMedia>
+            <EmptyDescription>
+              No agents yet. Start the Director from the buttons above — blank
+              to spawn agents as you go, or pick a team template — then give
+              it a goal.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {groups.map((group) => {
