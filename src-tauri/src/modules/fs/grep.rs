@@ -77,10 +77,16 @@ fn search_tree(
     let walker = WalkBuilder::new(root_path)
         .hidden(true)
         .git_ignore(true)
+        // .gitignore/.kodenignore honored in non-git roots too (crate default
+        // require_git(true) makes them dead without a .git dir); mirrors the brain
+        // walker. parents(false) is the required companion: with require_git off,
+        // parent traversal pulls ancestor ignore files from ABOVE the root.
+        .require_git(false)
         .git_global(true)
         .git_exclude(true)
         .ignore(true)
-        .parents(true)
+        .parents(false)
+        .add_custom_ignore_filename(".kodenignore")
         .follow_links(false)
         .build_parallel();
 
@@ -288,10 +294,16 @@ pub fn fs_glob(
     let walker = WalkBuilder::new(&root_path)
         .hidden(true)
         .git_ignore(true)
+        // .gitignore/.kodenignore honored in non-git roots too (crate default
+        // require_git(true) makes them dead without a .git dir); mirrors the brain
+        // walker. parents(false) is the required companion: with require_git off,
+        // parent traversal pulls ancestor ignore files from ABOVE the root.
+        .require_git(false)
         .git_global(true)
         .git_exclude(true)
         .ignore(true)
-        .parents(true)
+        .parents(false)
+        .add_custom_ignore_filename(".kodenignore")
         .follow_links(false)
         .build();
 

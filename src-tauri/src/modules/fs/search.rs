@@ -74,10 +74,16 @@ pub fn fs_search(
     let walker = WalkBuilder::new(&root_path)
         .hidden(!show_hidden)
         .git_ignore(true)
+        // .gitignore/.kodenignore honored in non-git roots too (crate default
+        // require_git(true) makes them dead without a .git dir); mirrors the brain
+        // walker. parents(false) is the required companion: with require_git off,
+        // parent traversal pulls ancestor ignore files from ABOVE the root.
+        .require_git(false)
         .git_global(true)
         .git_exclude(true)
         .ignore(true)
-        .parents(true)
+        .parents(false)
+        .add_custom_ignore_filename(".kodenignore")
         .follow_links(false)
         .filter_entry(|dent| {
             // Prune known-heavy dirs even when no .gitignore is present (e.g.
@@ -178,10 +184,16 @@ pub fn fs_list_files(
     let walker = WalkBuilder::new(&root_path)
         .hidden(!show_hidden)
         .git_ignore(true)
+        // .gitignore/.kodenignore honored in non-git roots too (crate default
+        // require_git(true) makes them dead without a .git dir); mirrors the brain
+        // walker. parents(false) is the required companion: with require_git off,
+        // parent traversal pulls ancestor ignore files from ABOVE the root.
+        .require_git(false)
         .git_global(true)
         .git_exclude(true)
         .ignore(true)
-        .parents(true)
+        .parents(false)
+        .add_custom_ignore_filename(".kodenignore")
         .follow_links(false)
         .max_depth(Some(depth))
         .filter_entry(|dent| {

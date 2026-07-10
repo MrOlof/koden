@@ -114,6 +114,39 @@ fn grep_respects_ignore_file() {
 }
 
 #[test]
+fn grep_honors_ignore_files_in_non_git_root() {
+    // Parity fix: .gitignore/.kodenignore now take effect without a .git dir.
+    let fx = FsFixture::new();
+    fx.write(".gitignore", "gi.txt\n");
+    fx.write(".kodenignore", "ki.txt\n");
+    fx.write("gi.txt", "needle\n");
+    fx.write("ki.txt", "needle\n");
+    fx.write("kept.txt", "needle\n");
+
+    let res = fs_grep("needle".into(), fx.root_str(), None, None, None, None).expect("grep");
+    let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
+    assert!(rels.contains(&"kept.txt"), "sibling searched");
+    assert!(!rels.contains(&"gi.txt"), ".gitignore'd file skipped in non-git root");
+    assert!(!rels.contains(&"ki.txt"), ".kodenignore'd file skipped in non-git root");
+}
+
+#[test]
+fn grep_gitignore_unchanged_in_git_root() {
+    if !git_available() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file(".gitignore", "gi.txt\n");
+    fx.write_file("gi.txt", "needle\n");
+    fx.write_file("kept.txt", "needle\n");
+
+    let res = fs_grep("needle".into(), fx.repo_str(), None, None, None, None).expect("grep");
+    let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
+    assert!(rels.contains(&"kept.txt"));
+    assert!(!rels.contains(&"gi.txt"), "git-root .gitignore still honored");
+}
+
+#[test]
 fn glob_finds_files_by_pattern() {
     let fx = FsFixture::new();
     fx.write("src/a.rs", "");
@@ -186,6 +219,39 @@ fn search_prunes_node_modules() {
     let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
     assert!(rels.iter().any(|r| r.starts_with("src/")));
     assert!(!rels.iter().any(|r| r.starts_with("node_modules")));
+}
+
+#[test]
+fn search_honors_ignore_files_in_non_git_root() {
+    // Parity fix: .gitignore/.kodenignore now take effect without a .git dir.
+    let fx = FsFixture::new();
+    fx.write(".gitignore", "gi.txt\n");
+    fx.write(".kodenignore", "ki.txt\n");
+    fx.write("gi.txt", "");
+    fx.write("ki.txt", "");
+    fx.write("kept.txt", "");
+
+    let res = fs_search(fx.root_str(), "txt".into(), None, None, None).expect("search");
+    let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
+    assert!(rels.contains(&"kept.txt"), "sibling visible");
+    assert!(!rels.contains(&"gi.txt"), ".gitignore'd file hidden in non-git root");
+    assert!(!rels.contains(&"ki.txt"), ".kodenignore'd file hidden in non-git root");
+}
+
+#[test]
+fn search_gitignore_unchanged_in_git_root() {
+    if !git_available() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file(".gitignore", "gi.txt\n");
+    fx.write_file("gi.txt", "");
+    fx.write_file("kept.txt", "");
+
+    let res = fs_search(fx.repo_str(), "txt".into(), None, None, None).expect("search");
+    let rels: Vec<&str> = res.hits.iter().map(|h| h.rel.as_str()).collect();
+    assert!(rels.contains(&"kept.txt"));
+    assert!(!rels.contains(&"gi.txt"), "git-root .gitignore still honored");
 }
 
 #[test]
@@ -296,13 +362,31 @@ fn read_dir_flags_gitignored_entries_only_when_requested() {
 }
 
 #[test]
-fn read_dir_skips_gitignore_outside_a_repo() {
+fn read_dir_honors_ignore_files_outside_a_repo() {
+    // Parity with the brain walker + grep/search: require_git(false) means a
+    // non-git root's .gitignore/.kodenignore now decorate ignored entries
+    // (previously dead outside a repo).
     let fx = FsFixture::new();
-    fx.write(".gitignore", "ignored.txt\n");
-    fx.write("ignored.txt", "");
+    fx.write(".gitignore", "gi.txt\n");
+    fx.write(".kodenignore", "ki.txt\n");
+    fx.write("gi.txt", "");
+    fx.write("ki.txt", "");
     fx.write("kept.txt", "");
     let entries = fs_read_dir(fx.root_str(), false, Some(true), None).expect("read_dir");
-    assert!(entries.iter().all(|e| !e.gitignored));
+    let flag = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+            .gitignored
+    };
+    assert!(flag("gi.txt"), ".gitignore'd entry decorated in non-git root");
+    assert!(flag("ki.txt"), ".kodenignore'd entry decorated in non-git root");
+    assert!(!flag("kept.txt"), "sibling not decorated");
+
+    // Still opt-in: without git_decorations requested, nothing is flagged.
+    let plain = fs_read_dir(fx.root_str(), false, None, None).expect("read_dir");
+    assert!(plain.iter().all(|e| !e.gitignored));
 }
 
 #[test]

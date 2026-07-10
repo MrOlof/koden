@@ -40,16 +40,29 @@ fn in_git_repo(dir: &Path) -> bool {
     }
 }
 
-// Immediate children of `dir` that git does not ignore. Outside a repo every
-// name is returned, so nothing is dimmed.
+// True if `dir` has a root-level `.gitignore` or `.kodenignore` — enough to make
+// the non-ignored walk worthwhile even without a `.git` dir (require_git(false)).
+fn has_root_ignore_file(dir: &Path) -> bool {
+    dir.join(".gitignore").is_file() || dir.join(".kodenignore").is_file()
+}
+
+// Immediate children of `dir` that the ignore rules do not exclude. With no
+// `.git` dir and no ignore file present the caller skips this walk, so it is only
+// reached inside a repo or a root carrying `.gitignore`/`.kodenignore`.
 fn git_non_ignored_names(dir: &Path, show_hidden: bool) -> HashSet<String> {
     WalkBuilder::new(dir)
         .hidden(!show_hidden)
         .git_ignore(true)
+        // .gitignore/.kodenignore honored in non-git roots too (crate default
+        // require_git(true) makes them dead without a .git dir); mirrors the brain
+        // walker. parents(false) is the required companion: with require_git off,
+        // parent traversal pulls ancestor ignore files from ABOVE the root.
+        .require_git(false)
         .git_global(true)
         .git_exclude(true)
         .ignore(false)
-        .parents(true)
+        .parents(false)
+        .add_custom_ignore_filename(".kodenignore")
         .max_depth(Some(1))
         .follow_links(false)
         .build()
@@ -76,9 +89,14 @@ pub fn fs_read_dir(
         e.to_string()
     })?;
 
-    // Gate on a real repo: outside one the walk is pointless and would probe
-    // each child for a nested `.git`, which trips macOS folder-access prompts.
-    let git_decorations = git_decorations.unwrap_or(false) && in_git_repo(&root);
+    // Gate on a real repo OR a root-level ignore file: with require_git(false)
+    // the walker now honors `.gitignore`/`.kodenignore` in non-git roots too
+    // (parity with grep/search + the brain walker), so a non-git root with ignore
+    // rules is worth decorating. Outside both the walk is pointless; skipping it
+    // also avoids probing children for a nested `.git`, which trips macOS
+    // folder-access prompts. parents(false) keeps the probe from walking upward.
+    let git_decorations =
+        git_decorations.unwrap_or(false) && (in_git_repo(&root) || has_root_ignore_file(&root));
     let git_visible = if git_decorations {
         git_non_ignored_names(&root, show_hidden)
     } else {
