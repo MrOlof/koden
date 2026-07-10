@@ -381,6 +381,21 @@ impl SqliteIndex {
         crate::modules::brain::reflect::librarian::set(&self.conn, cfg, now)
     }
 
+    /// The persisted Librarian delta-gate pin for a project — the digest hash the
+    /// last completed round reflected on, or `None` if this project has never
+    /// completed a round. Read-through on the writer connection; the worker hydrates
+    /// its in-memory pin from this on first sight of a project each boot, so the
+    /// "Unchanged => $0" short-circuit survives a restart. [LIB-SPEND-01]
+    pub fn librarian_pin(&self, project_id: &str) -> Option<String> {
+        crate::modules::brain::reflect::librarian::pin(&self.conn, project_id)
+    }
+
+    /// Persist (upsert) the Librarian delta-gate pin for a project (writer-side).
+    /// Written after every round so a restart never re-pays a byte-identical digest.
+    pub fn set_librarian_pin(&self, project_id: &str, digest_hash: &str, now: i64) -> Result<(), String> {
+        crate::modules::brain::reflect::librarian::set_pin(&self.conn, project_id, digest_hash, now)
+    }
+
     /// Boot sweep: charge any reservation orphaned by a mid-call crash at its
     /// estimate, so a crashed reflect over-counts rather than leaking free spend (P4).
     pub fn sweep_orphaned_reservations(&self, now: i64) -> Result<usize, String> {
@@ -867,6 +882,10 @@ impl SqliteIndex {
         tx.execute("DELETE FROM code_nodes WHERE project_id=?1", [project_id])?;
         tx.execute("DELETE FROM code_imports WHERE project_id=?1", [project_id])?;
         tx.execute("DELETE FROM code_edges WHERE project_id=?1", [project_id])?;
+        // Also drop the Librarian delta-gate pin, else a re-added project with an
+        // identical corpus short-circuits to Unchanged/$0 and never regenerates the
+        // proposals this removal just pruned (and the orphan row leaks). [LIB-SPEND-01]
+        tx.execute("DELETE FROM brain_librarian_pin WHERE project_id=?1", [project_id])?;
         tx.commit()?;
         Ok(())
     }

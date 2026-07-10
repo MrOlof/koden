@@ -24,6 +24,7 @@ pub(crate) const CANONICAL_TABLES: &[&str] = &[
     "brain_budget",
     "brain_budget_ledger",
     "brain_librarian",
+    "brain_librarian_pin",
     "brain_semantic_meta",
 ];
 

@@ -382,7 +382,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     // (resets the failure streak); InvalidOutput = paid but rejected —
                     // identical bytes would fail identically, so pin its hash too.
                     if digest_hash.is_some() {
-                        let st = lib_state.entry(pid.clone()).or_default();
+                        let st = lib_entry(&mut lib_state, &index, &pid);
                         match outcome.reason {
                             reflect::ReflectReason::Ok => {
                                 st.digest_hash = digest_hash;
@@ -391,6 +391,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                             reflect::ReflectReason::InvalidOutput => st.digest_hash = digest_hash,
                             _ => {} // CallFailed: retrying the same digest is legitimate
                         }
+                        // Persist the manually-reflected digest too, so the next
+                        // autonomous round (this session OR after a restart) does not
+                        // re-pay it. [LIB-SPEND-01]
+                        persist_lib_pin(&index, &pid, st, now_ms);
                     }
                     log::info!(
                         "brain: reflect '{pid}' → {:?} ({} proposal(s), ${:.4})",
@@ -412,7 +416,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         // Record the change (dirty + when). The Librarian settles in
                         // after a quiet spell, deciding via the digest hash whether
                         // there's actually anything new to reflect on.
-                        note_content_change(lib_state.entry(project.clone()).or_default(), now_epoch_ms());
+                        // `lib_entry` hydrates the persisted delta-gate pin on the
+                        // first sighting of this project this boot, so a code-only edge
+                        // (digest-neutral) after a restart won't re-pay. [LIB-SPEND-01]
+                        note_content_change(lib_entry(&mut lib_state, &index, &project), now_epoch_ms());
                     }
                 }
             }
@@ -1043,6 +1050,36 @@ pub fn note_content_change(st: &mut LibrarianAuto, now_ms: i64) {
     st.last_change_ms = now_ms;
 }
 
+/// Get-or-create the per-project state, HYDRATING the delta-gate pin from the
+/// persisted store the first time a project is seen this boot. `lib_state` is a
+/// HashMap rebuilt EMPTY on every worker start (:232), so without this read-through
+/// the first post-restart round would run with `prev_digest_hash=None` and re-pay a
+/// byte-identical digest — a call the pin would have short-circuited to Unchanged at
+/// $0. The DB read happens only on the miss (`or_insert_with`), never when the entry
+/// already exists. [LIB-SPEND-01]
+pub fn lib_entry<'a>(
+    state: &'a mut std::collections::HashMap<String, LibrarianAuto>,
+    index: &SqliteIndex,
+    project_id: &str,
+) -> &'a mut LibrarianAuto {
+    state
+        .entry(project_id.to_string())
+        .or_insert_with(|| LibrarianAuto { digest_hash: index.librarian_pin(project_id), ..Default::default() })
+}
+
+/// Persist a project's delta-gate pin after a round, so the "Unchanged => $0"
+/// short-circuit survives a restart. A no-op when the pin is still `None` (no round
+/// has established a digest yet); a repeat of an unchanged value is a harmless upsert.
+/// A failed write is logged, never propagated — the in-memory pin still gates the
+/// rest of THIS session, and the next successful round re-attempts the write. [LIB-SPEND-01]
+fn persist_lib_pin(index: &SqliteIndex, project_id: &str, st: &LibrarianAuto, now_ms: i64) {
+    if let Some(h) = st.digest_hash.as_deref() {
+        if let Err(e) = index.set_librarian_pin(project_id, h, now_ms) {
+            log::warn!("brain: persist librarian pin for '{project_id}' failed ({e})");
+        }
+    }
+}
+
 /// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
 /// that has EITHER settled into idle OR just had an AI session exit. No change count,
 /// no fixed clock — the digest hash inside [reflect::reflect_auto] is the real
@@ -1152,6 +1189,9 @@ fn run_librarian_rounds(
         }) else {
             continue;
         };
+        // Durably pin the digest the round settled on (mirrors the in-memory
+        // `st.digest_hash`) so a restart-then-edit cycle never re-pays it. [LIB-SPEND-01]
+        persist_lib_pin(index, project_id, st, now_ms);
         match &outcome.reason {
             reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
                 log::info!(
@@ -1377,6 +1417,41 @@ mod tests {
         apply_round_outcome(&mut st, &R::Ok, Some("h2".into()));
         assert_eq!(st.fail_streak, 0);
         assert_eq!(st.digest_hash.as_deref(), Some("h2"));
+    }
+
+    /// LIB-SPEND-01: the delta-gate pin must be durable. `lib_entry` hydrates a
+    /// fresh in-memory entry from the persisted store (so a restart doesn't re-pay a
+    /// byte-identical digest), and `persist_lib_pin` writes a settled pin through —
+    /// but never persists a still-`None` pin.
+    #[test]
+    fn lib_entry_hydrates_persisted_pin_and_persist_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("koden-libpin-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("index.sqlite");
+        let idx = SqliteIndex::open_with_recovery(&db).expect("open store");
+
+        // Fresh project: lib_entry hydrates to None (this project has never reflected).
+        let mut state: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
+        assert_eq!(lib_entry(&mut state, &idx, "p").digest_hash, None, "no persisted pin yet");
+
+        // A round settles on a digest; persist_lib_pin writes it through to the store.
+        state.get_mut("p").unwrap().digest_hash = Some("deadbeef".into());
+        persist_lib_pin(&idx, "p", state.get("p").unwrap(), 42);
+        assert_eq!(idx.librarian_pin("p").as_deref(), Some("deadbeef"), "pin persisted");
+
+        // Simulate a restart: drop the map; a new entry must hydrate from the store.
+        let mut restarted: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
+        assert_eq!(
+            lib_entry(&mut restarted, &idx, "p").digest_hash.as_deref(),
+            Some("deadbeef"),
+            "the pin survives the in-memory reset (the whole point)"
+        );
+
+        // A still-None pin (a project seen but not yet reflected) is never written.
+        persist_lib_pin(&idx, "q", &LibrarianAuto::default(), 43);
+        assert_eq!(idx.librarian_pin("q"), None, "a None pin is not persisted");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ADR-010 cluster 6: a worker panic must flip status to Degraded (via the
