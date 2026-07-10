@@ -31,8 +31,9 @@ use koden_lib::modules::brain::reflect::{
 use koden_lib::modules::brain::ast::ImpactDirection;
 use koden_lib::modules::brain::resume::{record_event, recover_all, ResumeRecord, SessionKey};
 use koden_lib::modules::brain::store::{
-    code_impact_readonly, get_symbol_readonly, graph_readonly, list_proposals_readonly,
-    search_readonly, semantic_meta_readonly, SqliteIndex,
+    budget_state_readonly, code_impact_readonly, get_symbol_readonly, graph_readonly,
+    librarian_ledger_readonly, list_proposals_readonly, search_readonly, semantic_meta_readonly,
+    SqliteIndex,
 };
 use koden_lib::modules::brain::worker::{index_changed, index_dir};
 
@@ -414,6 +415,211 @@ fn run_reflect_live(_root: &Path, _store: &Path, _ceiling: f64, _provider: &str,
     std::process::exit(3);
 }
 
+/// `round-live <dir> <store> <ceiling> <provider> <model>` — ONE real paid
+/// delta-gated reflect round over a PERSISTENT store (the L3 multi-session
+/// workhorse). Sets the cumulative ceiling via the REAL path (absolute ceiling;
+/// spent_total persists across processes), indexes + scans the fixture, then runs
+/// the single real `reflect_auto_with_client` behind the digest delta gate. The
+/// previous digest hash is persisted to `<store>/digest.hash` so the delta gate
+/// (Unchanged, $0) can be exercised ACROSS process boundaries — the GUI worker
+/// keeps that pin in memory; here the CLI persists it to a file so a relaunch can
+/// reproduce the pin. Prints one machine-parseable ROUND line + ledger totals; the
+/// `ROUND_STARTING` marker brackets the network call for a mid-call kill.
+/// Exit: 0 = round returned (any reason), 3 = no key.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_round_live(root: &Path, store: &Path, ceiling: f64, provider: &str, model: Option<&str>) {
+    use std::io::Write as _;
+
+    use koden_lib::modules::brain::reflect::{
+        librarian, llm::AnthropicClient, llm_openai::OpenAiCompatClient, reflect_auto_with_client,
+        KEYRING_SERVICE,
+    };
+
+    let cfg = match provider {
+        "anthropic" => ReflectConfig::default(),
+        p => ReflectConfig {
+            provider: p.to_string(),
+            model: model.unwrap_or("gpt-5.4-mini").to_string(),
+            base_url: String::new(),
+            in_rate: 0.5 / 1_000_000.0,
+            out_rate: 4.0 / 1_000_000.0,
+            ..ReflectConfig::default()
+        },
+    };
+    let account = librarian::keyring_account_for(&cfg.provider);
+    if account.is_empty() {
+        println!("PROVIDER {} keyless/unknown", cfg.provider);
+        std::process::exit(2);
+    }
+    let key = keyring::Entry::new(KEYRING_SERVICE, account)
+        .ok()
+        .and_then(|e| e.get_password().ok())
+        .filter(|k| !k.is_empty());
+    let Some(key) = key else {
+        println!("KEY absent service={KEYRING_SERVICE} account={account}");
+        std::process::exit(3);
+    };
+    println!("KEY present provider={} model={}", cfg.provider, cfg.model);
+
+    let _ = std::fs::create_dir_all(store);
+    let idx = open(store);
+    // Cumulative ceiling via the REAL settings path (absolute; spent persists).
+    idx.set_budget_ceiling(ceiling, now_ms()).expect("set ceiling");
+    let s = index_dir(&idx, PID, root);
+    let notes = scan_project_memory(&idx, PID, root);
+    let (c0, spent0) = idx.budget_state();
+    println!("INDEXED {} NOTES {notes} ceiling={c0} spent0={spent0:.6}", s.indexed);
+    let _ = std::io::stdout().flush();
+
+    let inner: Box<dyn ReflectClient> = if cfg.provider == "anthropic" {
+        Box::new(AnthropicClient::new(key))
+    } else {
+        let base = if cfg.base_url.trim().is_empty() {
+            librarian::canonical_base_url(&cfg.provider).to_string()
+        } else {
+            cfg.base_url.clone()
+        };
+        Box::new(OpenAiCompatClient::new(Some(key), base))
+    };
+
+    let hash_path = store.join("digest.hash");
+    let prev = std::fs::read_to_string(&hash_path).ok().map(|s| s.trim().to_string());
+    println!("PREV_DIGEST {}", prev.as_deref().unwrap_or("<none>"));
+    println!("ROUND_STARTING");
+    let _ = std::io::stdout().flush();
+
+    let (out, new_hash) = reflect_auto_with_client(
+        &idx,
+        inner.as_ref(),
+        &cfg,
+        PID,
+        None,
+        now_ms(),
+        prev.as_deref(),
+    );
+    if let Some(h) = &new_hash {
+        let _ = std::fs::write(&hash_path, h);
+    }
+    let (ceil_now, spent) = idx.budget_state();
+    println!(
+        "ROUND reason={:?} proposals={} spent={:.6} total_spent={:.6} ceiling={ceil_now}",
+        out.reason,
+        out.proposals.len(),
+        out.spent_usd,
+        spent
+    );
+    // Per-field lines (signatures/titles contain spaces — keep each unambiguous).
+    for p in &out.proposals {
+        println!("PSIG {}", p.signature);
+        println!("PACT {}", p.action.as_str());
+        println!("PTITLE {}", p.title);
+    }
+    println!("ROUND_DONE");
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn run_round_live(_root: &Path, _store: &Path, _ceiling: f64, _provider: &str, _model: Option<&str>) {
+    println!("KEY absent (no keyring backend on this target)");
+    std::process::exit(3);
+}
+
+/// `replay <store> <project> <kind> <title>` — a $0 fake-client reflect round that
+/// resubmits ONE proposal with the given `kind`/`title` (free rates → no network,
+/// no spend). The observable: whether the reject-signature gate (persisted across
+/// processes) SWALLOWS the resubmission (proposals=0) or lets it enqueue. This is
+/// the cross-process replay-control for the reject gate.
+fn run_replay(store: &Path, project: &str, kind: &str, title: &str) {
+    struct Replay(String);
+    impl ReflectClient for Replay {
+        fn complete(&self, _m: &str, _s: &str, _u: &str, _t: u32) -> Result<ReflectResponse, String> {
+            Ok(ReflectResponse { json_text: self.0.clone(), input_tokens: 1, output_tokens: 1 })
+        }
+    }
+    let idx = open(store);
+    let json = serde_json::json!({
+        "proposals": [{
+            "kind": kind, "title": title, "detail": "replay-control",
+            "scope": "project", "confidence": "high"
+        }]
+    })
+    .to_string();
+    let free = ReflectConfig { model: "replay-control".into(), in_rate: 0.0, out_rate: 0.0, ..ReflectConfig::default() };
+    let out = reflect_with_client(&idx, &Replay(json), &free, project, None, now_ms());
+    let (_, spent) = idx.budget_state();
+    println!(
+        "REPLAY reason={:?} proposals={} spent={:.6} total_spent={:.6}",
+        out.reason,
+        out.proposals.len(),
+        out.spent_usd,
+        spent
+    );
+    for p in &out.proposals {
+        println!("RP sig={} action={} title={}", p.signature, p.action.as_str(), p.title);
+    }
+}
+
+/// `reject <store> <project> <signature>` — reject a queued proposal by signature
+/// via the REAL resolve path (persists its reject-signature so it can't reappear).
+fn run_reject(store: &Path, project: &str, signature: &str) {
+    let idx = open(store);
+    let existed = idx.resolve_proposal(project, signature, true).unwrap_or(false);
+    println!("REJECTED existed={existed} sig={signature}");
+}
+
+/// `ledger <store>` — the measurement instrument: budget state, ledger row
+/// breakdown, the sum==spent arithmetic invariant, proposal counts by status,
+/// reject-signature count, and PRAGMA quick_check. Read-only.
+fn run_ledger(store: &Path) {
+    let db = store.join("index.sqlite");
+    let (ceiling, spent) = budget_state_readonly(&db).unwrap_or((-1.0, -1.0));
+    let rows = librarian_ledger_readonly(&db, 100_000).unwrap_or_default();
+    let reserved = rows.iter().filter(|r| r.0 == "reserved").count();
+    let spent_rows = rows.iter().filter(|r| r.0 == "spent").count();
+    let sum_actual: f64 = rows.iter().filter_map(|r| r.2).sum();
+    let real_actual: f64 =
+        rows.iter().filter(|r| r.3 == "gpt-5.4-mini").filter_map(|r| r.2).sum();
+    let est_reserved: f64 = rows.iter().filter(|r| r.0 == "reserved").map(|r| r.1).sum();
+    println!(
+        "LEDGER ceiling={ceiling:.6} spent_total={spent:.6} rows={} reserved={reserved} \
+spent_rows={spent_rows} sum_actual={sum_actual:.6} real_actual={real_actual:.6} \
+est_reserved={est_reserved:.6}",
+        rows.len()
+    );
+    println!("ARITH abs_diff_sum_vs_spent={:.9}", (sum_actual - spent).abs());
+    for r in &rows {
+        println!("LROW status={} est={:.6} actual={} model={}", r.0, r.1, r.2.map(|v| format!("{v:.6}")).unwrap_or_else(|| "NULL".into()), r.3);
+    }
+    if !db.exists() {
+        println!("QUICKCHECK skip (no db at {})", db.display());
+        return;
+    }
+    // Raw pass for status counts + quick_check. Opened READ-WRITE on purpose: FTS5
+    // quick_check needs to build temp structures, so a read-only open falsely reports
+    // "attempt to write a readonly database". Sessions are sequential (no concurrent
+    // writer), so a plain open is safe and gives a TRUE corruption verdict.
+    match rusqlite::Connection::open(&db) {
+        Ok(conn) => {
+            for status in ["pending", "applied", "rejected"] {
+                let n: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM proposals WHERE status=?1", [status], |r| r.get(0))
+                    .unwrap_or(-1);
+                println!("PROP status={status} count={n}");
+            }
+            let total_props: i64 = conn.query_row("SELECT COUNT(*) FROM proposals", [], |r| r.get(0)).unwrap_or(-1);
+            let distinct_sigs: i64 = conn
+                .query_row("SELECT COUNT(DISTINCT signature) FROM proposals", [], |r| r.get(0))
+                .unwrap_or(-1);
+            let rejects: i64 = conn.query_row("SELECT COUNT(*) FROM reject_signatures", [], |r| r.get(0)).unwrap_or(-1);
+            println!("PROP total={total_props} distinct_sigs={distinct_sigs} reject_sigs={rejects}");
+            let qc: String = conn
+                .query_row("PRAGMA quick_check", [], |r| r.get(0))
+                .unwrap_or_else(|e| format!("ERR {e}"));
+            println!("QUICKCHECK {qc}");
+        }
+        Err(e) => println!("QUICKCHECK ERR open {e}"),
+    }
+}
+
 /// `set-key <provider>` — store an API key at the app's OWN keyring location
 /// (service `koden-ai`, per-provider account). The key is read from STDIN so it
 /// never appears in argv/shell history, and is never echoed.
@@ -662,6 +868,45 @@ fn main() {
                 std::process::exit(2);
             };
             run_set_key(provider);
+            return;
+        }
+        "round-live" => {
+            let (Some(dir), Some(store), Some(ceiling)) = (args.get(2), args.get(3), args.get(4))
+            else {
+                eprintln!("usage: brain_cli round-live <dir> <store> <ceiling-usd> [provider] [model]");
+                std::process::exit(2);
+            };
+            let ceiling: f64 = ceiling.parse().expect("ceiling must be a number");
+            assert!(ceiling > 0.0 && ceiling <= 1.0, "sim guard: ceiling in (0,1] USD");
+            let provider = args.get(5).map(String::as_str).unwrap_or("anthropic");
+            run_round_live(Path::new(dir), Path::new(store), ceiling, provider, args.get(6).map(String::as_str));
+            return;
+        }
+        "replay" => {
+            let (Some(store), Some(project), Some(kind), Some(title)) =
+                (args.get(2), args.get(3), args.get(4), args.get(5))
+            else {
+                eprintln!("usage: brain_cli replay <store> <project> <kind> <title>");
+                std::process::exit(2);
+            };
+            run_replay(Path::new(store), project, kind, title);
+            return;
+        }
+        "reject" => {
+            let (Some(store), Some(project), Some(sig)) = (args.get(2), args.get(3), args.get(4))
+            else {
+                eprintln!("usage: brain_cli reject <store> <project> <signature>");
+                std::process::exit(2);
+            };
+            run_reject(Path::new(store), project, sig);
+            return;
+        }
+        "ledger" => {
+            let Some(store) = args.get(2) else {
+                eprintln!("usage: brain_cli ledger <store>");
+                std::process::exit(2);
+            };
+            run_ledger(Path::new(store));
             return;
         }
         "query" => {
