@@ -317,6 +317,37 @@ describe("CommandMarks bus turns (getBusTurns)", () => {
     expect(rows[1].line).toBeGreaterThanOrEqual(TURN_LINE_BASE);
   });
 
+  it("anchors a WRAPPED long prompt whose rendered line is only the first row", () => {
+    // The terminal wraps long prompts: the scraped `>` line holds just the
+    // first row. Exact equality never matched these, so click-to-scroll only
+    // ever clamped to the bottom (the original user report).
+    const bus = "please refactor the entire settings window into tabs";
+    const turns: BusTurn[] = [{ id: TURN_LINE_BASE + 1, text: bus }];
+    const cm = withTurns(
+      ["output", "> please refactor the entire settings win", "dow into tabs"],
+      turns,
+    );
+    const row = cm.getMarks()[0];
+    expect(row.text).toBe(bus);
+    expect(row.line).toBe(1);
+  });
+
+  it("anchors across whitespace differences between render and bus text", () => {
+    const turns: BusTurn[] = [
+      { id: TURN_LINE_BASE + 1, text: "hi   there\tfriend" },
+    ];
+    const cm = withTurns(["> hi there friend"], turns);
+    expect(cm.getMarks()[0].line).toBe(0);
+  });
+
+  it("keeps short prompts on exact match — 'hi' must not anchor '> hiii'", () => {
+    const turns: BusTurn[] = [{ id: TURN_LINE_BASE + 1, text: "hi" }];
+    const cm = withTurns(["> hiii"], turns);
+    expect(
+      cm.getMarks().find((m) => m.text === "hi")?.line,
+    ).toBeGreaterThanOrEqual(TURN_LINE_BASE);
+  });
+
   it("survives a CommandMarks dispose + reconstruct (renderer pool rebind)", () => {
     // Turn storage is session-lifetime (turnStore), injected via getBusTurns:
     // releasing and rebinding a slot builds a fresh CommandMarks over the same

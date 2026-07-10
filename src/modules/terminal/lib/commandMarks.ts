@@ -233,8 +233,12 @@ export class CommandMarks {
       );
       const used = new Set<number>();
       for (const t of busTurns) {
+        // Wrap/whitespace-tolerant match: the scraped line is a lossy render
+        // of the same prompt, so exact equality misses wrapped or repainted
+        // boxes — and an unanchored turn falls back to a high-band synthetic
+        // line, which click-to-scroll can only clamp to the bottom.
         const anchor = anchors.find(
-          (a) => !used.has(a.line) && a.text === t.text,
+          (a) => !used.has(a.line) && turnTextMatches(a.text, t.text),
         );
         if (anchor) used.add(anchor.line);
         out.push({
@@ -379,6 +383,25 @@ export function parseExitCode(s: string): number | null {
 // dock status transitions, not turn boundaries, so they mint no tick.
 export function isTurnMarker(data: string): boolean {
   return data === "notify;Koden;working";
+}
+
+export function normTurnText(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// Match a scraped rendered prompt line against a bus-delivered prompt. Exact
+// equality after whitespace normalization, or a long-enough prefix either way:
+// a wrapped prompt renders only its first row (scraped ⊂ bus), and the bus
+// text is sliced at 400 chars (bus ⊂ scraped for very long prompts). The
+// 12-char floor keeps short prompts on exact match so "hi" can't anchor "hiii".
+export function turnTextMatches(scraped: string, bus: string): boolean {
+  const a = normTurnText(scraped);
+  const b = normTurnText(bus);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return (
+    (a.length >= 12 && b.startsWith(a)) || (b.length >= 12 && a.startsWith(b))
+  );
 }
 
 // claude renders the submitted prompt as a box line beginning with a `>` glyph

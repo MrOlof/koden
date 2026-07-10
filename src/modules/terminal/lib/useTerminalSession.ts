@@ -2,7 +2,7 @@ import { clipboardWriteText } from "@/lib/clipboard";
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { revealInFinder } from "@/modules/explorer/lib/contextActions";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { readTerminalTokens } from "@/styles/tokens";
+import { readTerminalTokens, resolveCssColorToHex } from "@/styles/tokens";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -274,6 +274,34 @@ export function scrollToCommandForLeaf(leafId: number, line: number): void {
   if (!slot) return;
   // Center the command in the viewport (same offset block navigation uses).
   slot.term.scrollToLine(Math.max(0, line - Math.floor(slot.term.rows / 2)));
+  flashJumpLine(slot.term, line);
+}
+
+// Brief full-width spruce band on the jump target so the click reads as a jump
+// even when the viewport didn't need to move (a short session fits one screen).
+// registerMarker's offset is cursor-relative (see the link-hover code above);
+// an unanchored turn's synthetic high-band line yields no valid marker and the
+// flash silently skips — scrollToLine already clamped to the bottom.
+function flashJumpLine(term: Terminal, absLine: number): void {
+  const buf = term.buffer.active;
+  const marker = term.registerMarker(absLine - (buf.baseY + buf.cursorY));
+  if (!marker || marker.line < 0) return;
+  const decoration = term.registerDecoration({
+    marker,
+    width: term.cols,
+    backgroundColor: resolveCssColorToHex("var(--primary)", "#5b8a6f"),
+    layer: "bottom",
+  });
+  if (!decoration) {
+    marker.dispose();
+    return;
+  }
+  window.setTimeout(() => {
+    try {
+      decoration.dispose();
+      marker.dispose();
+    } catch {}
+  }, 900);
 }
 
 export function getLeafBlockMode(leafId: number): BlockMode {

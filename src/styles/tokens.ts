@@ -80,6 +80,11 @@ export function readTerminalTokens(): TerminalTokens {
 }
 
 function rgbToHex(css: string): string | null {
+  // Digit-scraping is only valid for rgb()/rgba() serializations. A computed
+  // oklch(0.592 0.066 158.4) would otherwise parse as r=0.592 g=0.066 b=158.4
+  // -> #01009e (a saturated blue) — exactly what themed decorations rendered
+  // before this guard. Non-rgb formats fall through to the canvas converter.
+  if (!/^rgba?\(/.test(css)) return null;
   const m = css.match(/(\d+(?:\.\d+)?)/g);
   if (!m || m.length < 3) return null;
   const h = (n: string) =>
@@ -99,5 +104,29 @@ export function resolveCssColorToHex(cssColor: string, fallback: string): string
   if (typeof document === "undefined") return fallback;
   const el = getProbe();
   el.style.color = cssColor;
-  return rgbToHex(getComputedStyle(el).color) ?? fallback;
+  const computed = getComputedStyle(el).color;
+  return rgbToHex(computed) ?? colorToHexViaCanvas(computed) ?? fallback;
+}
+
+// Browser-grade conversion for computed colors that don't serialize as rgb()
+// (oklch tokens, color-mix results): paint one pixel and read it back. Canvas
+// fillStyle accepts every CSS Color 4 form WebView2 can render.
+let hexCanvas: CanvasRenderingContext2D | null | undefined;
+function colorToHexViaCanvas(css: string): string | null {
+  if (hexCanvas === undefined) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    hexCanvas = canvas.getContext("2d", { willReadFrequently: true });
+  }
+  const ctx = hexCanvas;
+  if (!ctx) return null;
+  ctx.fillStyle = "#000000"; // known state: an invalid css keeps the previous fillStyle
+  ctx.fillStyle = css;
+  ctx.clearRect(0, 0, 1, 1);
+  ctx.fillRect(0, 0, 1, 1);
+  const d = ctx.getImageData(0, 0, 1, 1).data;
+  if (d[3] === 0) return null; // fully transparent: nothing usable
+  const h = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${h(d[0])}${h(d[1])}${h(d[2])}`;
 }
