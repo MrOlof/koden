@@ -70,16 +70,26 @@ pub fn undecorated_detail(stored_detail: &str) -> &str {
 }
 
 /// Map one validated item to a pending `reflect`-sourced proposal for `project_id`.
-/// `target_id` is `None`: the model does not reliably reference an existing note id,
-/// so reflect proposes against the project and the human resolves the target.
+/// `target_id` comes from the model's `target` (the note id it named from the digest),
+/// trimmed, empty→None. It is REQUIRED by the prompt for stale/conflict (→ Archive/
+/// Update, which apply against a note); an Archive/Update proposal that still lacks a
+/// valid target is dropped at enqueue (`reflect::finish_response`) rather than stranding
+/// as a reject-only card. The target is folded into the signature so two proposals
+/// against different notes don't dedup-collide.
 pub fn to_proposal(project_id: &str, item: &ProposalItem) -> MemoryProposal {
     let action = action_for(item.kind);
     let title = item.title.trim().to_string();
+    let target_id = item
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     MemoryProposal {
         project: project_id.to_string(),
-        signature: proposal_signature(action, None, &title),
+        signature: proposal_signature(action, target_id.as_deref(), &title),
         action,
-        target_id: None,
+        target_id,
         title,
         detail: detail_for(item),
         source: "reflect".into(),
@@ -103,6 +113,7 @@ mod tests {
             usefulness: None,
             risk: None,
             evidence_quality: None,
+            target: None,
         }
     }
 
@@ -112,6 +123,24 @@ mod tests {
         assert_eq!(to_proposal("p", &item(ProposalKind::ShouldRemember, "t")).action, ProposalAction::Create);
         assert_eq!(to_proposal("p", &item(ProposalKind::Stale, "t")).action, ProposalAction::Archive);
         assert_eq!(to_proposal("p", &item(ProposalKind::Conflict, "t")).action, ProposalAction::Update);
+    }
+
+    #[test]
+    fn target_maps_to_target_id_and_folds_into_signature() {
+        let mut stale = item(ProposalKind::Stale, "Old note");
+        stale.target = Some("  n7  ".into());
+        let p = to_proposal("proj", &stale);
+        assert_eq!(p.action, ProposalAction::Archive);
+        assert_eq!(p.target_id.as_deref(), Some("n7"), "trimmed");
+        assert_eq!(
+            p.signature,
+            proposal_signature(ProposalAction::Archive, Some("n7"), "Old note"),
+            "target folded into the dedup signature"
+        );
+        // Whitespace-only target normalizes to None.
+        let mut blank = item(ProposalKind::Insight, "x");
+        blank.target = Some("   ".into());
+        assert_eq!(to_proposal("proj", &blank).target_id, None);
     }
 
     #[test]

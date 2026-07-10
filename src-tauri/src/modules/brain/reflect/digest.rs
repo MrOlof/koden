@@ -71,11 +71,16 @@ pub fn build_digest(notes: &[NoteSummary]) -> String {
                 bits.push(format!("anchors={}", n.anchors.join(",")));
             }
             let text = bits.join(" ");
-            if text.is_empty() {
+            let head = if text.is_empty() {
                 format!("- [{label}] {}", n.title)
             } else {
                 format!("- [{label}] {}: {}", n.title, truncate(&text))
-            }
+            };
+            // Carry the note id (like the findings lines since 83f4ce7) so the model
+            // can target a stale/conflict proposal at a real note — reflect maps those
+            // to Archive/Update, which apply against a note id. Ids are short slugs, so
+            // this is a bounded suffix, not unbounded text.
+            format!("{head} (id: {})", n.id)
         })
         .collect();
     lines.join("\n")
@@ -150,6 +155,14 @@ mod tests {
         let d = build_digest(&notes);
         assert_eq!(d.lines().count(), MAX_NOTES, "capped to MAX_NOTES");
         assert!(d.starts_with("- [decision] Title 0"), "order preserved: {}", &d[..40]);
+    }
+
+    #[test]
+    fn digest_note_lines_carry_the_note_id() {
+        // The seam D2 needs: the model must see each note's id to target a
+        // stale/conflict proposal at a real note.
+        let d = build_digest(&[note("n7", "Sessions expire")]);
+        assert!(d.contains("(id: n7)"), "note id present for targeting: {d}");
     }
 
     #[test]

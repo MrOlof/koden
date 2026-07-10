@@ -22,7 +22,7 @@ use tauri::AppHandle;
 use crate::modules::brain::freshness::hash;
 use crate::modules::brain::memory::doctor;
 use crate::modules::brain::memory::proposal::{
-    is_near_duplicate, proposal_dedup_set, reject_signature, NEAR_DUPE_THRESHOLD,
+    is_near_duplicate, proposal_dedup_set, reject_signature, ProposalAction, NEAR_DUPE_THRESHOLD,
 };
 use crate::modules::brain::store::{self, SqliteIndex};
 
@@ -289,8 +289,26 @@ fn finish_response(
             .iter()
             .map(|(t, d)| proposal_dedup_set(t, proposal::undecorated_detail(d)))
             .collect();
+        // The set of real note ids for this project, for the D2 actionability gate below.
+        let note_ids: std::collections::HashSet<String> =
+            index.existing_note_ids(project_id).unwrap_or_default().into_iter().collect();
         for item in items.iter().take(cfg.max_proposals) {
             let p = proposal::to_proposal(project_id, item);
+            // D2 actionability gate: Archive/Update (reflect's stale/conflict) apply
+            // against a target note. A proposal whose target_id is missing or names no
+            // known note would strand as a reject-only card (Approve → "no target note")
+            // — drop it instead. Create/Supersede carry no target and are unaffected.
+            if matches!(p.action, ProposalAction::Archive | ProposalAction::Update)
+                && p.target_id.as_deref().is_none_or(|t| !note_ids.contains(t))
+            {
+                log::info!(
+                    "brain: reflect dropped an unactionable {} proposal '{}' (target {:?} is not a known note; project {project_id})",
+                    p.action.as_str(),
+                    p.title,
+                    p.target_id
+                );
+                continue;
+            }
             let rej = reject_signature(p.action, p.target_id.as_deref(), &p.title);
             if index.is_rejected(project_id, &rej).unwrap_or(false) {
                 continue; // declined before — don't resurrect it
@@ -848,6 +866,38 @@ mod tests {
         let sent = fk2.last_user.borrow().clone();
         assert!(sent.contains("## Already proposed (do not re-propose)"), "advisory present: {sent}");
         assert!(sent.contains(title), "advisory names the pending title: {sent}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unactionable_targets_dropped_and_valid_target_enqueues_then_applies() {
+        // The D2 seam fix, end to end. The seed note's id is `n1`.
+        let (base, idx, cfg) = temp_index_with_note("target_validation");
+        let root = base.join("proj");
+        // stale w/ valid target n1 (actionable), stale w/ unknown target, conflict w/
+        // NO target, and a plain insight (create, no target needed).
+        let json = r#"{"proposals":[
+          {"kind":"stale","title":"Archive n1","detail":"the seed note is stale now","scope":"project","confidence":"high","target":"n1"},
+          {"kind":"stale","title":"Archive ghost","detail":"a note that does not exist","scope":"project","confidence":"high","target":"ghost"},
+          {"kind":"conflict","title":"Conflict without a target","detail":"names no note at all","scope":"project","confidence":"high"},
+          {"kind":"insight","title":"A brand new insight","detail":"Something genuinely worth keeping around later.","scope":"project","confidence":"high"}
+        ]}"#;
+        let out = reflect_with_client(&idx, &fake(json.to_string()), &cfg, "p", Some("2026-07-10"), 1000);
+        assert!(matches!(out.reason, ReflectReason::Ok), "{:?}", out.reason);
+        let titles: Vec<&str> = out.proposals.iter().map(|p| p.title.as_str()).collect();
+        assert!(titles.contains(&"Archive n1"), "valid-target stale enqueues: {titles:?}");
+        assert!(titles.contains(&"A brand new insight"), "insight (create) enqueues: {titles:?}");
+        assert!(!titles.contains(&"Archive ghost"), "unknown-target archive dropped");
+        assert!(!titles.contains(&"Conflict without a target"), "target-less update dropped");
+        assert_eq!(out.proposals.len(), 2, "only the two actionable proposals: {titles:?}");
+
+        // Direction 2: the enqueued valid-target stale is now actually APPLYABLE (D2) —
+        // approving it materializes the archive against the real note.
+        let stale = out.proposals.iter().find(|p| p.title == "Archive n1").unwrap();
+        assert_eq!(stale.target_id.as_deref(), Some("n1"), "target carried onto the proposal");
+        idx.apply_proposal("p", &root, &stale.signature, "2026-07-10").unwrap();
+        let raw = std::fs::read_to_string(root.join(".koden-memory").join("n1.md")).unwrap();
+        assert!(raw.contains("status: archived"), "approve archived the target note: {raw}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
