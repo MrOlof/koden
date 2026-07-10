@@ -478,7 +478,7 @@ export function BrainMapPane() {
       const d = document.createElement("div");
       d.className = "klabel";
       d.style.cssText +=
-        ";position:absolute;left:0;top:0;pointer-events:none;white-space:nowrap;transform:translate(-50%,-50%);font-family:Manrope,system-ui,sans-serif;font-weight:700;font-size:11px;color:#aab2c0;text-shadow:0 1px 6px rgba(0,0,0,.9);";
+        ";position:absolute;left:0;top:0;pointer-events:none;white-space:nowrap;transform:translate(-50%,-50%);font-family:'Inter Variable',system-ui,sans-serif;font-weight:700;font-size:11px;color:#aab2c0;text-shadow:0 1px 6px rgba(0,0,0,.9);";
       d.textContent = m.name;
       labelLayer.appendChild(d);
       return d;
@@ -595,7 +595,7 @@ export function BrainMapPane() {
           tip.style.display = "block";
           tip.style.left = `${e.clientX}px`;
           tip.style.top = `${e.clientY - 6}px`;
-          tip.innerHTML = `<div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:#eef1f6;white-space:nowrap;">${escapeHtml(nd.label)}</div><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#7d8492;margin-top:2px;text-transform:uppercase;letter-spacing:.5px;">${escapeHtml(nd.type === "project" ? "project lobe" : nd.band)}</div>`;
+          tip.innerHTML = `<div style="font-family:'Commit Mono','JetBrains Mono',ui-monospace,monospace;font-size:12px;font-weight:700;color:#eef1f6;white-space:nowrap;">${escapeHtml(nd.label)}</div><div style="font-family:'Commit Mono','JetBrains Mono',ui-monospace,monospace;font-size:9.5px;color:#7d8492;margin-top:2px;text-transform:uppercase;letter-spacing:.5px;">${escapeHtml(nd.type === "project" ? "project lobe" : nd.band)}</div>`;
         }
       }
     };
@@ -899,7 +899,7 @@ export function BrainMapPane() {
       style={{
         background: "#03040a",
         cursor: "grab",
-        fontFamily: "Manrope, system-ui, sans-serif",
+        fontFamily: "'Inter Variable', system-ui, sans-serif",
       }}
     >
       <div ref={mountRef} className="absolute inset-0" />
