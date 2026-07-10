@@ -269,6 +269,11 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     watcher = arm_watcher(&app, &tx);
                     drop(old);
                     warm_population(&app, &index); // full reconcile (add/change/delete)
+                    // GUI-validation D1: warm_population only emits Warming{pct}
+                    // steps; without this the status sticks at the last pct
+                    // ("Indexing… 50%") forever after a mid-session add/rescan —
+                    // only the boot path (brain_loop) set Ready.
+                    set_status(&app, BrainStatus::Ready);
                     if let Some(s) = app.try_state::<BrainState>() {
                         s.registry.save_to(&cfg_path); // persist the project list
                     }
