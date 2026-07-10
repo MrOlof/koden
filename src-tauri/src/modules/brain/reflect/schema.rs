@@ -10,9 +10,17 @@ pub const MAX_NOTES: usize = 60;
 pub const MAX_NOTE_CHARS: usize = 200;
 pub const MAX_PROPOSALS: usize = 8;
 
-/// The reflect system prompt, Conductr-verbatim (`reflect-llm.ts:33-39`). The
-/// `(cap: {MAX_PROPOSALS})` is interpolated so the prompt and the cap stay coupled
-/// (em-dashes are U+2014). Built at call time via [system_prompt].
+/// The reflect system prompt (`reflect-llm.ts:33-39` + one deliberate divergence).
+/// The `(cap: {MAX_PROPOSALS})` is interpolated so the prompt and the cap stay
+/// coupled (em-dashes are U+2014). Built at call time via [system_prompt].
+///
+/// DIVERGENCE from the Conductr verbatim (2026-07-10, first LIVE paid round):
+/// neither Conductr's SYSTEM_PROMPT nor its user digest ever STATED the output
+/// schema — "a single JSON object" with no field names. The first real round
+/// (gpt-5.4-mini) returned semantically-correct proposals under invented keys
+/// (`type`/`text`/`anchors`) → InvalidOutput → the fail-streak would park the
+/// Librarian on EVERY provider. The schema line below closes that: exact keys,
+/// exact enums, model-agnostic.
 pub fn system_prompt() -> String {
     format!(
         "You are a conservative memory librarian for a developer's knowledge base. \
@@ -20,7 +28,11 @@ Given a digest of memory notes and a summary of health findings, produce a SMALL
 set of high-confidence proposals (cap: {MAX_PROPOSALS}). Only surface well-supported \
 patterns or issues \u{2014} NO speculation, no low-evidence claims. Prefer fewer, \
 higher-confidence items over many low-quality ones. Respond ONLY with a single JSON \
-object \u{2014} no prose, no code fences."
+object \u{2014} no prose, no code fences. The object MUST match exactly: \
+{{\"proposals\":[{{\"kind\":\"insight\"|\"should_remember\"|\"stale\"|\"conflict\",\
+\"title\":\"<short title>\",\"detail\":\"<one-paragraph rationale>\",\
+\"scope\":\"global\"|\"project\",\"confidence\":\"low\"|\"medium\"|\"high\"}}]}} \
+\u{2014} no other keys, and an empty proposals array when nothing is well-supported."
     )
 }
 
