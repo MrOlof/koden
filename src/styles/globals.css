@@ -142,33 +142,64 @@
     }
 }
 
+/* Terminal palette for the DEFAULT theme (koden-default). koden-default IS
+ * DEFAULT_THEME_ID, so ThemeProvider short-circuits to clearTheme() and never
+ * runs applyTheme() for it — these base vars ARE what the shipping default
+ * terminal renders. They must mirror the "Svart" ANSI 16 in
+ * modules/theme/themes/koden-default.ts (ADR-014 §2) or the default terminal
+ * falls back to a generic saturated palette. Dark = product; light overridden
+ * in :root:not(.dark) below. cursor/selection ride var(--primary) so both modes
+ * resolve to the spruce wire (dark #5b8a6f / light #4f7d68) automatically. */
 :root {
   --terminal-background: var(--background);
   --terminal-foreground: var(--foreground);
-  --terminal-cursor: var(--foreground);
+  --terminal-cursor: var(--primary);
   --terminal-cursor-accent: var(--background);
-  /* Selection must read as a clear highlight, not a faint tint: high-alpha
-   * primary fill with a contrasting glyph color so selected text stays legible.
-   * Themes override these via --terminal-selection* (see modules/theme). */
-  --terminal-selection: color-mix(in srgb, var(--primary) 45%, transparent);
+  /* Selection must read as a clear highlight, not a faint tint: primary fill
+   * with a contrasting glyph color so selected text stays legible. Themes
+   * override these via --terminal-selection* (see modules/theme). */
+  --terminal-selection: color-mix(in srgb, var(--primary) 28%, transparent);
   --terminal-selection-foreground: var(--primary-foreground);
-  --terminal-selection-inactive: color-mix(in srgb, var(--primary) 28%, transparent);
-  --terminal-ansi-black: #18181b;
-  --terminal-ansi-red: #ef4444;
-  --terminal-ansi-green: #22c55e;
-  --terminal-ansi-yellow: #eab308;
-  --terminal-ansi-blue: #3b82f6;
-  --terminal-ansi-magenta: #a855f7;
-  --terminal-ansi-cyan: #06b6d4;
-  --terminal-ansi-white: #e4e4e7;
-  --terminal-ansi-bright-black: #52525b;
-  --terminal-ansi-bright-red: #f87171;
-  --terminal-ansi-bright-green: #4ade80;
-  --terminal-ansi-bright-yellow: #facc15;
-  --terminal-ansi-bright-blue: #60a5fa;
-  --terminal-ansi-bright-magenta: #c084fc;
-  --terminal-ansi-bright-cyan: #22d3ee;
-  --terminal-ansi-bright-white: #fafafa;
+  --terminal-selection-inactive: color-mix(in srgb, var(--primary) 18%, transparent);
+  /* Svart ANSI 16 — dark (SVART_ANSI_DARK) */
+  --terminal-ansi-black: #1a1c1b;
+  --terminal-ansi-red: #d97a72;
+  --terminal-ansi-green: #7fae8f;
+  --terminal-ansi-yellow: #cfa964;
+  --terminal-ansi-blue: #7d9fc7;
+  --terminal-ansi-magenta: #ab8fb5;
+  --terminal-ansi-cyan: #82b8b4;
+  --terminal-ansi-white: #d6d4cc;
+  --terminal-ansi-bright-black: #4a4e4b;
+  --terminal-ansi-bright-red: #e8938c;
+  --terminal-ansi-bright-green: #9ac4a8;
+  --terminal-ansi-bright-yellow: #e0bd7e;
+  --terminal-ansi-bright-blue: #99b5d6;
+  --terminal-ansi-bright-magenta: #c0a8c9;
+  --terminal-ansi-bright-cyan: #9cccc8;
+  --terminal-ansi-bright-white: #f0efe9;
+}
+
+/* Svart ANSI 16 — light port (SVART_ANSI_LIGHT): same hues darkened for
+ * legibility on #f2f1ec. :root:not(.dark) (0,2,0) outranks :root (0,1,0) so it
+ * wins independent of source order; matches only when .dark is absent. */
+:root:not(.dark) {
+  --terminal-ansi-black: #2b2d2c;
+  --terminal-ansi-red: #a33f38;
+  --terminal-ansi-green: #3f6d55;
+  --terminal-ansi-yellow: #8a6a1f;
+  --terminal-ansi-blue: #3a5f8c;
+  --terminal-ansi-magenta: #6f4f7a;
+  --terminal-ansi-cyan: #356e6a;
+  --terminal-ansi-white: #5c5e58;
+  --terminal-ansi-bright-black: #676a61;
+  --terminal-ansi-bright-red: #ad4c45;
+  --terminal-ansi-bright-green: #457560;
+  --terminal-ansi-bright-yellow: #806326;
+  --terminal-ansi-bright-blue: #4a6f9c;
+  --terminal-ansi-bright-magenta: #7f5f8a;
+  --terminal-ansi-bright-cyan: #3a716d;
+  --terminal-ansi-bright-white: #2b2d2c;
 }
 
 :root {
