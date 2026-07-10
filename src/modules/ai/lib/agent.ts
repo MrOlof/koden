@@ -32,6 +32,9 @@ const localProxyFetch = createProxyFetch({ allowPrivateNetwork: true });
 
 const TOOL_LABELS: Record<string, (input: Record<string, unknown>) => string> =
   {
+    brain_search: (i) =>
+      `Searching the brain for ${ellipsize(String(i.query ?? ""), 40)}`,
+    brain_notes: () => `Reading memory notes`,
     read_file: (i) => `Reading ${shortPath(i.path)}`,
     list_directory: (i) => `Listing ${shortPath(i.path)}`,
     grep: (i) => `Grepping ${ellipsize(String(i.pattern ?? ""), 40)}`,

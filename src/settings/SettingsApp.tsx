@@ -57,9 +57,10 @@ const TABS: {
   },
   { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
   {
-    // id `agents` is the frozen persisted / deep-link contract; label is "AI".
+    // id `agents` is the frozen persisted / deep-link contract; label is
+    // "Librarian" (the chat persona + its engine live here).
     id: "agents",
-    label: "AI",
+    label: "Librarian",
     icon: RoboticIcon,
     component: AgentsSection,
   },

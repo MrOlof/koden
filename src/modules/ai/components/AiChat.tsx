@@ -211,8 +211,8 @@ export function AiChatView({
         <ConversationContent>
           <ConversationEmptyState
             icon={<Wordmark className="text-xl" />}
-            title="Ask Koden anything"
-            description="Explain command output, fix errors, generate snippets, or run a task."
+            title="Ask the Librarian"
+            description="Answers about your projects, grounded in the brain index and memory notes."
           />
         </ConversationContent>
       </Conversation>

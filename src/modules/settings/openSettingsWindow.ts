@@ -6,8 +6,8 @@ export type SettingsTab =
   | "terminal"
   | "shortcuts"
   | "models"
-  // `agents` is the AI tab (labelled "AI"); id kept for the persisted / deep-link
-  // contract. `brain` is the Koden Brain (context/memory) tab.
+  // `agents` is the Librarian tab (chat persona + engine); id kept for the
+  // persisted / deep-link contract. `brain` is the Koden Brain index tab.
   | "agents"
   | "brain"
   | "about";

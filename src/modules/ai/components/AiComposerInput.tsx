@@ -276,7 +276,7 @@ export function AiComposerInput() {
                   c.submit();
                 }
               }}
-              placeholder="Ask Koden anything   -   # for snippets and commands, @ for files"
+              placeholder="Ask the Librarian about your projects   -   # for commands, @ for files"
               rows={1}
               className={cn(
                 "max-h-40 flex-1 resize-none bg-transparent text-[13px] leading-relaxed outline-none",

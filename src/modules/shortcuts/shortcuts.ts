@@ -241,13 +241,13 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "ai.toggle",
-    label: "Toggle AI agent",
+    label: "Toggle Librarian chat",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, key: "i" }],
   },
   {
     id: "ai.askSelection",
-    label: "Ask AI about selection",
+    label: "Ask the Librarian about selection",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
   },

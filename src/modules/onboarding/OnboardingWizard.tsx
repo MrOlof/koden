@@ -553,8 +553,9 @@ function HowBody() {
         model (Ollama, LM Studio). You're in control of cost and privacy.
       </FeatureRow>
       <FeatureRow icon={RoboticIcon} title="The Librarian">
-        An optional helper that tidies your project notes over time. Off by
-        default; you can turn it on in a moment.
+        Koden's chat: it answers questions about your projects from the
+        Brain's memory, and optionally tidies your notes over time. Curation
+        is off by default; you can turn it on in a moment.
       </FeatureRow>
     </div>
   );
@@ -891,7 +892,7 @@ function DoneBody({
       icon: RoboticIcon,
       label: libEnabled
         ? "Librarian enabled"
-        : "Librarian off (enable anytime in the Brain panel)",
+        : "Librarian curation off (enable anytime in Settings › Librarian)",
     },
   ];
   return (

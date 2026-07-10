@@ -1,4 +1,5 @@
 import { buildManagedAgentTools } from "./agent";
+import { buildBrainTools } from "./brain";
 import { buildEditTools } from "./edit";
 import { buildFsTools } from "./fs";
 import { buildSearchTools } from "./search";
@@ -30,6 +31,7 @@ export { resolvePath, type ToolContext } from "./context";
  */
 export function buildTools(ctx: import("./context").ToolContext) {
   return {
+    ...buildBrainTools(ctx),
     ...buildFsTools(ctx),
     ...buildEditTools(ctx),
     ...buildSearchTools(ctx),

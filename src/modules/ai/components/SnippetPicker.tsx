@@ -37,13 +37,13 @@ export function SnippetPickerContent({
     >
       {items.length === 0 ? (
         <div className="px-3 py-2.5 text-[11px] text-muted-foreground">
-          No matches. Add snippets in Settings → Agents.
+          No matching commands.
         </div>
       ) : (
         <div className="max-h-64 overflow-y-auto py-1">
           {commands.length > 0 && (
             <>
-              <SectionHeader label="Pre-built snippets" />
+              <SectionHeader label="Commands" />
               <ul>
                 {commands.map((it) => {
                   cursor += 1;
@@ -84,6 +84,8 @@ export function SnippetPickerContent({
               </ul>
             </>
           )}
+          {/* Legacy custom snippets: the authoring UI is gone, but snippets a
+              user saved earlier still render + expand. Invisible otherwise. */}
           {snippets.length > 0 && (
             <>
               <SectionHeader label="Snippets" />

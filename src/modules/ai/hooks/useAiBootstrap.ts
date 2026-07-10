@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { firePendingReviewForSession } from "@/modules/agents/lib/review";
+import {
+  brainBudgetStatus,
+  brainLibrarianStatus,
+} from "@/modules/brain/lib/bindings";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { onKeysChanged } from "@/modules/settings/store";
+import { isKnownModelId } from "../config";
 import {
   getAllCustomEndpointKeys,
   getAllKeys,
@@ -92,6 +97,25 @@ export function useAiBootstrap(): {
   useEffect(() => {
     if (!prefsHydrated) return;
     setSelectedModelId(prefDefaultModel);
+    // The chat IS the Librarian: when the Librarian engine is on (reflect cap
+    // > 0) and its model maps to a chat ModelId, it wins over the settings
+    // default. Local/free-form Librarian models don't map — keep the default.
+    let alive = true;
+    void (async () => {
+      try {
+        const [lib, [ceiling]] = await Promise.all([
+          brainLibrarianStatus(),
+          brainBudgetStatus(),
+        ]);
+        if (!alive || !(ceiling > 0)) return;
+        if (isKnownModelId(lib.model)) setSelectedModelId(lib.model);
+      } catch {
+        // Brain not ready — the settings default already applied.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
   }, [prefsHydrated, prefDefaultModel, setSelectedModelId]);
 
   useEffect(() => {

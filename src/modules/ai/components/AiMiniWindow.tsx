@@ -49,22 +49,22 @@ import { TodoStrip } from "./TodoStrip";
 
 const SUGGESTIONS = [
   {
+    label: "What do we know here?",
+    hint: "From the brain index and notes",
+    icon: FilterIcon,
+    text: "What does the brain know about this project? Cite the notes and files you draw from.",
+  },
+  {
+    label: "Recent decisions",
+    hint: "From the memory notes",
+    icon: TerminalIcon,
+    text: "Summarize the memory notes for this project.",
+  },
+  {
     label: "Explain the last error",
     hint: "Read the terminal buffer",
     icon: AlertCircleIcon,
     text: "Explain the last error in the terminal.",
-  },
-  {
-    label: "Generate a command",
-    hint: "Tell me what you want to do",
-    icon: TerminalIcon,
-    text: "Give me a command to ",
-  },
-  {
-    label: "Summarize buffer",
-    hint: "Recap recent activity",
-    icon: FilterIcon,
-    text: "Summarize what just happened in the terminal.",
   },
 ];
 
@@ -290,7 +290,7 @@ function Header({
       <div className="flex min-w-0 items-center gap-1.5">
         <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-semibold">
           <HugeiconsIcon icon={Brain02Icon} size={14} strokeWidth={1.75} />
-          Koden
+          Librarian
         </span>
         {messages !== undefined ? (
           <ContextIndicator messages={messages} />
@@ -549,13 +549,14 @@ function SessionRow({
 function EmptyState({ onPick }: { onPick: (text: string) => void }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 px-8 py-10 text-center">
-      <img src="/logo.png" alt="Koden" className="size-14 opacity-90" />
+      <img src="/logo.png" alt="The Librarian" className="size-14 opacity-90" />
       <div className="space-y-1.5">
         <p className="text-[14px] font-semibold tracking-tight">
-          Ask Koden anything
+          Ask the Librarian about your projects
         </p>
         <p className="max-w-[18rem] text-[11.5px] leading-relaxed text-muted-foreground">
-          Koden sees the active terminal — cwd, recent commands, and output.
+          Grounded in the Koden Brain — project index, memory notes, and the
+          active terminal.
         </p>
       </div>
       <div className="flex w-full flex-col gap-2.5">
