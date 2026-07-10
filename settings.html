@@ -6,8 +6,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Koden — Settings</title>
     <script>
+      // FOUC guard: paint the ACTIVE theme's real background on first frame so
+      // the boot flash matches, not a generic dark/light. Keyed off the id
+      // shadow ThemeProvider writes ([darkBg, lightBg] per built-in theme).
+      // SYNC WARNING: this block is duplicated BYTE-FOR-BYTE across the two
+      // boot HTMLs (index.html + settings.html) — the two webviews can't share
+      // a module at boot. Edit both copies together and keep them identical.
       (function () {
         try {
+          var BG = {
+            caffeine: ["#111111", "#f9f9f9"],
+            catppuccin: ["#1e1e2e", "#eff1f5"],
+            claude: ["#1f1e1d", "#faf9f5"],
+            gruvbox: ["#282828", "#fbf1c7"],
+            "koden-default": ["#0a0b0b", "#f2f1ec"],
+            nord: ["#2e3440", "#eceff4"],
+            "rose-pine": ["#191724", "#faf4ed"],
+            sage: ["#1c211e", "#f4f6f0"],
+            tide: ["#14191c", "#f2f6f5"],
+            "tokyo-night": ["#1a1b26", "#f2f1ec"],
+          };
+          var DEFAULT = ["#0a0b0b", "#f2f1ec"];
           var t = localStorage.getItem("koden-ui-theme-shadow");
           var resolved =
             t === "light" || t === "dark"
@@ -16,8 +35,10 @@
                 ? "dark"
                 : "light";
           document.documentElement.classList.add(resolved);
+          var id = localStorage.getItem("koden-ui-theme-id-shadow");
+          var pair = (id && BG[id]) || DEFAULT;
           document.documentElement.style.backgroundColor =
-            resolved === "dark" ? "#0a0a0a" : "#ffffff";
+            resolved === "dark" ? pair[0] : pair[1];
         } catch (e) {}
       })();
     </script>

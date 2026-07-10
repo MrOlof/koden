@@ -8,7 +8,6 @@ import {
   useState,
 } from "react";
 import {
-  DEFAULT_THEME_ID,
   EDITOR_THEMES,
   loadPreferences,
   onPreferencesChange,
@@ -25,7 +24,7 @@ import {
 } from "./customThemes";
 import { SurfaceLayer } from "./SurfaceLayer";
 import { getBuiltinTheme, getDefaultTheme } from "./themes";
-import type { Theme } from "./types";
+import { DEFAULT_THEME_ID, type Theme } from "./types";
 
 export type { Theme };
 export type ThemeModePref = ThemePref;

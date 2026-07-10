@@ -12,6 +12,9 @@ import {
   type ModelId,
 } from "@/modules/ai/config";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
+// Canonical DEFAULT_THEME_ID lives in theme/types (a leaf module — importing it
+// here creates no cycle even though theme/ThemeProvider imports this store).
+import { DEFAULT_THEME_ID } from "@/modules/theme/types";
 import {
   DEFAULT_LINK_TYPES,
   type LinkTypeConfig,
@@ -20,8 +23,6 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LazyStore } from "@tauri-apps/plugin-store";
 
 export type ThemePref = "system" | "light" | "dark";
-
-export const DEFAULT_THEME_ID = "koden-default";
 
 export type BackgroundKind = "none" | "image";
 
