@@ -3,6 +3,7 @@
 
 pub mod changes;
 pub mod graph;
+pub mod journal;
 pub mod migrate;
 pub mod plan;
 pub mod schema;

@@ -351,6 +351,10 @@ pub(crate) fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_
     if let Err(e) = budget::reconcile(index.conn(), reservation_id, charge_usd, now_ms) {
         log::warn!("brain: reflect budget reconcile failed ({e}); reservation {reservation_id} left for the boot sweep");
     }
+    // Back up the new durable spend total to the canonical-tail journal — reconcile
+    // runs through `conn()` outside the SqliteIndex spend methods, so this is where a
+    // header-destroyed store learns it already spent (and can't re-spend the ceiling).
+    index.journal_budget();
 }
 
 /// Manual-trigger reflect (the real path): always builds + sends if the budget/key
