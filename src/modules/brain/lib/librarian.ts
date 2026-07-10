@@ -1,5 +1,5 @@
 // Shared Librarian model-selection helpers, used by both the onboarding wizard and
-// the Settings "Koden AI" tab. The Librarian does light background work, so it
+// the Settings "Brain" tab. The Librarian does light background work, so it
 // defaults to the cheapest curated model of the chosen provider; rates ($/million
 // tokens) come from the same MODEL_PRICING the main AI uses so the spend meter stays
 // accurate, and local providers are free.
