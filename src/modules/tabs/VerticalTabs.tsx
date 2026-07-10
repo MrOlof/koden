@@ -169,7 +169,7 @@ export function VerticalTabs({
     >
       <div className="flex shrink-0 items-center justify-between px-2 py-1.5">
         <span className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          Tabs
+          Workspace
         </span>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
