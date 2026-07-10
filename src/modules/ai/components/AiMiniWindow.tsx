@@ -222,8 +222,16 @@ function Body({
           and stream back into AiChatView above — instead of the shared docked
           input bar, which shows the terminal shell input when a terminal tab is
           active (the "it went to pwsh" report). */}
-      <div className="shrink-0 border-t border-border/60 px-3 py-2">
-        <AiComposerInput />
+      <div className="shrink-0 border-t border-border/60 p-2.5">
+        <div
+          className={cn(
+            "rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 transition-colors",
+            "focus-within:border-ring/60 focus-within:bg-muted/50 focus-within:ring-1 focus-within:ring-ring/30",
+            "[&_textarea]:min-h-16 [&_textarea]:text-[13.5px]",
+          )}
+        >
+          <AiComposerInput />
+        </div>
       </div>
     </>
   );
