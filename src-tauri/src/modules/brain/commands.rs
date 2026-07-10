@@ -527,17 +527,28 @@ pub fn brain_doctor(
     enqueue(&state, BrainEvent::Doctor { project, now_date })
 }
 
-/// Resolve a proposal: `reject = true` declines it (persists a reject-signature
-/// so it can't reappear); otherwise marks it applied. The Librarian never edits
-/// user files itself — applying the change is the human's (or a tasked agent's) job.
+/// Resolve a proposal: `reject = true` declines it (persists a reject-signature so it
+/// can't reappear); otherwise APPROVES it, which now MATERIALIZES the change onto the
+/// project's `.koden-memory/*.md` files (D2). The write runs on the worker (single
+/// writer); this command awaits the outcome so a soft failure — e.g. the target note
+/// was renamed/deleted since the proposal was queued — surfaces as `Err(String)` and
+/// the proposal stays pending. Contract unchanged for the frontend: `Result<(), String>`.
 #[tauri::command]
-pub fn brain_resolve_proposal(
-    state: State<BrainState>,
+pub async fn brain_resolve_proposal(
+    state: State<'_, BrainState>,
     project: String,
     signature: String,
     reject: bool,
 ) -> Result<(), String> {
-    enqueue(&state, BrainEvent::ResolveProposal { project, signature, reject })
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    enqueue(&state, BrainEvent::ResolveProposal { project, signature, reject, reply: Some(tx) })?;
+    // Wait for the writer thread on the blocking pool (never the async runtime): the
+    // command is already off the UI thread, so blocking here can't freeze the UI.
+    blocking(move || {
+        rx.recv()
+            .unwrap_or_else(|_| Err("brain worker stopped before the proposal resolved".to_string()))
+    })
+    .await?
 }
 
 /// Trigger a budgeted LLM reflect pass (P4) — the only token-spending path.

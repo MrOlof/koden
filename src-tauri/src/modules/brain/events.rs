@@ -8,6 +8,13 @@ use std::path::PathBuf;
 use crate::modules::brain::reflect::{ReflectFinish, ReflectResponse};
 use crate::modules::brain::ProjectId;
 
+/// Reply channel for a `ResolveProposal`: the worker (the single writer) sends the
+/// apply/reject outcome back so the command can surface a SOFT failure — e.g. a
+/// missing target note on approve — to the caller as `Err(String)`, while the write
+/// itself stays on the writer thread (single-writer discipline). `None` = fire and
+/// forget (the worker just logs a failure).
+pub type ResolveReply = std::sync::mpsc::Sender<Result<(), String>>;
+
 /// Independent mirror of the pty `koden:agent-signal` JSON payload. Resolves
 /// blocker **B2** without touching `pty/agent_detect.rs`: the brain `app.listen`s
 /// the already-JSON event and deserializes into *its own* type, so it never
@@ -52,11 +59,14 @@ pub enum BrainEvent {
         now_date: Option<String>,
     },
     /// Resolve a proposal: `reject` persists its reject-signature + marks it
-    /// rejected; otherwise marks it applied.
+    /// rejected; otherwise APPLIES it (materializes the note change onto disk +
+    /// marks it applied). `reply` (if set) receives the outcome so the command can
+    /// surface a soft failure.
     ResolveProposal {
         project: ProjectId,
         signature: String,
         reject: bool,
+        reply: Option<ResolveReply>,
     },
     /// Run a budgeted LLM reflect pass (P4) — the only token-spending path.
     /// Manual-trigger only; `project = None` reflects every registered project.

@@ -357,8 +357,35 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     }
                 }
             }
-            BrainEvent::ResolveProposal { project, signature, reject } => {
-                let _ = index.resolve_proposal(&project, &signature, reject);
+            BrainEvent::ResolveProposal { project, signature, reject, reply } => {
+                // Reject = status flip + reject-signature (unchanged). Approve = APPLY:
+                // materialize the note change onto disk on this single writer thread,
+                // where the writer connection + the registry (project root) both live.
+                let result: Result<(), String> = if reject {
+                    index
+                        .resolve_proposal(&project, &signature, true)
+                        .map(|_| ())
+                        .map_err(|e| format!("reject proposal: {e}"))
+                } else {
+                    match project_root(&app, &project) {
+                        Some(root) => {
+                            let now_date = memory::apply::epoch_ms_to_iso_date(now_epoch_ms());
+                            index.apply_proposal(
+                                &project,
+                                std::path::Path::new(&root),
+                                &signature,
+                                &now_date,
+                            )
+                        }
+                        None => Err(format!("unknown project '{project}'")),
+                    }
+                };
+                if let Err(e) = &result {
+                    log::warn!("brain: resolve proposal '{signature}' failed ({e})");
+                }
+                if let Some(tx) = reply {
+                    let _ = tx.send(result); // command awaits this; ignore a dropped rx
+                }
             }
             BrainEvent::SetBudget { ceiling_usd } => {
                 if let Err(e) = index.set_budget_ceiling(ceiling_usd, now_epoch_ms()) {

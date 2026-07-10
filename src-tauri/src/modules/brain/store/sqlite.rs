@@ -846,6 +846,102 @@ impl SqliteIndex {
         Ok(true)
     }
 
+    /// APPLY an approved proposal (D2): materialize its change onto the project's
+    /// `.koden-memory/*.md` files, re-sync the notes table from disk, and flip the
+    /// proposal to `applied`. The human-gated WRITE half the Koden port dropped — the
+    /// Librarian only proposes; approval (this) is the exclusive writer.
+    ///
+    /// Ordering (files are file-canonical, the table + proposal row are journaled):
+    ///  1. read the pending proposal (missing / already-resolved → idempotent no-op),
+    ///  2. resolve the target note's path from the notes table (archive/update/
+    ///     supersede) — a missing target is a SOFT error that leaves the proposal
+    ///     pending (return `Err`, nothing written),
+    ///  3. materialize the file change(s) crash-safely (`memory::apply`),
+    ///  4. re-scan the memory folder so the notes table reflects the new/edited file
+    ///     (idempotent), then
+    ///  5. mark the proposal `applied` + journal the status flip.
+    ///
+    /// Reject is unchanged — it stays on [`Self::resolve_proposal`].
+    pub fn apply_proposal(
+        &self,
+        project_id: &str,
+        root: &Path,
+        signature: &str,
+        now_date: &str,
+    ) -> Result<(), String> {
+        use crate::modules::brain::memory::{self, apply};
+
+        let row: Option<(String, Option<String>, String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT action, target_id, title, detail, status FROM proposals WHERE project_id=?1 AND signature=?2",
+                (project_id, signature),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .ok();
+        let Some((action_s, target_id, title, detail, status)) = row else {
+            return Ok(()); // no such proposal — nothing to apply (idempotent)
+        };
+        if status != "pending" {
+            return Ok(()); // already applied/rejected — idempotent no-op
+        }
+        let action = ProposalAction::from_token(&action_s)
+            .ok_or_else(|| format!("proposal has unknown action '{action_s}'"))?;
+
+        // Resolve the target note's absolute path (archive/update/supersede). A target
+        // id with no matching notes-table row is a soft failure — the note was renamed
+        // or deleted since the proposal was queued; leave the proposal pending.
+        let target_path = match action {
+            ProposalAction::Create => None,
+            ProposalAction::Archive | ProposalAction::Update | ProposalAction::Supersede => {
+                let tid = target_id
+                    .as_deref()
+                    .ok_or_else(|| format!("{} proposal has no target note", action.as_str()))?;
+                let rel: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT path FROM notes WHERE project_id=?1 AND id=?2",
+                        (project_id, tid),
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let rel = rel.ok_or_else(|| format!("target note '{tid}' not found"))?;
+                Some(root.join(rel))
+            }
+        };
+
+        // Materialize the file change(s). A soft error (missing/unreadable target)
+        // returns here BEFORE any DB mutation, so the proposal stays pending.
+        apply::materialize(
+            &root.join(memory::MEMORY_DIR),
+            action,
+            target_path.as_deref(),
+            target_id.as_deref(),
+            &title,
+            &detail,
+            now_date,
+        )?;
+
+        // Re-sync the structured notes table from disk (idempotent) so the new/edited
+        // note is queryable and the UI's notes polling shows it.
+        memory::scan_project_memory(self, project_id, root);
+
+        // Mark applied + journal the status flip (mirrors resolve_proposal's tail).
+        self.conn
+            .execute(
+                "UPDATE proposals SET status='applied' WHERE project_id=?1 AND signature=?2",
+                rusqlite::params![project_id, signature],
+            )
+            .map_err(|e| format!("mark proposal applied: {e}"))?;
+        self.journal.append_row(
+            &self.conn,
+            "proposals",
+            "project_id=?1 AND signature=?2",
+            rusqlite::params![project_id, signature],
+        );
+        Ok(())
+    }
+
     /// Flush the WAL (called on the idle tick).
     pub fn checkpoint(&self) {
         let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
