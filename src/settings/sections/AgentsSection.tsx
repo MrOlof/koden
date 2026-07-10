@@ -546,7 +546,7 @@ function CustomInstructionsBlock({ value }: { value: string }) {
           focused.current = false;
           if (draft !== value) void setCustomInstructions(draft);
         }}
-        placeholder="e.g. Always reply in concise bullet points. Prefer pnpm over npm. My machine is an M-series Mac."
+        placeholder="e.g. Be terse. Prefer pnpm over npm. I'm on Windows 11 with PowerShell."
         className="min-h-[100px] resize-y bg-card/60 font-sans text-[12px] leading-relaxed border border-border"
       />
     </div>

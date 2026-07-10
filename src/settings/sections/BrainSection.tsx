@@ -9,12 +9,18 @@ import {
 } from "@/modules/ai/config";
 import { getAllKeys, setKey } from "@/modules/ai/lib/keyring";
 import {
+  type BrainStatusReport,
   brainBudgetStatus,
+  brainIndexStatus,
   brainLibrarianActivity,
   brainLibrarianStatus,
+  brainRescan,
   brainSetBudget,
   brainSetLibrarian,
+  brainSetWorkspace,
+  brainWorkspaceStatus,
   type LibrarianActivity,
+  type WorkspaceStatus,
 } from "@/modules/brain/lib/bindings";
 import {
   cheapestLibModel,
@@ -24,18 +30,195 @@ import {
   libLocalBaseUrl,
   libRates,
 } from "@/modules/brain/lib/librarian";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
+
+// Warning color rides the theme's ANSI yellow (amber = needs-input, per the
+// status-color convention) instead of a hardcoded Tailwind literal.
+const WARN_CLS = "text-[color:var(--terminal-ansi-yellow)]";
 
 export function BrainSection() {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
         title="Brain"
-        description="Koden Brain curates your project memory. The Librarian is an optional helper that proposes memory updates for you to approve — runs on a small, cheap model."
+        description="Koden Brain indexes your projects locally — search and context are free and always on. The Librarian is an optional curator on a small paid model: it only proposes memory updates, you approve every change."
       />
+      <IndexBlock />
       <BrainLibrarianBlock />
     </div>
+  );
+}
+
+// The always-on half of the Brain: what's indexed, from where, and its health.
+// This is the post-setup home; first-run setup lives in the onboarding wizard,
+// but an unconfigured workspace can also be fixed right here.
+function IndexBlock() {
+  const [report, setReport] = useState<BrainStatusReport | null>(null);
+  const [ws, setWs] = useState<WorkspaceStatus | null>(null);
+  const [wsPath, setWsPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [r, w] = await Promise.all([
+        brainIndexStatus(),
+        brainWorkspaceStatus(),
+      ]);
+      setReport(r);
+      setWs(w);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  // Keep the progress live while the index warms.
+  const warming = report?.status.state === "warming";
+  useEffect(() => {
+    if (!warming) return;
+    const id = window.setInterval(() => void refresh(), 3000);
+    return () => window.clearInterval(id);
+  }, [warming, refresh]);
+
+  const setWorkspace = async () => {
+    const p = wsPath.trim();
+    if (!p) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await brainSetWorkspace(p);
+      setWsPath("");
+      await refresh();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rescan = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await brainRescan();
+      // Rescan is non-blocking on the worker; give it a beat, then show progress.
+      window.setTimeout(() => void refresh(), 1500);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const totalFiles =
+    report?.projects.reduce((n, p) => n + p.files, 0) ?? 0;
+
+  const chip =
+    report == null ? null : report.status.state === "ready" ? (
+      <span className="font-mono text-[10px] text-primary">● ready</span>
+    ) : report.status.state === "warming" ? (
+      <span className={`font-mono text-[10px] ${WARN_CLS}`}>
+        ◐ indexing {report.status.pct}%
+      </span>
+    ) : (
+      <span
+        className="font-mono text-[10px] text-destructive"
+        title={report.status.reason}
+      >
+        ● degraded
+      </span>
+    );
+
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <Label>Index</Label>
+        {chip}
+      </div>
+
+      {ws && !ws.configured ? (
+        <>
+          <span className="text-[10.5px] text-muted-foreground">
+            No workspace yet. Point the Brain at the folder that holds your
+            projects — each real project inside (git repo or manifest) is
+            registered on its own.
+          </span>
+          <div className="flex items-end gap-2">
+            <Input
+              value={wsPath}
+              onChange={(e) => setWsPath(e.target.value)}
+              placeholder="C:\path\to\your\projects"
+              className="h-8 font-mono text-[12px]"
+            />
+            <Button
+              size="sm"
+              disabled={busy || !wsPath.trim()}
+              onClick={() => void setWorkspace()}
+              className="h-8"
+            >
+              {busy ? "Setting…" : "Set workspace"}
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span
+              className="truncate font-mono text-[10.5px] text-muted-foreground"
+              title={ws?.root ?? ""}
+            >
+              {ws?.root ?? "…"}
+            </span>
+            <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground tabular-nums">
+              {report?.projects.length ?? 0} projects · {totalFiles} files
+            </span>
+          </div>
+
+          {report && report.projects.length > 0 ? (
+            <div className="flex max-h-44 flex-col gap-0.5 overflow-y-auto rounded-md border bg-muted/20 p-2">
+              {report.projects.map((p) => (
+                <div
+                  key={p.project.id}
+                  className="flex items-center gap-2 font-mono text-[10.5px]"
+                >
+                  <span className="flex-1 truncate text-foreground/80">
+                    {p.project.name}
+                  </span>
+                  <span className="text-muted-foreground tabular-nums">
+                    {p.files} files
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {report?.status.state === "degraded" ? (
+            <span className="text-[10px] text-destructive">
+              {report.status.reason}
+            </span>
+          ) : null}
+
+          <div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || warming}
+              onClick={() => void rescan()}
+              className="h-7 text-[11px]"
+            >
+              {warming ? "Indexing…" : busy ? "Rescanning…" : "Rescan all"}
+            </Button>
+          </div>
+        </>
+      )}
+
+      {err ? <span className="text-[10px] text-destructive">{err}</span> : null}
+    </section>
   );
 }
 
@@ -48,6 +231,7 @@ function BrainLibrarianBlock() {
   const [baseUrl, setBaseUrl] = useState("");
   const [cap, setCap] = useState("");
   const [spent, setSpent] = useState(0);
+  const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -104,6 +288,7 @@ function BrainLibrarianBlock() {
         setBaseUrl(lib.base_url);
         setCap(budget[0] > 0 ? String(budget[0]) : "");
         setSpent(budget[1]);
+        setEnabled(budget[0] > 0);
         setKeyed(
           PROVIDERS.filter((p) => providerSupportsKey(p.id) && keys[p.id]).map(
             (p) => p.id,
@@ -125,6 +310,7 @@ function BrainLibrarianBlock() {
   const local = isLocalLibProvider(provider);
   const rates = libRates(provider, model);
   const cloudModels = local ? [] : libCloudModels(provider);
+  const needsKey = enabled && !local && !keyed.includes(provider);
 
   const pickProvider = (p: ProviderId) => {
     setProvider(p);
@@ -156,6 +342,7 @@ function BrainLibrarianBlock() {
         r.outRate,
       );
       await brainSetBudget(budget > 0 ? budget : 0);
+      setEnabled(budget > 0);
       setSaved(true);
     } catch (e) {
       setErr(String(e));
@@ -169,15 +356,29 @@ function BrainLibrarianBlock() {
 
   return (
     <section className="flex flex-col gap-2">
-      <div className="flex flex-col">
-        <Label>Brain Librarian</Label>
-        <span className="text-[10.5px] text-muted-foreground">
-          Optional helper that curates your project memory — it only proposes,
-          you approve. Runs on a small, cheap model; set a spending cap to
-          enable it (clear to $0 to turn it off). Spent so far: $
-          {spent.toFixed(4)}.
-        </span>
+      <div className="flex items-center justify-between">
+        <Label>Librarian</Label>
+        {enabled ? (
+          needsKey ? (
+            <span className={`font-mono text-[10px] ${WARN_CLS}`}>
+              ◐ on · key missing
+            </span>
+          ) : (
+            <span className="font-mono text-[10px] text-primary">
+              ● on · {model || "no model"}
+            </span>
+          )
+        ) : (
+          <span className="font-mono text-[10px] text-muted-foreground">
+            ○ off
+          </span>
+        )}
       </div>
+      <span className="text-[10.5px] text-muted-foreground">
+        {enabled
+          ? `Proposes memory updates after you work; nothing lands without your approval. Spent $${spent.toFixed(4)} so far. Clear the cap to $0 to turn it off.`
+          : "Off — indexing and search stay free and always-on. Turn the Librarian on by setting a spending cap; it proposes memory updates, you approve."}
+      </span>
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="flex flex-col gap-1">
@@ -248,7 +449,7 @@ function BrainLibrarianBlock() {
               placeholder={
                 keyed.includes(provider)
                   ? "•••• saved — paste to replace"
-                  : "Paste API key (stored securely)"
+                  : "Paste API key (stored in the OS keyring)"
               }
               className="h-8 text-[12px]"
             />
@@ -299,7 +500,13 @@ function BrainLibrarianBlock() {
           onClick={() => void save()}
           className="h-8"
         >
-          {busy ? "Saving…" : saved ? "Saved" : "Save"}
+          {busy
+            ? "Saving…"
+            : saved
+              ? "Saved"
+              : !enabled && Number.parseFloat(cap) > 0
+                ? "Enable Librarian"
+                : "Save"}
         </Button>
       </div>
 
@@ -312,10 +519,8 @@ function BrainLibrarianBlock() {
 
       <LibrarianActivityPanel
         activity={activity}
-        capOn={Number.parseFloat(cap) > 0}
-        needsKey={
-          Number.parseFloat(cap) > 0 && !local && !keyed.includes(provider)
-        }
+        capOn={enabled || Number.parseFloat(cap) > 0}
+        needsKey={needsKey}
       />
     </section>
   );
@@ -361,7 +566,7 @@ function LibrarianActivityPanel({
           Off — set a spending cap above to enable it.
         </span>
       ) : needsKey ? (
-        <span className="text-[10.5px] text-amber-500">
+        <span className={`text-[10.5px] ${WARN_CLS}`}>
           Enabled, but no API key for this provider — reflect can't call. Add a
           key for it above.
         </span>
@@ -381,9 +586,7 @@ function LibrarianActivityPanel({
             >
               <span
                 className={
-                  c.status === "spent"
-                    ? "text-emerald-500"
-                    : "text-muted-foreground"
+                  c.status === "spent" ? "text-primary" : "text-muted-foreground"
                 }
               >
                 ●

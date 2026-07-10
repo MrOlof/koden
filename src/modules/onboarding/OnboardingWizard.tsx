@@ -577,7 +577,7 @@ function AiBody({
   return (
     <div className="space-y-4">
       {configured ? (
-        <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+        <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
           <HugeiconsIcon
             icon={CheckmarkCircle02Icon}
             size={15}
@@ -907,7 +907,7 @@ function DoneBody({
               icon={r.ok ? CheckmarkCircle02Icon : r.icon}
               size={17}
               strokeWidth={1.75}
-              className={r.ok ? "text-emerald-500" : "text-muted-foreground/60"}
+              className={r.ok ? "text-primary" : "text-muted-foreground/60"}
             />
             <span className={r.ok ? "" : "text-muted-foreground"}>
               {r.label}
