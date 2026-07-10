@@ -134,10 +134,12 @@ pub fn spawn(
 
     let session_cwd = cwd.clone();
     let mut cmd = shell_init::build_command(cwd, workspace, blocks)?;
-    // Per-pane identity. Claude Code's status hooks tag the agent bus with this
-    // so Koden can route working/attention/finished back to THIS terminal's
-    // node (the OSC 777 / terminalSequence path is not honored by the installed
-    // CC, so status flows over the file bus like the Director's subagents do).
+    // Per-pane identity. Claude Code's hooks tag the shared bus file with this
+    // so Koden can route user turns and subagent lifecycle back to THIS
+    // terminal's node. The OSC 777 / terminalSequence path is honored only
+    // intermittently by CC >= 2.1.206 (emission is UI-lifecycle-gated inside
+    // the CLI), so it drives best-effort status while the bus stays the
+    // authoritative per-turn channel.
     cmd.env("KODEN_SESSION", id.to_string());
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);

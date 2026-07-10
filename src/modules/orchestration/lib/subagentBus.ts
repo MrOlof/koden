@@ -2,7 +2,7 @@
  * Tolerant recovery of `subagent-start` Task events from the agent bus.
  *
  * The Claude Code hook that records a Task subagent is NOT atomic: it does
- * `{ printf prefix; cat stdin; printf suffix } >> agent-bus.jsonl` as three
+ * `{ printf prefix; cat stdin; printf suffix } >> director-bus.jsonl` as three
  * separate writes. When the model dispatches two Task subagents in PARALLEL the
  * two hook processes interleave their appends, producing corrupt, multi-line,
  * nested-and-concatenated JSON (doubled `subagent-start` wrappers, payloads
@@ -41,8 +41,9 @@ const TOOL_USE_ID_RE = /"tool_use_id"\s*:\s*"([^"\\]*)"/g;
 // payload's value never bleeds into a later one.
 const DESCRIPTION_RE = /"description"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const SUBAGENT_TYPE_RE = /"subagent_type"\s*:\s*"([^"\\]*)"/g;
-// The agent-bus parent (pty) wrapper precedes the payload.
-const PARENT_RE = /"parent"\s*:\s*(\d+)/g;
+// The agent-bus parent (pty) wrapper precedes the payload. The hook writes it
+// as a quoted shell interpolation ("parent":"5"); bare digits also accepted.
+const PARENT_RE = /"parent"\s*:\s*"?(\d+)"?/g;
 
 /** Last (right-most) capture of a global regex within `text`, or null. */
 function lastMatch(re: RegExp, text: string): string | null {

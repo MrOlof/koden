@@ -27,6 +27,7 @@ export {
   leafHasForegroundProcess,
   leafIdForPty,
   navigateFocusedBlocks,
+  ptyIdForLeaf,
   respawnSession,
   scrollToCommandForLeaf,
   submitToLeaf,

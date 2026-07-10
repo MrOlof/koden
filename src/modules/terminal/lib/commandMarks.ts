@@ -1,4 +1,5 @@
 import type { IMarker, Terminal } from "@xterm/xterm";
+import type { BusTurn } from "./turnStore";
 
 // Trimmed sibling of BlockDecorations: just enough OSC bookkeeping to power the
 // command minimap. One tick per shell command (OSC 133;C/D) AND one per Claude
@@ -57,15 +58,15 @@ const TURN_TEXT_SCAN = 4;
 // must not collide with the OSC-133 mark ids (a small `++idSeq` counter), so
 // they live in a high, line-addressed band: SCAN_ID_BASE + bufferLine. A few
 // hundred-thousand-line scrollback stays well under MAX_SAFE_INTEGER.
+// Bus-delivered turns live above this band (turnStore.TURN_LINE_BASE).
 const SCAN_ID_BASE = 1_000_000_000;
-
-// Bus-delivered turns (addTurn) live in their own high band, above scan ids, so
-// they sort after real command marks (small buffer lines) in arrival order and
-// never collide with either. They are NOT xterm markers — see addTurn/busTurns.
-const TURN_LINE_BASE = 2_000_000_000;
 
 export type CommandMarksOptions = {
   onChange?: () => void;
+  // Session-lifetime bus turns for this leaf (see turnStore.ts). Injected so
+  // the storage outlives this per-slot-bind instance: a pool rebind constructs
+  // a fresh CommandMarks over the same store and the Inputs history persists.
+  getBusTurns?: () => readonly BusTurn[];
 };
 
 export class CommandMarks {
@@ -74,27 +75,23 @@ export class CommandMarks {
   private altScreen = false;
   private readonly disposers: (() => void)[] = [];
   private readonly onChange?: () => void;
+  private readonly getBusTurns?: () => readonly BusTurn[];
   private notifyRaf: number | null = null;
-  // Memoized scrollback scan for Claude user-prompt lines (scanTurns). The
-  // active buffer only grows (lines append; xterm trims the TOP past the
-  // scrollback cap, but `length` then stops growing), so keying the cache on
-  // `buffer.active.length` re-scans only when new rows arrived. -1 forces the
-  // first scan.
+  // Memoized scrollback scan for Claude user-prompt lines (scanTurns), keyed
+  // on a monotonic dirty counter bumped by onWriteParsed/onScroll. It must NOT
+  // key on `buffer.active.length`: once the scrollback cap is reached xterm
+  // trims the TOP while `length` (and baseY) stay constant, so a length key
+  // freezes the cache forever and turns typed after cap-fill never surface.
   private scanCache: CommandMark[] = [];
-  private scanCacheLen = -1;
-  // Turns delivered by the UserPromptSubmit bus hook (addTurn). Stored as plain
-  // {id,text} — NOT xterm markers — because a repainting agent TUI (claude/codex)
-  // redraws/scrolls so registerMarker lines go to -1 and getMarks would filter
-  // all but the latest out (the "only the first turn shows" bug). They carry
-  // their own prompt text, so no buffer anchor is needed.
-  private readonly busTurns: { id: number; text: string }[] = [];
-  private turnSeq = 0;
+  private scanCacheKey = -1;
+  private scanDirty = 0;
 
   constructor(
     private readonly term: Terminal,
     opts?: CommandMarksOptions,
   ) {
     this.onChange = opts?.onChange;
+    this.getBusTurns = opts?.getBusTurns;
     const osc133 = term.parser.registerOscHandler(133, (data) => {
       this.onOsc133(data);
       // Return false so any other OSC-133 handler on the term (cwd/prompt
@@ -111,8 +108,14 @@ export class CommandMarks {
       // runs (xterm stops at the first handler that returns true).
       return false;
     });
-    const parsed = term.onWriteParsed(() => this.syncAlt());
-    const scroll = term.onScroll(() => this.scheduleNotify());
+    const parsed = term.onWriteParsed(() => {
+      this.scanDirty++;
+      this.syncAlt();
+    });
+    const scroll = term.onScroll(() => {
+      this.scanDirty++;
+      this.scheduleNotify();
+    });
     const render = term.onRender(() => this.scheduleNotify());
     this.disposers.push(
       () => osc133.dispose(),
@@ -161,20 +164,6 @@ export class CommandMarks {
     this.startMark("", "turn");
   }
 
-  // Record a turn carrying the REAL prompt text, delivered by the Claude/Codex
-  // UserPromptSubmit bus hook (the reliable channel). Stored as a plain entry,
-  // NOT an xterm marker: an agent TUI repaints, which invalidates marker lines so
-  // marker-backed turns vanish from getMarks() after the first. Once any turn
-  // exists, getMarks() stops merging the lossy scrollback scrape — so this both
-  // captures EVERY turn and shows the actual prompt instead of a scraped line.
-  addTurn(text: string): void {
-    const t = text.trim().slice(0, 400);
-    if (!t) return;
-    this.busTurns.push({ id: TURN_LINE_BASE + ++this.turnSeq, text: t });
-    while (this.busTurns.length > MAX_MARKS) this.busTurns.shift();
-    this.scheduleNotify();
-  }
-
   private startMark(text: string, status: CommandStatus): void {
     const m = this.term.registerMarker(0);
     if (!m) return;
@@ -215,34 +204,65 @@ export class CommandMarks {
   getMarks(): CommandMark[] {
     const buf = this.term.buffer.active;
     const out: CommandMark[] = [];
-    let hasTurnMark = false;
+    const markerTurns: CommandMark[] = [];
     for (const mk of this.marks) {
       if (mk.marker.isDisposed || mk.marker.line < 0) continue;
-      if (mk.status === "turn") hasTurnMark = true;
       const text =
         mk.status === "turn"
           ? mk.text || this.turnText(buf, mk.marker.line)
           : mk.text || this.lineText(buf, mk.marker.line) || "command";
-      out.push({ id: mk.id, line: mk.marker.line, text, status: mk.status });
+      const row = {
+        id: mk.id,
+        line: mk.marker.line,
+        text,
+        status: mk.status,
+      };
+      if (mk.status === "turn") markerTurns.push(row);
+      else out.push(row);
     }
-    // Bus-delivered turns (the reliable UserPromptSubmit channel): append in
-    // arrival order with synthetic high-band lines so they sort after the real
-    // command marks. Marker-free, so a repainting agent TUI can't drop them.
-    if (this.busTurns.length > 0) {
-      hasTurnMark = true;
-      for (const t of this.busTurns) {
-        out.push({ id: t.id, line: t.id, text: t.text, status: "turn" });
+    const busTurns = this.getBusTurns?.() ?? [];
+    if (busTurns.length > 0) {
+      // Bus turns (the UserPromptSubmit hook channel) are the authoritative
+      // turn rows: real prompt text, one per submit. Marker/scanned turns are
+      // the SAME submits with lossier text, so they are dropped as rows; but
+      // when one carries matching text its buffer line becomes the bus turn's
+      // scroll anchor, so click-to-scroll lands on the prompt instead of
+      // clamping a synthetic high-band line to the bottom.
+      const anchors = [...markerTurns, ...this.scanTurns()].sort(
+        (a, b) => a.line - b.line,
+      );
+      const used = new Set<number>();
+      for (const t of busTurns) {
+        const anchor = anchors.find(
+          (a) => !used.has(a.line) && a.text === t.text,
+        );
+        if (anchor) used.add(anchor.line);
+        out.push({
+          id: t.id,
+          line: anchor ? anchor.line : t.id,
+          text: t.text,
+          status: "turn",
+        });
       }
-    }
-    // scanTurns (scraping the rendered `>` lines) is the FALLBACK ONLY. Once a
-    // real turn arrives (the UserPromptSubmit bus hook with prompt text), use
-    // those exclusively — the scrape is lossy (the TUI repaints, so it only
-    // catches the first turn) and would double-list or override real text.
-    if (!hasTurnMark) {
+    } else {
+      // No bus signal (hook missing, or session predates it): merge marker
+      // turns with the scrollback scrape. The scrape must ALWAYS run here; a
+      // CLI that emits the OSC 777 marker for only SOME submits (CC 2.1.206's
+      // UI-gated terminalSequence) would otherwise hide every unmarked turn.
+      // A scanned line duplicating a marker turn (same text within the rows
+      // turnText scraped) is skipped.
+      out.push(...markerTurns);
       const seenLines = new Set<number>();
       for (const m of out) seenLines.add(m.line);
       for (const t of this.scanTurns()) {
         if (seenLines.has(t.line)) continue;
+        const dup = markerTurns.some(
+          (mt) =>
+            t.line >= mt.line &&
+            t.line < mt.line + TURN_TEXT_SCAN &&
+            mt.text === t.text,
+        );
+        if (dup) continue;
         seenLines.add(t.line);
         out.push(t);
       }
@@ -254,18 +274,19 @@ export class CommandMarks {
   // Recover Claude user turns by reading the rendered scrollback directly,
   // independent of any OSC signal: Claude prints each submitted prompt as a
   // `>` / `❯` line (see extractTurnPrompt). Walk the whole active buffer once
-  // per growth and emit a CommandMark per matching line. This is the robust
-  // path — it does not depend on the OSC 777 UserPromptSubmit hook (which the
-  // installed Claude Code v2.1.x does not emit to the PTY), so a plain
-  // `claude`/`cm` session still lists the user's messages.
+  // per change batch and emit a CommandMark per matching line. This backstops
+  // the OSC 777 UserPromptSubmit marker, whose emission in CC >= 2.1.206 is
+  // UI-lifecycle-gated inside the CLI (a silent no-op whenever its emitter is
+  // unregistered): treat the marker as best-effort, never the turn source of
+  // truth. The bus channel (turnStore) is authoritative when present.
   //
-  // Memoized on buffer length: a full walk of a few thousand lines on demand
-  // is cheap, and we only redo it when the buffer actually grew, so repeated
-  // getMarks() reads (one per frame while the popover is open) reuse the scan.
+  // Memoized on scanDirty (bumped per write/scroll): a full walk of a few
+  // thousand lines on demand is cheap, and repeated getMarks() reads (one per
+  // frame while the popover is open) reuse the scan between changes.
   scanTurns(): CommandMark[] {
     const buf = this.term.buffer.active;
     const len = buf.length;
-    if (len === this.scanCacheLen) return this.scanCache;
+    if (this.scanDirty === this.scanCacheKey) return this.scanCache;
 
     // The live input box at the bottom holds the prompt the user is CURRENTLY
     // typing; its `>` line is not a submitted turn yet. The cursor sits inside
@@ -293,7 +314,7 @@ export class CommandMarks {
       });
     }
     this.scanCache = turns;
-    this.scanCacheLen = len;
+    this.scanCacheKey = this.scanDirty;
     return turns;
   }
 
@@ -338,7 +359,6 @@ export class CommandMarks {
       } catch {}
     }
     this.marks.length = 0;
-    this.busTurns.length = 0;
     for (const d of this.disposers) {
       try {
         d();

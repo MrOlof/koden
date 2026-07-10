@@ -43,7 +43,7 @@ export { OrchestrationActivityBridge } from "./components/OrchestrationActivityB
 export { OrchestrationAttentionBridge } from "./components/OrchestrationAttentionBridge";
 export { AgentBusBridge } from "./components/AgentBusBridge";
 export { DirectorBusBridge } from "./components/DirectorBusBridge";
-export type { DirectorCommand } from "./lib/bus";
+export { acceptDirectorCommand, type DirectorCommand } from "./lib/bus";
 export { AgentTopologyView } from "./components/AgentTopologyView";
 export { MessageFlowInspector } from "./components/MessageFlowInspector";
 export {

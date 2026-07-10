@@ -42,20 +42,26 @@ fn bus_path_str() -> String {
 
 // Subagent lifecycle hooks append a command to the bus file directly (rather
 // than emitting a terminalSequence, which isn't honored for these events) so
-// Koden can surface the orchestrator's subagents in real time.
+// Koden can surface the orchestrator's subagents in real time. `parent` stamps
+// the emitting session's pty (KODEN_SESSION): the bus is shared by EVERY Koden
+// pane's hooks, so without it any pane's claude would steer the Director's
+// roster and per-pane subagent nodes couldn't be routed at all.
 fn bus_hook_cmd(cmd: &str) -> String {
     let bus = bus_path_str();
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && printf '%s\n' '{{"cmd":"{cmd}"}}' >> "{bus}" || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && printf '{{"cmd":"{cmd}","parent":"%s"}}\n' "$KODEN_SESSION" >> "{bus}" || true"#
     )
 }
 
-// PreToolUse(Task): append the raw hook input (compacted to one line) so Koden
-// can read the subagent's task description and name the node for it.
+// PreToolUse(Task): append the raw hook input (compacted to one line), wrapped
+// as {"parent":"<pty>","task":<raw>}, so Koden can read the subagent's task
+// description, name the node, and attribute it to this session. Still
+// non-atomic (three writes); the tolerant tool_use_id scanner on the frontend
+// (subagentBus.ts) recovers interleaved/corrupt appends.
 fn bus_cat_cmd() -> String {
     let bus = bus_path_str();
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && {{ cat | tr -d '\r\n'; printf '\n'; }} >> "{bus}" || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && {{ printf '{{"parent":"%s","task":' "$KODEN_SESSION"; cat | tr -d '\r\n'; printf '}}\n'; }} >> "{bus}" || true"#
     )
 }
 
@@ -63,9 +69,11 @@ fn bus_cat_cmd() -> String {
 // submitted prompt as JSON on the hook's stdin; we append one bus line
 // {"cmd":"user-turn","id":<KODEN_SESSION>,"data":<raw hook json>} (newlines
 // stripped so the bus stays JSONL) and STILL emit the `working` status sequence
-// on stdout so the dock status is unchanged. The OSC/terminalSequence channel
-// alone isn't honored for this event, hence the bus — the frontend reads
-// data.prompt and mints a text-bearing turn mark for the Inputs list.
+// on stdout so the dock status is unchanged. Note the CC drift: pre-2.1.206
+// never honored terminalSequence for this event; 2.1.206 honors it
+// INTERMITTENTLY (emission is UI-lifecycle-gated inside the CLI, silently
+// dropped whenever its emitter is unregistered). The bus line stays the
+// authoritative turn channel; the OSC marker is best-effort status only.
 fn user_turn_hook_cmd() -> String {
     let bus = bus_path_str();
     format!(
@@ -255,13 +263,19 @@ mod tests {
         assert_eq!(hook_count(&out, "PreToolUse"), 1);
         assert_eq!(hook_count(&out, "SubagentStop"), 1);
         assert_eq!(out["hooks"]["PreToolUse"][0]["matcher"], "Task");
-        // PreToolUse(Task) appends the raw hook input to the bus (for naming);
-        // SubagentStop appends a stop command. Both target the bus file.
+        // PreToolUse(Task) appends the raw hook input wrapped with the session
+        // pty ({"parent":"<pty>","task":...}); SubagentStop / PostToolUse
+        // append parent-stamped commands. All target the bus file.
         let pre = command(&out, "PreToolUse", 0);
         assert!(pre.contains("cat"));
         assert!(pre.contains("director-bus.jsonl"));
-        assert!(command(&out, "SubagentStop", 0).contains(r#"{"cmd":"subagent-stop"}"#));
-        assert!(command(&out, "PostToolUse", 0).contains(r#"{"cmd":"director-active"}"#));
+        assert!(pre.contains(r#"{"parent":"%s","task":"#));
+        assert!(pre.contains("$KODEN_SESSION"));
+        let stop = command(&out, "SubagentStop", 0);
+        assert!(stop.contains(r#"{"cmd":"subagent-stop","parent":"%s"}"#));
+        assert!(stop.contains("$KODEN_SESSION"));
+        assert!(command(&out, "PostToolUse", 0)
+            .contains(r#"{"cmd":"director-active","parent":"%s"}"#));
     }
 
     #[test]

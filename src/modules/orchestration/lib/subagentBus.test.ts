@@ -80,6 +80,40 @@ describe("extractSubagentStarts", () => {
     expect(extractSubagentStarts(status, seen)).toHaveLength(0);
   });
 
+  it("parses the quoted parent the hook wrapper actually emits", () => {
+    // bus_cat_cmd interpolates $KODEN_SESSION as a shell string, so parent
+    // arrives quoted: {"parent":"5",...}. The old digits-only PARENT_RE never
+    // matched it and every recovered subagent was dropped as parentless.
+    const wrapped =
+      '{"parent":"5","task":{"tool_name":"Task","tool_input":{"description":"Quoted parent","subagent_type":"worker"},"tool_use_id":"call_q1"}}';
+    const seen = new Set<string>();
+    const got = extractSubagentStarts(wrapped, seen);
+    expect(got).toHaveLength(1);
+    expect(got[0]).toEqual({
+      parent: 5,
+      description: "Quoted parent",
+      subagentType: "worker",
+      toolUseId: "call_q1",
+    });
+  });
+
+  it("attributes interleaved corrupt wrappers to their quoted parents", () => {
+    // Two parallel hooks from DIFFERENT panes interleave their non-atomic
+    // writes; each payload must keep its own nearest-preceding parent.
+    const corrupt =
+      '{"parent":"5","task":{"parent":"5","task":' +
+      '{"tool_input":{"description":"A","subagent_type":"worker"},"tool_use_id":"call_i1"}' +
+      '{"parent":"8","task":{"tool_input":{"description":"B","subagent_type":"worker"},"tool_use_id":"call_i2"}}}\n' +
+      "}";
+    const seen = new Set<string>();
+    const got = extractSubagentStarts(corrupt, seen);
+    expect(got).toHaveLength(2);
+    expect(got[0].parent).toBe(5);
+    expect(got[1].parent).toBe(8);
+    // Dedup on re-read still holds for the quoted shape.
+    expect(extractSubagentStarts(corrupt, seen)).toHaveLength(0);
+  });
+
   it("falls back to the last parent seen when a payload's prefix has none", () => {
     // Second payload's own `parent` wrapper got eaten by the interleave; it
     // inherits the running lastParent (15) from the first.

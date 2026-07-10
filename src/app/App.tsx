@@ -44,6 +44,7 @@ import {
 import { OnboardingWizard } from "@/modules/onboarding/OnboardingWizard";
 import {
   AGENT_ROLES,
+  acceptDirectorCommand,
   type Agent,
   AgentBusBridge,
   AgentDock,
@@ -107,6 +108,7 @@ import {
   leafIds,
   navigateFocusedBlocks,
   nextPaneColor,
+  ptyIdForLeaf,
   respawnSession,
   type SplitPaneType,
   type SplitSide,
@@ -367,14 +369,12 @@ export default function App() {
       clearWorkspaceState,
     });
 
-  // Absolute path of the Director command bus, home-rooted so it's stable
-  // regardless of where `cm` cd's a session. Used by both the Director and the
-  // workers it spawns (so they report status/messages to the same bus).
+  // Absolute path of the shared hook bus, home-rooted so it's stable
+  // regardless of where `cm` cd's a session. EVERY Claude/Codex hook writes
+  // here (agent.rs bus_path_str / agent_codex.rs): user turns, subagent
+  // lifecycle, Director commands. Tailed always by AgentBusBridge (per-pane
+  // turns/subagents) and, while a Director runs, by DirectorBusBridge.
   const busPath = home ? `${home}/.koden/director-bus.jsonl` : null;
-  // Per-pane agent status bus: every Koden claude/codex session appends
-  // working/attention/finished here tagged with its pty id. Watched always (not
-  // only while a Director runs) so any terminal's status reaches the dock.
-  const agentBusPath = home ? `${home}/.koden/agent-bus.jsonl` : null;
 
   // Ensures ~/.koden exists and is authorized for Koden fs writes. Order
   // matters: authorize home first (it exists and canonicalizes), then create
@@ -513,11 +513,12 @@ export default function App() {
     });
   }, []);
 
-  // Start each session with a fresh agent status bus so the reader never
-  // replays a previous run's (now dead-pty) events.
+  // Start each app run with a fresh hook bus so it never accumulates across
+  // runs (safe: AgentBusBridge primes-to-end and self-heals on shrink, and
+  // DirectorBusBridge is inactive at boot).
   useEffect(() => {
-    if (agentBusPath) void native.writeFile(agentBusPath, "").catch(() => {});
-  }, [agentBusPath]);
+    if (busPath) void native.writeFile(busPath, "").catch(() => {});
+  }, [busPath]);
 
   // Drive per-tab status pills from terminal agent signals (working / waiting
   // for approval / done / exited). Maps the signal's pty to its tab.
@@ -1386,6 +1387,9 @@ export default function App() {
   );
 
   const subagentCounterRef = useRef(0);
+  // Pty id of the live Director's pane, set at launch; scopes bus dispatch to
+  // the Director's own session (the bus file is shared by every pane's hooks).
+  const directorPtyRef = useRef<number | null>(null);
   const authorizedCwds = useRef(new Set<string>());
   const handleTerminalCwd = useCallback(
     (leafId: number, cwd: string) => {
@@ -1470,6 +1474,9 @@ export default function App() {
         }
       }
       await whenSessionReady(leafId);
+      // Record the Director pane's pty so bus dispatch can reject lifecycle
+      // lines emitted by OTHER sessions' hooks (they share the bus file).
+      directorPtyRef.current = ptyIdForLeaf(leafId);
       submitToLeaf(leafId, command);
     },
     [busPath, ensureKodenDir, withGist, inheritedCwdForNewTab],
@@ -1589,6 +1596,9 @@ export default function App() {
   // Materialize a Director bus command into visible orchestration state.
   const handleDirectorCommand = useCallback(
     (cmd: DirectorCommand) => {
+      // The bus is shared by every pane's hooks: only the Director session's
+      // own lifecycle lines may steer its status/roster.
+      if (!acceptDirectorCommand(cmd, directorPtyRef.current)) return;
       const store = useOrchestrationStore.getState();
       const directorId =
         Object.values(store.agents).find((a) => a.role === "director")?.id ??
@@ -2307,7 +2317,7 @@ export default function App() {
           <UsageBridge />
           <OrchestrationActivityBridge />
           <OrchestrationAttentionBridge />
-          <AgentBusBridge busPath={agentBusPath} />
+          <AgentBusBridge busPath={busPath} />
           <DirectorBusBridge
             busPath={directorLive ? busPath : null}
             onCommand={handleDirectorCommand}

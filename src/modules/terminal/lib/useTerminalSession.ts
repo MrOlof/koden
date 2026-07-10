@@ -29,6 +29,7 @@ import {
 import type { BlockMode } from "../block/lib/modeMachine";
 import { CommandMarks, type CommandMinimapData } from "./commandMarks";
 import { DormantRing } from "./dormantRing";
+import { addBusTurn, busTurnsForLeaf, clearBusTurns } from "./turnStore";
 import {
   createShellIntegrationState,
   registerCwdHandler,
@@ -240,11 +241,12 @@ export function getCommandMarksForLeaf(
   };
 }
 
-// Mint a real (text-bearing) Claude user-turn mark on a leaf's CommandMarks —
-// called by the AgentBusBridge when the UserPromptSubmit bus hook delivers a
-// prompt. No-op if the session isn't bound yet.
+// Record a real (text-bearing) Claude/Codex user turn for a leaf, called by
+// the AgentBusBridge when the UserPromptSubmit bus hook delivers a prompt.
+// Storage is session-lifetime (turnStore), so turns delivered while the pane
+// is hidden/unbound are kept and pool rebinds never wipe the Inputs history.
 export function addTurnForLeaf(leafId: number, text: string): void {
-  sessions.get(leafId)?.commandMarks?.addTurn(text);
+  if (addBusTurn(leafId, text)) notifyCommands(leafId);
 }
 
 export function subscribeCommandsForLeaf(
@@ -364,6 +366,12 @@ export function leafIdForPty(ptyId: number): number | null {
     if (s.pty?.id === ptyId) return leafId;
   }
   return null;
+}
+
+// Reverse of leafIdForPty: the session-owned pty id for a leaf (bus lines are
+// tagged with KODEN_SESSION = pty id). Null until the pty has opened.
+export function ptyIdForLeaf(leafId: number): number | null {
+  return sessions.get(leafId)?.pty?.id ?? null;
 }
 
 function leafBusy(s: Session): boolean {
@@ -936,6 +944,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
       // mount is what's gated by the pref, this is cheap when unobserved.
       const commandMarks = new CommandMarks(term, {
         onChange: () => notifyCommands(leafId),
+        getBusTurns: () => busTurnsForLeaf(leafId),
       });
       s.commandMarks = commandMarks;
       return [
@@ -1092,6 +1101,7 @@ export function disposeSession(leafId: number): void {
   blockViewportListeners.delete(leafId);
   commandListeners.delete(leafId);
   searchAddons.delete(leafId);
+  clearBusTurns(leafId);
   readyLeaves.delete(leafId);
   const waiters = readyWaiters.get(leafId);
   if (waiters) {
