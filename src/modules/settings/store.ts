@@ -117,6 +117,7 @@ export type Preferences = {
   terminalCursorBlink: boolean;
   terminalFontFamily: string;
   terminalLetterSpacing: number;
+  terminalLineHeight: number;
   terminalFontSize: number;
   terminalScrollback: number;
   lastWslDistro: string | null;
@@ -183,6 +184,7 @@ const KEY_LINK_TYPES = "linkTypes";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
+const KEY_TERMINAL_LINE_HEIGHT = "terminalLineHeight";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
@@ -204,6 +206,12 @@ export const TERMINAL_FONT_SIZE_MAX = 32;
 export const TERMINAL_FONT_SIZES = [
   10, 12, 13, 14, 15, 16, 18, 20, 22, 24,
 ] as const;
+
+// xterm's lineHeight multiplies the cell height. 1.0 = the current implicit
+// behavior; higher loosens the rows. Kept as a small preset list like the
+// letter-spacing control.
+export const TERMINAL_LINE_HEIGHT_DEFAULT = 1.0;
+export const TERMINAL_LINE_HEIGHTS = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6] as const;
 
 export const TERMINAL_SCROLLBACK_DEFAULT = 2000;
 export const TERMINAL_SCROLLBACK_MIN = 200;
@@ -257,6 +265,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalCursorBlink: false,
   terminalFontFamily: "",
   terminalLetterSpacing: 0,
+  terminalLineHeight: TERMINAL_LINE_HEIGHT_DEFAULT,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
   lastWslDistro: null,
@@ -418,6 +427,10 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalLetterSpacing:
       get<number>(KEY_TERMINAL_LETTER_SPACING) ??
       DEFAULT_PREFERENCES.terminalLetterSpacing,
+    terminalLineHeight: clampLineHeight(
+      get<number>(KEY_TERMINAL_LINE_HEIGHT) ??
+        DEFAULT_PREFERENCES.terminalLineHeight,
+    ),
     terminalFontSize:
       get<number>(KEY_TERMINAL_FONT_SIZE) ??
       DEFAULT_PREFERENCES.terminalFontSize,
@@ -695,6 +708,16 @@ export async function setTerminalLetterSpacing(value: number): Promise<void> {
   await writePref(KEY_TERMINAL_LETTER_SPACING, clamped);
 }
 
+function clampLineHeight(v: number): number {
+  if (!Number.isFinite(v)) return TERMINAL_LINE_HEIGHT_DEFAULT;
+  // Round to one decimal to match the preset steps; xterm needs >= 1.
+  return Math.min(2, Math.max(1, Math.round(v * 10) / 10));
+}
+
+export async function setTerminalLineHeight(value: number): Promise<void> {
+  await writePref(KEY_TERMINAL_LINE_HEIGHT, clampLineHeight(value));
+}
+
 export async function setTerminalFontSize(value: number): Promise<void> {
   const clamped = Number.isFinite(value)
     ? Math.min(
@@ -784,79 +807,29 @@ export async function resetShortcuts(): Promise<void> {
 
 export type PrefKey = keyof Preferences;
 
+// Every preference is persisted under a store key identical to its Preferences
+// field name (each KEY_* constant's value equals the field writePref writes it
+// to), so the store-key → PrefKey map is just the identity over the known
+// preference keys. Deriving it from DEFAULT_PREFERENCES keeps it from drifting
+// out of sync with the Preferences type as settings are added.
+const STORE_KEY_TO_PREF: Record<string, PrefKey> = Object.fromEntries(
+  (Object.keys(DEFAULT_PREFERENCES) as PrefKey[]).map((k) => [k, k]),
+);
+
 /** Subscribe to changes from any window (settings → main). */
 export async function onPreferencesChange(
   cb: (key: PrefKey, value: unknown) => void,
 ): Promise<UnlistenFn> {
-  const map: Record<string, PrefKey> = {
-    [KEY_THEME]: "theme",
-    [KEY_THEME_ID]: "themeId",
-    [KEY_BG_KIND]: "backgroundKind",
-    [KEY_BG_IMAGE_ID]: "backgroundImageId",
-    [KEY_BG_OPACITY]: "backgroundOpacity",
-    [KEY_BG_BLUR]: "backgroundBlur",
-    [KEY_DEFAULT_MODEL]: "defaultModelId",
-    [KEY_EDITOR_THEME]: "editorTheme",
-    [KEY_CUSTOM_INSTRUCTIONS]: "customInstructions",
-    [KEY_AUTOSTART]: "autostart",
-    [KEY_RESTORE_WINDOW]: "restoreWindowState",
-    [KEY_AUTOCOMPLETE_ENABLED]: "autocompleteEnabled",
-    [KEY_AUTOCOMPLETE_PROVIDER]: "autocompleteProvider",
-    [KEY_AUTOCOMPLETE_MODEL]: "autocompleteModelId",
-    [KEY_LMSTUDIO_BASE_URL]: "lmstudioBaseURL",
-    [KEY_LMSTUDIO_MODEL_ID]: "lmstudioModelId",
-    [KEY_MLX_BASE_URL]: "mlxBaseURL",
-    [KEY_MLX_MODEL_ID]: "mlxModelId",
-    [KEY_OLLAMA_BASE_URL]: "ollamaBaseURL",
-    [KEY_OLLAMA_MODEL_ID]: "ollamaModelId",
-    [KEY_OPENAI_COMPAT_BASE_URL]: "openaiCompatibleBaseURL",
-    [KEY_OPENAI_COMPAT_MODEL_ID]: "openaiCompatibleModelId",
-    [KEY_OPENAI_COMPAT_CONTEXT_LIMIT]: "openaiCompatibleContextLimit",
-    [KEY_CUSTOM_ENDPOINTS]: "customEndpoints",
-    [KEY_OPENROUTER_MODEL_ID]: "openrouterModelId",
-    [KEY_FAVORITE_MODELS]: "favoriteModelIds",
-    [KEY_RECENT_MODELS]: "recentModelIds",
-    [KEY_VIM_MODE]: "vimMode",
-    [KEY_SHOW_HIDDEN]: "showHidden",
-    [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
-    [KEY_DEFAULT_FOLDER]: "defaultFolder",
-    [KEY_PANE_COLOR_MODE]: "paneColorMode",
-    [KEY_PANE_COLOR_PALETTE]: "paneColorPalette",
-    [KEY_PANE_COLOR_TERMINAL]: "paneColorTerminal",
-    [KEY_PANE_COLOR_NOTES]: "paneColorNotes",
-    [KEY_PANE_COLOR_TASK]: "paneColorTask",
-    [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
-    [KEY_SMART_LINKS_ENABLED]: "smartLinksEnabled",
-    [KEY_COMMAND_MINIMAP_ENABLED]: "commandMinimapEnabled",
-    [KEY_AUTO_UPDATE_CHECK]: "autoUpdateCheck",
-    [KEY_LINK_TYPES]: "linkTypes",
-    [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
-    [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
-    [KEY_TERMINAL_LETTER_SPACING]: "terminalLetterSpacing",
-    [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",
-    [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
-    [KEY_LAST_WSL_DISTRO]: "lastWslDistro",
-    [KEY_ZOOM_LEVEL]: "zoomLevel",
-    [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",
-    [KEY_AUTO_RETRY_ENABLED]: "autoRetryEnabled",
-    [KEY_USAGE_GUARD_ENABLED]: "usageGuardEnabled",
-    [KEY_USAGE_GUARD_WARN_PCT]: "usageGuardWarnPct",
-    [KEY_USAGE_GUARD_PAUSE_PCT]: "usageGuardPausePct",
-    [KEY_USAGE_GUARD_HARD_STOP]: "usageGuardHardStop",
-    [KEY_SHORTCUTS]: "shortcuts",
-    [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
-    [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
-  };
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().
   const unsubLocal = await store.onChange<unknown>((key, value) => {
-    const mapped = map[key];
+    const mapped = STORE_KEY_TO_PREF[key];
     if (mapped) cb(mapped, value);
   });
   const unsubEvent = await listen<{ key: string; value: unknown }>(
     PREFS_CHANGED_EVENT,
     (e) => {
-      const mapped = map[e.payload.key];
+      const mapped = STORE_KEY_TO_PREF[e.payload.key];
       if (mapped) cb(mapped, e.payload.value);
     },
   );

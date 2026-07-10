@@ -18,14 +18,32 @@ import { listBuiltinThemes } from "@/modules/theme/themes";
 import { validateTheme } from "@/modules/theme/validateTheme";
 import { deleteThemeFile, emitThemeEdit } from "@/modules/theme/themeFiles";
 import { DEFAULT_THEME_ID } from "@/modules/theme/types";
-import { Edit02Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
+import type { ThemePref } from "@/modules/settings/store";
+import {
+  ComputerIcon,
+  Edit02Icon,
+  Moon02Icon,
+  PlusSignIcon,
+  Sun03Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useMemo, useRef, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 
+const APPEARANCE: {
+  id: ThemePref;
+  label: string;
+  icon: typeof ComputerIcon;
+}[] = [
+  { id: "system", label: "System", icon: ComputerIcon },
+  { id: "light", label: "Light", icon: Sun03Icon },
+  { id: "dark", label: "Dark", icon: Moon02Icon },
+];
+
 export function ThemesSection() {
-  const { themeId, setThemeId, resolvedMode, customThemes } = useTheme();
+  const { themeId, setThemeId, resolvedMode, customThemes, mode, setMode } =
+    useTheme();
   const builtinThemes = listBuiltinThemes();
   const themes = useMemo(
     () => [...builtinThemes, ...customThemes],
@@ -120,8 +138,30 @@ export function ThemesSection() {
     <div className="flex flex-col gap-6">
       <SectionHeader
         title="Themes"
-        description="Theme, background image, and customization."
+        description="Mode, theme, background image, and customization."
       />
+
+      <div className="flex flex-col gap-2">
+        <Label>Appearance</Label>
+        <div className="grid grid-cols-3 gap-2">
+          {APPEARANCE.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => setMode(o.id)}
+              className={cn(
+                "group flex h-20 flex-col items-center justify-center gap-1.5 rounded-lg border bg-card transition-all",
+                mode === o.id
+                  ? "border-foreground/60 ring-1 ring-foreground/20"
+                  : "border-border/60 hover:border-border",
+              )}
+            >
+              <HugeiconsIcon icon={o.icon} size={18} strokeWidth={1.5} />
+              <span className="text-[11.5px]">{o.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div
         className="flex flex-col gap-2"

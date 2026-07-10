@@ -41,6 +41,24 @@ export function ensureMonoFontsLoaded(): Promise<void> {
   return monoReady;
 }
 
+/**
+ * The subset of NERD_FONT_CANDIDATES actually installed on this machine, in
+ * candidate order. Powers the curated terminal-font dropdown in settings; the
+ * free-text field still accepts anything else. Read-only probe, no side effects.
+ */
+export function detectNerdFonts(): string[] {
+  if (typeof document === "undefined" || !document.fonts?.check) return [];
+  const found: string[] = [];
+  for (const f of NERD_FONT_CANDIDATES) {
+    try {
+      if (document.fonts.check(`12px "${f}"`)) found.push(f);
+    } catch {
+      // Some browsers throw on invalid font shorthand; ignore.
+    }
+  }
+  return found;
+}
+
 export function detectMonoFontFamily(): string {
   if (detected) return detected;
   if (typeof document === "undefined" || !document.fonts) {

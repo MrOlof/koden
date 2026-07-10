@@ -5,20 +5,24 @@ import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   AiScanIcon,
+  Brain02Icon,
   InformationCircleIcon,
   KeyboardIcon,
   PaintBoardIcon,
   RoboticIcon,
   Settings01Icon,
+  TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type JSX, useEffect, useState } from "react";
 import { AboutSection } from "./sections/AboutSection";
 import { AgentsSection } from "./sections/AgentsSection";
+import { BrainSection } from "./sections/BrainSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
+import { TerminalSection } from "./sections/TerminalSection";
 import { ThemesSection } from "./sections/ThemesSection";
 
 const TABS: {
@@ -40,6 +44,12 @@ const TABS: {
     component: ThemesSection,
   },
   {
+    id: "terminal",
+    label: "Terminal",
+    icon: TerminalIcon,
+    component: TerminalSection,
+  },
+  {
     id: "shortcuts",
     label: "Shortcuts",
     icon: KeyboardIcon,
@@ -47,10 +57,17 @@ const TABS: {
   },
   { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
   {
+    // id `agents` is the frozen persisted / deep-link contract; label is "AI".
     id: "agents",
-    label: "Koden AI",
+    label: "AI",
     icon: RoboticIcon,
     component: AgentsSection,
+  },
+  {
+    id: "brain",
+    label: "Brain",
+    icon: Brain02Icon,
+    component: BrainSection,
   },
   {
     id: "about",
@@ -60,23 +77,26 @@ const TABS: {
   },
 ];
 
-const VALID_TABS: SettingsTab[] = [
-  "general",
-  "themes",
-  "shortcuts",
-  "models",
-  "agents",
-  "about",
-];
+const VALID_TABS: SettingsTab[] = TABS.map((t) => t.id);
+
+// Legacy deep-link ids that fold onto a current tab. Single source for both the
+// initial URL read and the runtime `koden:settings-tab` event.
+const LEGACY_TAB_REDIRECTS: Record<string, SettingsTab> = {
+  ai: "models",
+  connections: "models",
+};
+
+function resolveTab(raw: string | null | undefined): SettingsTab | null {
+  if (!raw) return null;
+  if (raw in LEGACY_TAB_REDIRECTS) return LEGACY_TAB_REDIRECTS[raw];
+  if ((VALID_TABS as string[]).includes(raw)) return raw as SettingsTab;
+  return null;
+}
 
 function readInitialTab(): SettingsTab {
   if (typeof window === "undefined") return "general";
   const url = new URL(window.location.href);
-  const t = url.searchParams.get("tab");
-  // Back-compat: legacy "ai" / "connections" → "models".
-  if (t === "ai" || t === "connections") return "models";
-  if (t && (VALID_TABS as string[]).includes(t)) return t as SettingsTab;
-  return "general";
+  return resolveTab(url.searchParams.get("tab")) ?? "general";
 }
 
 export function SettingsApp() {
@@ -90,13 +110,8 @@ export function SettingsApp() {
 
   useEffect(() => {
     const apply = (detail: string) => {
-      if (detail === "ai" || detail === "connections") {
-        setActive("models");
-        return;
-      }
-      if ((VALID_TABS as string[]).includes(detail)) {
-        setActive(detail as SettingsTab);
-      }
+      const resolved = resolveTab(detail);
+      if (resolved) setActive(resolved);
     };
     const unlistenPromise = getCurrentWebviewWindow().listen<string>(
       "koden:settings-tab",

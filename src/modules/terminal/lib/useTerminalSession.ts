@@ -44,6 +44,7 @@ import {
   applyFontFamily,
   applyFontSize,
   applyLetterSpacing,
+  applyLineHeight,
   applyTheme as applyPoolTheme,
   applyScrollback,
   applyWebglPreference,
@@ -1181,6 +1182,11 @@ export function useTerminalSession({
   useEffect(() => {
     applyLetterSpacing(letterSpacing);
   }, [letterSpacing]);
+
+  const lineHeight = usePreferencesStore((p) => p.terminalLineHeight);
+  useEffect(() => {
+    applyLineHeight(lineHeight);
+  }, [lineHeight]);
 
   const scrollback = usePreferencesStore((p) => p.terminalScrollback);
   useEffect(() => {

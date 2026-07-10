@@ -201,6 +201,7 @@ function termOptions() {
   return {
     fontFamily: prefs.terminalFontFamily || detectMonoFontFamily(),
     letterSpacing: prefs.terminalLetterSpacing,
+    lineHeight: prefs.terminalLineHeight,
     fontSize: Math.max(4, Math.round(prefs.terminalFontSize * prefs.zoomLevel)),
     theme: buildTerminalTheme(),
     cursorBlink: false,
@@ -953,6 +954,14 @@ export function applyLetterSpacing(spacing: number): void {
   for (const slot of slots) {
     if (slot.term.options.letterSpacing === spacing) continue;
     slot.term.options.letterSpacing = spacing;
+    refitSlot(slot);
+  }
+}
+
+export function applyLineHeight(value: number): void {
+  for (const slot of slots) {
+    if (slot.term.options.lineHeight === value) continue;
+    slot.term.options.lineHeight = value;
     refitSlot(slot);
   }
 }
