@@ -56,6 +56,19 @@ fn detail_for(item: &ProposalItem) -> String {
     s
 }
 
+/// The marker [detail_for] appends before the "scope · confidence" decoration.
+/// Splitting a STORED detail on it recovers the model's raw rationale for semantic
+/// dedup, so the identical decoration (and evidence lines, which follow it) never
+/// inflates Jaccard similarity between two distinct proposals.
+const DECORATION_MARKER: &str = "\n\n(reflect \u{b7} scope:";
+
+/// The model's raw detail with any reviewer-facing decoration stripped. A no-op for
+/// doctor-sourced proposals (the marker is absent), so both proposal sources compare
+/// on the same footing.
+pub fn undecorated_detail(stored_detail: &str) -> &str {
+    stored_detail.split(DECORATION_MARKER).next().unwrap_or(stored_detail)
+}
+
 /// Map one validated item to a pending `reflect`-sourced proposal for `project_id`.
 /// `target_id` is `None`: the model does not reliably reference an existing note id,
 /// so reflect proposes against the project and the human resolves the target.
@@ -99,6 +112,17 @@ mod tests {
         assert_eq!(to_proposal("p", &item(ProposalKind::ShouldRemember, "t")).action, ProposalAction::Create);
         assert_eq!(to_proposal("p", &item(ProposalKind::Stale, "t")).action, ProposalAction::Archive);
         assert_eq!(to_proposal("p", &item(ProposalKind::Conflict, "t")).action, ProposalAction::Update);
+    }
+
+    #[test]
+    fn undecorated_detail_recovers_raw_model_text() {
+        // Guards against marker drift: whatever detail_for appends, undecorated_detail
+        // must strip it back to the model's raw rationale.
+        let p = to_proposal("proj", &item(ProposalKind::Insight, "t"));
+        assert!(p.detail.contains("scope:"), "decorated as stored: {}", p.detail);
+        assert_eq!(undecorated_detail(&p.detail), "body", "decoration + evidence stripped");
+        // A plain (doctor-style) detail with no marker is returned untouched.
+        assert_eq!(undecorated_detail("just a plain finding detail"), "just a plain finding detail");
     }
 
     #[test]

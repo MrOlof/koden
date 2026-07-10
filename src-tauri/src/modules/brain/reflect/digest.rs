@@ -22,6 +22,20 @@ use super::schema::{MAX_NOTE_CHARS, MAX_NOTES};
 /// First-20 cap for the findings summary, mirroring Conductr (`reflect-llm.ts:230`).
 const MAX_FINDING_LINES: usize = 20;
 
+/// Bound on the note title echoed into a finding line — enough to identify the note,
+/// short enough not to bloat the digest (or the token estimate).
+const MAX_FINDING_TITLE_CHARS: usize = 80;
+
+/// Char-cut a note title for a finding line (single U+2026 when cut).
+fn cut_title(title: &str) -> String {
+    let clean = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() > MAX_FINDING_TITLE_CHARS {
+        format!("{}\u{2026}", clean.chars().take(MAX_FINDING_TITLE_CHARS).collect::<String>())
+    } else {
+        clean
+    }
+}
+
 /// Normalize whitespace then cut to `MAX_NOTE_CHARS`, appending a single U+2026
 /// ellipsis when cut (`truncate`, `reflect-llm.ts:284-287`). Char-based (Unicode
 /// scalar) rather than UTF-16 units; identical for ASCII, the common case.
@@ -91,7 +105,14 @@ pub fn build_findings_summary(note_count: usize, findings: &[Finding]) -> String
         .iter()
         .take(MAX_FINDING_LINES)
         .map(|f| {
-            let where_ = f.note_id.as_deref().unwrap_or("global");
+            // Name the target note (id + title) so the model can write an actionable
+            // card ("archive note n7 'Sessions expire…'") instead of the anonymous
+            // "a revalidate-dated note is expired". Global findings have no note.
+            let where_ = match (f.note_id.as_deref(), f.title.trim()) {
+                (Some(id), t) if !t.is_empty() => format!("{id}: {}", cut_title(t)),
+                (Some(id), _) => id.to_string(),
+                (None, _) => "global".to_string(),
+            };
             format!("- [{}] {} ({where_}) \u{2014} {}", f.severity, f.check, f.detail)
         })
         .collect();
@@ -144,6 +165,47 @@ mod tests {
         assert_eq!(build_digest(&[]), "(no notes)");
         let s = build_findings_summary(0, &[]);
         assert!(s.contains("0 note(s), 0 finding(s)") && s.contains("(no findings)"), "{s}");
+    }
+
+    #[test]
+    fn finding_line_names_its_target_note_id_and_title() {
+        let findings = vec![
+            Finding {
+                check: "stale_revalidate",
+                severity: "medium",
+                note_id: Some("n7".into()),
+                title: "Sessions expire after a 24h TTL".into(),
+                detail: "revalidate_after has passed".into(),
+                action: ProposalAction::Archive,
+            },
+            Finding {
+                check: "orphan_project",
+                severity: "low",
+                note_id: None,
+                title: String::new(),
+                detail: "project-level note".into(),
+                action: ProposalAction::Update,
+            },
+        ];
+        let s = build_findings_summary(1, &findings);
+        // The note-scoped finding carries BOTH id and title so a card can name it.
+        assert!(s.contains("(n7: Sessions expire after a 24h TTL)"), "id+title present: {s}");
+        // A global finding still renders with the `global` marker, no title.
+        assert!(s.contains("(global)"), "global finding unchanged: {s}");
+    }
+
+    #[test]
+    fn long_finding_title_is_bounded() {
+        let findings = vec![Finding {
+            check: "stale_revalidate",
+            severity: "low",
+            note_id: Some("n1".into()),
+            title: "x".repeat(200),
+            detail: "d".into(),
+            action: ProposalAction::Archive,
+        }];
+        let s = build_findings_summary(1, &findings);
+        assert!(s.contains('\u{2026}'), "over-long title is ellipsized: {s}");
     }
 
     #[test]

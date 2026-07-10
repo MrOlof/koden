@@ -142,9 +142,39 @@ fn split_camel(word: &str) -> Vec<String> {
     parts.into_iter().filter(|p: &String| !p.is_empty()).collect()
 }
 
+/// Deduped token set of `text` (whole + camelCase parts + light stems), for
+/// set-similarity comparison. Built from [tokenize] so the near-dupe gate and the
+/// lexical index see identical surface forms.
+pub fn token_set(text: &str) -> std::collections::HashSet<String> {
+    tokenize(text).into_iter().collect()
+}
+
+/// Jaccard similarity of two token sets: `|A∩B| / |A∪B|`, in `[0.0, 1.0]`. Two empty
+/// sets are defined as 0.0 (no evidence of similarity), never a divide-by-zero.
+pub fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    let inter = a.intersection(b).count();
+    let union = a.len() + b.len() - inter;
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jaccard_bounds_and_overlap() {
+        let a = token_set("stripe webhook verifies signature before parsing");
+        assert!((jaccard(&a, &a) - 1.0).abs() < 1e-9, "identical sets = 1.0");
+        let empty = std::collections::HashSet::new();
+        assert_eq!(jaccard(&empty, &empty), 0.0, "two empty sets = 0.0, no NaN");
+        assert_eq!(jaccard(&a, &empty), 0.0, "disjoint with empty = 0.0");
+        let b = token_set("database migrations run automatically on startup");
+        assert!(jaccard(&a, &b) < 0.1, "unrelated text barely overlaps: {}", jaccard(&a, &b));
+    }
 
     #[test]
     fn whole_plus_parts_for_camel() {

@@ -27,7 +27,10 @@ pub fn system_prompt() -> String {
 Given a digest of memory notes and a summary of health findings, produce a SMALL \
 set of high-confidence proposals (cap: {MAX_PROPOSALS}). Only surface well-supported \
 patterns or issues \u{2014} NO speculation, no low-evidence claims. Prefer fewer, \
-higher-confidence items over many low-quality ones. Respond ONLY with a single JSON \
+higher-confidence items over many low-quality ones. Do NOT restate anything already \
+captured in the digest or listed under \"Already proposed\" \u{2014} propose only NEW, \
+materially different items; a re-wording of an existing note or pending proposal is \
+noise, not a proposal. Respond ONLY with a single JSON \
 object \u{2014} no prose, no code fences. The object MUST match exactly: \
 {{\"proposals\":[{{\"kind\":\"insight\"|\"should_remember\"|\"stale\"|\"conflict\",\
 \"title\":\"<short title>\",\"detail\":\"<one-paragraph rationale>\",\

@@ -730,6 +730,38 @@ impl SqliteIndex {
         Ok(n > 0)
     }
 
+    /// `(title, detail)` of the proposals the semantic near-dupe gate and the
+    /// "already proposed" digest section compare against: EVERY pending proposal for
+    /// the project (the live inbox), plus the most recent `resolved_lookback` RESOLVED
+    /// ones (applied|rejected — so a re-worded accepted fact or a declined one under a
+    /// fresh title is still caught, which the exact reject-signature misses). Reads the
+    /// writer connection (called mid-enqueue on the writer thread); best-effort — a
+    /// read error yields fewer/no comparisons, never a failed enqueue.
+    pub(crate) fn proposal_dedup_texts(
+        &self,
+        project_id: &str,
+        resolved_lookback: usize,
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT title, detail FROM proposals WHERE project_id=?1 AND status='pending' ORDER BY created_ms",
+        ) {
+            if let Ok(it) = stmt.query_map([project_id], row) {
+                out.extend(it.flatten());
+            }
+        }
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT title, detail FROM proposals WHERE project_id=?1 AND status IN ('applied','rejected') \
+             ORDER BY created_ms DESC LIMIT ?2",
+        ) {
+            if let Ok(it) = stmt.query_map(rusqlite::params![project_id, resolved_lookback as i64], row) {
+                out.extend(it.flatten());
+            }
+        }
+        out
+    }
+
     /// Queue a proposal (dedup by signature). Returns true if it was newly added.
     pub fn insert_proposal(
         &self,
