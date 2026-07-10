@@ -44,6 +44,7 @@ import { getOrCreateChat } from "../store/chatRuntime";
 import { useChatStore } from "../store/chatStore";
 import { usePlanStore } from "../store/planStore";
 import { AiChatView } from "./AiChat";
+import { AiComposerInput } from "./AiComposerInput";
 import { PlanDiffReview } from "./PlanDiffReview";
 import { TodoStrip } from "./TodoStrip";
 
@@ -215,6 +216,15 @@ function Body({
       </div>
 
       <TodoStrip sessionId={sessionId} />
+
+      {/* The Librarian window is a self-contained chat: its own composer lives
+          HERE so typing + suggestion clicks submit to this session's LLM chat
+          and stream back into AiChatView above — instead of the shared docked
+          input bar, which shows the terminal shell input when a terminal tab is
+          active (the "it went to pwsh" report). */}
+      <div className="shrink-0 border-t border-border/60 px-3 py-2">
+        <AiComposerInput />
+      </div>
     </>
   );
 }
