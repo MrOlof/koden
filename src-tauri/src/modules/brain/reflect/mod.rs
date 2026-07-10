@@ -120,7 +120,7 @@ impl ReflectConfig {
 /// Build the [ReflectClient] for the configured provider: the native Anthropic
 /// client, or the OpenAI-compatible client (with the resolved base URL). Shared by
 /// the reflect AND curation call sites so they stay in lockstep.
-pub(crate) fn build_client(cfg: &ReflectConfig, key: Option<String>) -> Box<dyn ReflectClient> {
+pub(crate) fn build_client(cfg: &ReflectConfig, key: Option<String>) -> Box<dyn ReflectClient + Send> {
     if cfg.provider == "anthropic" {
         Box::new(llm::AnthropicClient::new(key.unwrap_or_default()))
     } else {
@@ -161,7 +161,7 @@ pub(crate) fn pre_flight(ceiling_usd: f64, key_present: bool) -> Option<ReflectR
 }
 
 /// One model response: the raw JSON text + reported token usage (for reconcile).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReflectResponse {
     pub json_text: String,
     pub input_tokens: u64,
@@ -204,15 +204,42 @@ pub fn reflect_with_client(
         Err(reason) => return ReflectOutcome::noop(reason),
     };
 
-    // The one network call. On an error the provider DEMONSTRABLY did not bill
-    // (a 4xx rejection), release the reservation at $0; on anything ambiguous
-    // (network cut, timeout, 5xx) charge the estimate — a partial/billed call may
-    // have happened (charge on uncertainty, §4.1.11).
-    let resp = match client.complete(&cfg.model, &system, &user, cfg.max_output_tokens) {
+    // The one network call, then the shared reconcile → validate → enqueue tail.
+    let result = client.complete(&cfg.model, &system, &user, cfg.max_output_tokens);
+    finish_response(index, cfg, project_id, rid, est, result, now_ms, true)
+}
+
+/// The reconcile → validate → enqueue tail shared by the synchronous
+/// [reflect_with_client] and the offloaded [reflect_finish]. Charges the ledger
+/// from the provider result (or the failure classification), validates the JSON,
+/// and enqueues proposals. ALL of this runs on the single writer thread — the
+/// offload only moves the network call ([ReflectPending::call]) off-thread, never
+/// any index access.
+///
+/// `enqueue=false` is the reconcile-only path for a project UNREGISTERED mid-flight
+/// (RemoveProject landed while the call was running): the reservation is still
+/// reconciled so the ceiling is never stranded, but proposals are NOT written — they
+/// would be orphan rows for a project whose state was just pruned. [LIB-DESIGN-01 miss2]
+#[allow(clippy::too_many_arguments)]
+fn finish_response(
+    index: &SqliteIndex,
+    cfg: &ReflectConfig,
+    project_id: &str,
+    reservation_id: i64,
+    estimate: f64,
+    result: Result<ReflectResponse, String>,
+    now_ms: i64,
+    enqueue: bool,
+) -> ReflectOutcome {
+    // On an error the provider DEMONSTRABLY did not bill (a 4xx rejection), release
+    // the reservation at $0; on anything ambiguous (network cut, timeout, 5xx) charge
+    // the estimate — a partial/billed call may have happened (charge on uncertainty,
+    // §4.1.11).
+    let resp = match result {
         Ok(r) => r,
         Err(e) => {
-            let charge = charge_for_failed_call(est, &e);
-            reconcile_or_log(index, rid, charge, now_ms);
+            let charge = charge_for_failed_call(estimate, &e);
+            reconcile_or_log(index, reservation_id, charge, now_ms);
             return ReflectOutcome { proposals: Vec::new(), spent_usd: charge, reason: ReflectReason::CallFailed(e) };
         }
     };
@@ -221,8 +248,8 @@ pub fn reflect_with_client(
     // deserializes to 0/0 tokens, and Anthropic still bills the input. Floor an
     // implausible 0/0 to the conservative estimate so a success never under-charges.
     let actual = actual_cost(cfg, resp.input_tokens, resp.output_tokens);
-    let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { est } else { actual };
-    reconcile_or_log(index, rid, charge, now_ms);
+    let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { estimate } else { actual };
+    reconcile_or_log(index, reservation_id, charge, now_ms);
 
     let items = match schema::parse_and_validate(&resp.json_text) {
         Ok(v) => v,
@@ -232,15 +259,18 @@ pub fn reflect_with_client(
     // Map → enqueue into the SAME P1 queue (dedup by signature; skip rejected).
     // parse_and_validate already hard-rejects > MAX_PROPOSALS; the take is a
     // defensive belt against a future config raising the cap above the parse limit.
+    // Skipped entirely on the reconcile-only path (project unregistered mid-flight).
     let mut enqueued = Vec::new();
-    for item in items.iter().take(cfg.max_proposals) {
-        let p = proposal::to_proposal(project_id, item);
-        let rej = reject_signature(p.action, p.target_id.as_deref(), &p.title);
-        if index.is_rejected(project_id, &rej).unwrap_or(false) {
-            continue; // declined before — don't resurrect it
-        }
-        if index.insert_proposal(project_id, &p, now_ms).unwrap_or(false) {
-            enqueued.push(p);
+    if enqueue {
+        for item in items.iter().take(cfg.max_proposals) {
+            let p = proposal::to_proposal(project_id, item);
+            let rej = reject_signature(p.action, p.target_id.as_deref(), &p.title);
+            if index.is_rejected(project_id, &rej).unwrap_or(false) {
+                continue; // declined before — don't resurrect it
+            }
+            if index.insert_proposal(project_id, &p, now_ms).unwrap_or(false) {
+                enqueued.push(p);
+            }
         }
     }
     ReflectOutcome { proposals: enqueued, spent_usd: charge, reason: ReflectReason::Ok }
@@ -367,6 +397,180 @@ pub fn reflect_auto(
     }
     let client = build_client(&cfg, key);
     reflect_auto_with_client(index, client.as_ref(), &cfg, project_id, now_date, now_ms, prev_digest_hash)
+}
+
+// ============================================================================
+// Offloaded reflect (LIB-DESIGN-01: worker stall during the provider call).
+//
+// The autonomous round is split across the network boundary so the brain worker
+// thread never blocks on `client.complete()`:
+//   1. [reflect_prepare] runs on the worker — digest read + delta gate + durable
+//      budget reserve (all index access stays on the single writer thread).
+//   2. [ReflectPending::call] runs on a helper thread — the ONLY off-thread work;
+//      it touches no index, only the network.
+//   3. [reflect_finish] runs back on the worker — reconcile + validate + enqueue.
+// The single-writer invariant is fully preserved (every index write is still on
+// the worker); only the network wait leaves the Fs-serving thread free.
+// ============================================================================
+
+/// Metadata captured at prepare time and carried — alongside the raw provider
+/// result — back to the worker to complete the round. Clone + Debug so it can ride
+/// a `BrainEvent`. Its inner budget/config fields are private; the worker only
+/// reads [ReflectFinish::digest_hash] and hands the whole value to [reflect_finish].
+#[derive(Clone, Debug)]
+pub struct ReflectFinish {
+    cfg: ReflectConfig,
+    reservation_id: i64,
+    estimate: f64,
+    /// The digest hash this round reflected on (feeds the autonomous delta gate).
+    pub digest_hash: String,
+}
+
+/// A reflect round whose durable budget reservation is placed but whose provider
+/// call has NOT run yet. Move it to a helper thread and call [ReflectPending::call],
+/// then hand the returned parts to [reflect_finish] on the worker thread.
+pub struct ReflectPending {
+    client: Box<dyn ReflectClient + Send>,
+    model: String,
+    system: String,
+    user: String,
+    max_tokens: u32,
+    finish: ReflectFinish,
+}
+
+impl ReflectPending {
+    /// Run ONLY the provider network call (off the worker thread). Consumes self,
+    /// returning the raw result plus the finish metadata for the worker. Touches no
+    /// index — safe to run on any thread. A PANIC inside the client is folded into
+    /// an Err result so the helper thread always produces a `LibrarianDone` — a
+    /// vanished reply would wedge the project `in_flight` until restart and strand
+    /// the reservation until the boot sweep. The Err path charges on uncertainty,
+    /// same as any ambiguous network failure.
+    pub fn call(self) -> (Result<ReflectResponse, String>, ReflectFinish) {
+        let ReflectPending { client, model, system, user, max_tokens, finish } = self;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.complete(&model, &system, &user, max_tokens)
+        }))
+        .unwrap_or_else(|_| Err("provider client panicked".to_string()));
+        (result, finish)
+    }
+
+    /// The digest hash of the round in flight (for bookkeeping / logging).
+    pub fn digest_hash(&self) -> &str {
+        &self.finish.digest_hash
+    }
+}
+
+/// The outcome of [reflect_prepare] / [reflect_prepare_with_client].
+pub enum ReflectDispatch {
+    /// No provider call is needed — the outcome is already final (EmptyCorpus,
+    /// delta-gate Unchanged, a $0 pre-flight skip, or a reserve failure). Carries
+    /// the digest hash (None only for EmptyCorpus) for the caller's delta gate.
+    Ready(ReflectOutcome, Option<String>),
+    /// A provider call is required; run [ReflectPending::call] off-thread and then
+    /// [reflect_finish] on the worker.
+    Pending(ReflectPending),
+}
+
+/// The offload twin of [reflect_auto_with_client] (testable offline): build the
+/// digest, apply the delta gate, and — when a call is warranted — estimate + place
+/// the durable budget reservation, all WITHOUT the provider call. Returns
+/// [ReflectDispatch::Pending] with the reservation already held when a call must
+/// run; the gating is byte-for-byte the same as [reflect_auto_with_client].
+pub fn reflect_prepare_with_client(
+    index: &SqliteIndex,
+    client: Box<dyn ReflectClient + Send>,
+    cfg: &ReflectConfig,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+    prev_digest_hash: Option<&str>,
+) -> ReflectDispatch {
+    let Some(user) = build_digest(index, project_id, now_date) else {
+        return ReflectDispatch::Ready(ReflectOutcome::noop(ReflectReason::EmptyCorpus), None);
+    };
+    let digest_hash = hash::hash_bytes(user.as_bytes());
+    if prev_digest_hash == Some(digest_hash.as_str()) {
+        return ReflectDispatch::Ready(ReflectOutcome::noop(ReflectReason::Unchanged), Some(digest_hash));
+    }
+    let system = schema::system_prompt();
+    let est = estimate_cost(cfg, &system, &user);
+    // Pre-flight reserve on the worker thread — the durable, atomic ceiling gate.
+    let rid = match budget::check_and_reserve(index.conn(), &cfg.model, est, now_ms) {
+        Ok(id) => id,
+        Err(reason) => return ReflectDispatch::Ready(ReflectOutcome::noop(reason), Some(digest_hash)),
+    };
+    ReflectDispatch::Pending(ReflectPending {
+        client,
+        model: cfg.model.clone(),
+        system,
+        user,
+        max_tokens: cfg.max_output_tokens,
+        finish: ReflectFinish { cfg: cfg.clone(), reservation_id: rid, estimate: est, digest_hash },
+    })
+}
+
+/// Autonomous offloaded reflect (the real worker path): resolve config/ceiling/key
+/// exactly like [reflect_auto], then PREPARE (reserve) without making the call. The
+/// worker runs the returned [ReflectPending] on a helper thread and completes it via
+/// [reflect_finish], so incremental indexing is never blocked by the provider call.
+pub fn reflect_prepare(
+    app: &AppHandle,
+    index: &SqliteIndex,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+    prev_digest_hash: Option<&str>,
+) -> ReflectDispatch {
+    let cfg = ReflectConfig::from_librarian(&librarian::config(index.conn()));
+    let ceiling_usd = budget::ceiling(index.conn());
+    let account = librarian::keyring_account_for(&cfg.provider);
+    let key = if account.is_empty() {
+        None
+    } else {
+        crate::modules::secrets::read_secret(app, KEYRING_SERVICE, account)
+    };
+    let key_present = key.is_some() || librarian::is_keyless(&cfg.provider);
+    if let Some(reason) = pre_flight(ceiling_usd, key_present) {
+        return ReflectDispatch::Ready(ReflectOutcome::noop(reason), None);
+    }
+    let client = build_client(&cfg, key);
+    reflect_prepare_with_client(index, client, &cfg, project_id, now_date, now_ms, prev_digest_hash)
+}
+
+/// Complete an offloaded round on the worker thread from the provider result:
+/// reconcile the reservation, validate, and enqueue proposals (the same tail as
+/// [reflect_with_client]). Returns the outcome plus the digest hash the round
+/// reflected on, so the caller can pin it for the delta gate.
+pub fn reflect_finish(
+    index: &SqliteIndex,
+    project_id: &str,
+    finish: ReflectFinish,
+    result: Result<ReflectResponse, String>,
+    now_ms: i64,
+) -> (ReflectOutcome, Option<String>) {
+    let ReflectFinish { cfg, reservation_id, estimate, digest_hash } = finish;
+    let outcome = finish_response(index, &cfg, project_id, reservation_id, estimate, result, now_ms, true);
+    (outcome, Some(digest_hash))
+}
+
+/// Complete an offloaded round for a project that was UNREGISTERED mid-flight — a
+/// `BrainEvent::RemoveProject` landed (pruning the project's rows AND its delta-gate
+/// pin) while this round's provider call was still running. Reconciles the budget
+/// reservation from the result so the ceiling is never stranded, but does NOT enqueue
+/// proposals (they would be orphan rows for a pruned project) and returns NO digest
+/// hash — so the worker skips re-persisting the pin `remove_project` deliberately
+/// deleted (which would otherwise resurrect it and wedge a re-added identical corpus
+/// at Unchanged/$0 forever). [LIB-DESIGN-01 miss2 / LIB-SPEND-01 pin-delete invariant]
+pub fn reflect_reconcile_only(
+    index: &SqliteIndex,
+    project_id: &str,
+    finish: ReflectFinish,
+    result: Result<ReflectResponse, String>,
+    now_ms: i64,
+) -> ReflectOutcome {
+    let ReflectFinish { cfg, reservation_id, estimate, digest_hash: _ } = finish;
+    finish_response(index, &cfg, project_id, reservation_id, estimate, result, now_ms, false)
 }
 
 #[cfg(test)]

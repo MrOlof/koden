@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use crate::modules::brain::reflect::{ReflectFinish, ReflectResponse};
 use crate::modules::brain::ProjectId;
 
 /// Independent mirror of the pty `koden:agent-signal` JSON payload. Resolves
@@ -84,5 +85,16 @@ pub enum BrainEvent {
     Curate {
         project: Option<ProjectId>,
         now_date: Option<String>,
+    },
+    /// A librarian round's provider call finished on a helper thread
+    /// (LIB-DESIGN-01): the worker completes the round (reconcile + validate +
+    /// enqueue) on the single writer thread. Offloading the call is what keeps the
+    /// worker free to serve `Fs` deltas while the model is thinking — the network
+    /// wait never stalls incremental indexing. `finish` carries the reservation +
+    /// config captured at prepare time; `result` is the raw provider outcome.
+    LibrarianDone {
+        project: ProjectId,
+        finish: ReflectFinish,
+        result: Result<ReflectResponse, String>,
     },
 }
