@@ -15,7 +15,8 @@
 //!   cargo run --example brain_cli -- query  <store> <query…> # search an existing store (no reindex — cross-process reads)
 //!   cargo run --example brain_cli -- reflect-hang <dir> <store>  # $0 Librarian round that HANGS inside the LLM call (crash-sim kill window)
 //!   cargo run --example brain_cli -- sweep <store>               # the boot sweep (worker brain_loop step): fold orphaned reservations
-//!   cargo run --example brain_cli -- reflect-live <dir> <store> <ceiling-usd>  # ONE real paid Librarian round behind the budget/delta/reject gates
+//!   cargo run --example brain_cli -- reflect-live <dir> <store> <ceiling-usd> [provider] [model]  # real paid Librarian rounds behind the budget/delta/reject gates (default anthropic/Haiku)
+//!   cargo run --example brain_cli -- set-key <provider>          # store an API key in the app's keyring location; key read from STDIN, never argv
 //!
 //! `all` exits 0 only if every check passes — a real end-to-end smoke.
 
@@ -140,20 +141,23 @@ fn run_sweep(store: &Path) {
     }
 }
 
-/// `reflect-live <dir> <store> <ceiling>` — ONE real paid Librarian round against
-/// the configured provider (fresh-store default: Anthropic Haiku), driven through
-/// the same gates the autonomous path uses. The key is read from the app's OWN
-/// location (keyring service `koden-ai`, per-provider account — the exact path
+/// `reflect-live <dir> <store> <ceiling> [provider] [model]` — real paid Librarian
+/// rounds against the configured provider (default: the fresh-store Anthropic Haiku
+/// config; `openai` uses the OpenAI-compatible client with conservative
+/// OVER-estimated rates so the budget gates err strict). Driven through the same
+/// gates the autonomous path uses. The key is read from the app's OWN location
+/// (keyring service `koden-ai`, per-provider account — the exact path
 /// `secrets::read_secret` takes on Windows/macOS) and is NEVER printed.
 /// Exit codes: 0 = all gates behaved; 3 = no key (blocked); 4 = a gate misfired;
 /// 5 = the paid round itself did not return Ok.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
+fn run_reflect_live(root: &Path, store: &Path, ceiling: f64, provider: &str, model: Option<&str>) {
     use std::cell::RefCell;
 
     use koden_lib::modules::brain::memory::proposal::reject_signature;
     use koden_lib::modules::brain::reflect::{
-        librarian, llm::AnthropicClient, reflect_auto_with_client, ReflectReason, KEYRING_SERVICE,
+        librarian, llm::AnthropicClient, llm_openai::OpenAiCompatClient, reflect_auto_with_client,
+        ReflectReason, KEYRING_SERVICE,
     };
 
     let mut failed = false;
@@ -164,10 +168,26 @@ fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
         }
     };
 
-    // Fresh stores seed brain_librarian to the Anthropic Haiku default; use the
-    // same ReflectConfig::default() (identical values) for rates + model.
-    let cfg = ReflectConfig::default();
+    // Fresh stores seed brain_librarian to the Anthropic Haiku default; for a
+    // non-default provider, build the equivalent config with the canonical base
+    // URL and deliberately OVER-estimated $/token rates (no authoritative rate
+    // table here; overestimating only makes the reserve/ceiling gates stricter).
+    let cfg = match provider {
+        "anthropic" => ReflectConfig::default(),
+        p => ReflectConfig {
+            provider: p.to_string(),
+            model: model.unwrap_or("gpt-5.4-mini").to_string(),
+            base_url: String::new(), // canonical per-provider URL
+            in_rate: 0.5 / 1_000_000.0,
+            out_rate: 4.0 / 1_000_000.0,
+            ..ReflectConfig::default()
+        },
+    };
     let account = librarian::keyring_account_for(&cfg.provider);
+    if account.is_empty() {
+        println!("PROVIDER {} is keyless/unknown — reflect-live needs a keyed provider", cfg.provider);
+        std::process::exit(2);
+    }
     let key = keyring::Entry::new(KEYRING_SERVICE, account)
         .ok()
         .and_then(|e| e.get_password().ok())
@@ -183,10 +203,10 @@ fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
     let notes = scan_project_memory(&idx, PID, root);
     println!("INDEXED {} NOTES {notes}", s.indexed);
 
-    /// Real Anthropic client + a tap that records whether/what the provider
+    /// Real provider client + a tap that records whether/what the provider
     /// actually returned — the observable for "this gate made NO network call".
     struct Recording {
-        inner: AnthropicClient,
+        inner: Box<dyn ReflectClient>,
         last: RefCell<Option<String>>,
     }
     impl ReflectClient for Recording {
@@ -196,7 +216,18 @@ fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
             Ok(r)
         }
     }
-    let client = Recording { inner: AnthropicClient::new(key), last: RefCell::new(None) };
+    // Mirror of the app's own build_client dispatch (pub(crate), so re-stated here).
+    let inner: Box<dyn ReflectClient> = if cfg.provider == "anthropic" {
+        Box::new(AnthropicClient::new(key))
+    } else {
+        let base = if cfg.base_url.trim().is_empty() {
+            librarian::canonical_base_url(&cfg.provider).to_string()
+        } else {
+            cfg.base_url.clone()
+        };
+        Box::new(OpenAiCompatClient::new(Some(key), base))
+    };
+    let client = Recording { inner, last: RefCell::new(None) };
 
     // GATE 1 — pre-flight budget gate: fresh store ceiling = 0.0 → Disabled,
     // $0, and the provider is NEVER contacted.
@@ -228,6 +259,14 @@ fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
         println!("P1 action={} sig={} title={}", p.action.as_str(), p.signature, p.title);
     }
     if !matches!(r1.reason, ReflectReason::Ok) {
+        // Diagnostic: the raw model text that failed validation (fixture-only
+        // corpus, so printing it leaks nothing). Truncated for sanity.
+        if let Some(raw) = round1_json.as_deref() {
+            let cut: String = raw.chars().take(1200).collect();
+            println!("S11_RAW_MODEL_OUTPUT ({} chars): {cut}", raw.chars().count());
+        } else {
+            println!("S11_RAW_MODEL_OUTPUT absent (no provider text recorded)");
+        }
         println!("S11_ABORT round1 did not return Ok");
         std::process::exit(5);
     }
@@ -333,6 +372,35 @@ fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
         let _ = round1_json; // kept for parity with the recording tap
     }
 
+    // ROUND 2 — new-KNOWLEDGE re-fire: the reflect digest is built from memory
+    // notes + doctor findings (NOT code content — a code edit alone is correctly
+    // Unchanged), so a genuinely new note changes the digest and the SAME stale
+    // digest hash that GATE2 no-op'd on must now fire a second paid round.
+    std::fs::write(
+        root.join(".koden-memory").join("note-live-probe.md"),
+        "---\nid: note-live-probe\ntitle: Webhook signatures verify before parse\n\
+type: decision\nstatus: active\nanchors: [\"src/webhooks.ts\"]\n---\n\
+handleStripeWebhook must call verifySignature before parseEvent; parsing\n\
+unverified payloads is the vulnerability class this repo guards against.\n",
+    )
+    .expect("write live probe note");
+    let n2 = scan_project_memory(&idx, PID, root);
+    *client.last.borrow_mut() = None;
+    let (r2n, _) =
+        reflect_auto_with_client(&idx, &client, &cfg, PID, None, now_ms(), digest_hash.as_deref());
+    gate(
+        "ROUND2_NEWKNOWLEDGE",
+        matches!(r2n.reason, ReflectReason::Ok)
+            && r2n.spent_usd > 0.0
+            && client.last.borrow().is_some(),
+        format!(
+            "reason={:?} spent={:.6} proposals={} (notes now {n2})",
+            r2n.reason,
+            r2n.spent_usd,
+            r2n.proposals.len(),
+        ),
+    );
+
     let (_, final_spent) = idx.budget_state();
     println!("S11_DONE final_spent={final_spent:.6}");
     if failed {
@@ -341,9 +409,43 @@ fn run_reflect_live(root: &Path, store: &Path, ceiling: f64) {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn run_reflect_live(_root: &Path, _store: &Path, _ceiling: f64) {
+fn run_reflect_live(_root: &Path, _store: &Path, _ceiling: f64, _provider: &str, _model: Option<&str>) {
     println!("KEY absent (no keyring backend on this target)");
     std::process::exit(3);
+}
+
+/// `set-key <provider>` — store an API key at the app's OWN keyring location
+/// (service `koden-ai`, per-provider account). The key is read from STDIN so it
+/// never appears in argv/shell history, and is never echoed.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn run_set_key(provider: &str) {
+    use std::io::Read;
+
+    use koden_lib::modules::brain::reflect::{librarian, KEYRING_SERVICE};
+
+    let account = librarian::keyring_account_for(provider);
+    if account.is_empty() {
+        eprintln!("provider '{provider}' is keyless or unknown — nothing to store");
+        std::process::exit(2);
+    }
+    let mut key = String::new();
+    std::io::stdin().read_to_string(&mut key).expect("read key from stdin");
+    let key = key.trim();
+    if key.is_empty() {
+        eprintln!("empty key on stdin");
+        std::process::exit(2);
+    }
+    keyring::Entry::new(KEYRING_SERVICE, account)
+        .expect("keyring entry")
+        .set_password(key)
+        .expect("store key");
+    println!("KEY stored service={KEYRING_SERVICE} account={account} len={}", key.len());
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn run_set_key(_provider: &str) {
+    eprintln!("no keyring backend on this target");
+    std::process::exit(2);
 }
 
 /// A deterministic fake LLM so `reflect` runs offline / $0 — returns one proposal.
@@ -536,7 +638,7 @@ fn main() {
         "reflect-live" => {
             let (Some(dir), Some(store), Some(ceiling)) = (args.get(2), args.get(3), args.get(4))
             else {
-                eprintln!("usage: brain_cli reflect-live <dir> <store> <ceiling-usd>");
+                eprintln!("usage: brain_cli reflect-live <dir> <store> <ceiling-usd> [provider] [model]");
                 std::process::exit(2);
             };
             let ceiling: f64 = ceiling.parse().expect("ceiling must be a number");
@@ -544,7 +646,22 @@ fn main() {
                 ceiling > 0.0 && ceiling <= 1.0,
                 "sim guard: ceiling must be in (0, 1] USD"
             );
-            run_reflect_live(Path::new(dir), Path::new(store), ceiling);
+            let provider = args.get(5).map(String::as_str).unwrap_or("anthropic");
+            run_reflect_live(
+                Path::new(dir),
+                Path::new(store),
+                ceiling,
+                provider,
+                args.get(6).map(String::as_str),
+            );
+            return;
+        }
+        "set-key" => {
+            let Some(provider) = args.get(2) else {
+                eprintln!("usage: brain_cli set-key <provider>   (key on STDIN)");
+                std::process::exit(2);
+            };
+            run_set_key(provider);
             return;
         }
         "query" => {
