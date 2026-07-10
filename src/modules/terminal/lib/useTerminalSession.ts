@@ -272,9 +272,31 @@ export function subscribeCommandsForLeaf(
 export function scrollToCommandForLeaf(leafId: number, line: number): void {
   const slot = getSlotForLeaf(leafId);
   if (!slot) return;
+  const term = slot.term;
   // Center the command in the viewport (same offset block navigation uses).
-  slot.term.scrollToLine(Math.max(0, line - Math.floor(slot.term.rows / 2)));
-  flashJumpLine(slot.term, line);
+  const target = Math.max(0, line - Math.floor(term.rows / 2));
+  term.scrollToLine(target);
+  // A live agent TUI repaints continuously and focus-restore from the closing
+  // popover can land user input — either can snap the viewport away before the
+  // scroll ever paints. Re-assert the target for ~300ms, backing off the
+  // moment the user wheel-scrolls themselves.
+  let userScrolled = false;
+  const onWheel = () => {
+    userScrolled = true;
+  };
+  term.element?.addEventListener("wheel", onWheel, { passive: true });
+  const reassert = () => {
+    if (!userScrolled && term.buffer.active.viewportY !== target) {
+      term.scrollToLine(target);
+    }
+  };
+  requestAnimationFrame(reassert);
+  window.setTimeout(reassert, 120);
+  window.setTimeout(() => {
+    reassert();
+    term.element?.removeEventListener("wheel", onWheel);
+  }, 300);
+  flashJumpLine(term, line);
 }
 
 // Brief full-width spruce band on the jump target so the click reads as a jump

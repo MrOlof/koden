@@ -193,8 +193,13 @@ function InputsMode({ leafId, onClose }: Props) {
   }, [marks, query]);
 
   const select = (mark: CommandMark) => {
-    scrollToCommandForLeaf(leafId, mark.line);
+    // Close FIRST: the popover teardown restores focus, and in a live-output
+    // pane (a running agent TUI repainting every ~100ms) anything that touches
+    // the terminal between our scroll and the paint can yank the viewport
+    // back. scrollToCommandForLeaf then scrolls after teardown and re-asserts
+    // for a few frames.
     onClose();
+    requestAnimationFrame(() => scrollToCommandForLeaf(leafId, mark.line));
   };
 
   return (
