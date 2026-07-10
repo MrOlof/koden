@@ -224,6 +224,7 @@ export function CommandPalette({
         value={value}
         onValueChange={setValue}
         onKeyDown={onKeyDown}
+        className="font-mono tracking-[0.01em]"
       >
         <CommandInput
           id="koden-command-palette-input"

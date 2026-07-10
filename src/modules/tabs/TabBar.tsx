@@ -195,12 +195,12 @@ export function TabBar({
           >
             <span
               aria-hidden
-              className="pointer-events-none absolute left-0 top-1/2 h-7 rounded-md bg-foreground/[0.07] shadow-sm ring-1 ring-inset ring-foreground/[0.05]"
+              className="pointer-events-none absolute bottom-0 left-0 h-px bg-primary"
               style={
                 pill
                   ? {
                       width: pill.width,
-                      transform: `translate(${pill.left}px, -50%)`,
+                      transform: `translateX(${pill.left}px)`,
                       transitionProperty: pillReady
                         ? "transform, width"
                         : "none",
@@ -283,7 +283,12 @@ export function TabBar({
                     <TabIcon tab={t} />
                     {/* Preview tabs use italic to signal the transient state,
                         matching the visual convention from VSCode. */}
-                    <span className={cn("truncate", isPreview && "italic")}>
+                    <span
+                      className={cn(
+                        "truncate font-mono tracking-[0.01em]",
+                        isPreview && "italic",
+                      )}
+                    >
                       {labelFor(t)}
                     </span>
                     {t.kind === "editor" && t.dirty ? (

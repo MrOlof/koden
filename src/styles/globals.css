@@ -492,6 +492,25 @@ html *::-webkit-scrollbar {
   animation: koden-tab-in var(--dur-base) var(--ease-premium);
 }
 
+/* Wordmark block cursor — slow hard blink (step-end == steps(1)). */
+@keyframes koden-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.koden-wordmark-cursor {
+  animation: koden-blink 1.2s steps(1, jump-end) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .koden-wordmark-cursor {
+    animation: none;
+  }
+}
+
 /* Status pulse for active agents (dock / topology / director). */
 @keyframes koden-pulse {
   0%,

@@ -15,6 +15,7 @@ import {
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
 import { Tool } from "@/components/ai-elements/tool";
+import { Wordmark } from "@/components/Wordmark";
 import {
   Collapsible,
   CollapsibleContent,
@@ -209,6 +210,7 @@ export function AiChatView({
       <Conversation>
         <ConversationContent>
           <ConversationEmptyState
+            icon={<Wordmark className="text-xl" />}
             title="Ask Koden anything"
             description="Explain command output, fix errors, generate snippets, or run a task."
           />

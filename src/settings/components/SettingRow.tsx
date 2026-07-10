@@ -17,7 +17,9 @@ export function SettingRow({ title, description, children, className }: Props) {
       )}
     >
       <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-[12.5px] font-medium">{title}</span>
+        <span className="font-mono text-[12.5px] font-medium tracking-[0.01em]">
+          {title}
+        </span>
         {description ? (
           <span className="text-[10.5px] leading-relaxed text-muted-foreground">
             {description}

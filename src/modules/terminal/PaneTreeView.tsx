@@ -176,6 +176,10 @@ function PaneLeaf({
       data-pane-leaf={node.id}
       className={cn(
         "relative flex h-full w-full flex-col",
+        // Focused pane (incl. the single unsplit pane) carries a 1px spruce
+        // top hairline. Pseudo-element so it never shifts the xterm grid.
+        focused &&
+          "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:z-10 before:h-px before:bg-primary before:content-['']",
         drag.isDragging && "opacity-60",
       )}
     >
@@ -463,7 +467,7 @@ function PaneHeader({
           defaultValue={entry?.label ?? ""}
           placeholder={basenameOf(cwd)}
           aria-label="Rename pane"
-          className="min-w-0 max-w-full rounded-sm bg-background px-1 text-center text-[11px] text-foreground outline-none ring-1 ring-ring"
+          className="min-w-0 max-w-full rounded-sm bg-background px-1 text-center font-mono text-[11px] text-foreground outline-none ring-1 ring-ring"
           // Pointer-down stop keeps dnd-kit's PointerSensor (on the header) from
           // starting a drag while selecting text in the rename field.
           onPointerDown={(e) => e.stopPropagation()}
@@ -491,7 +495,7 @@ function PaneHeader({
           className={cn(
             // 12px / medium / slight tracking keeps a tinted label legible on
             // dark bg (small thin glyphs are the hardest contrast case).
-            "max-w-full truncate text-center text-xs font-medium tracking-[0.012em]",
+            "max-w-full truncate text-center font-mono text-xs font-medium tracking-[0.012em]",
             !locked && "cursor-text",
           )}
           style={titleColor ? { color: titleColor } : undefined}

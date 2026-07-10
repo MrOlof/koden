@@ -197,6 +197,7 @@ export function GridDialog({ open, onOpenChange, onConfirm }: Props) {
           <Input
             value={cmd}
             autoFocus
+            className="font-mono tracking-[0.01em]"
             onChange={(e) => setCmd(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -214,7 +215,7 @@ export function GridDialog({ open, onOpenChange, onConfirm }: Props) {
                   type="button"
                   onClick={() => setCmd(r)}
                   className={cn(
-                    "rounded-full border border-border bg-background px-2.5 py-0.5 text-xs text-muted-foreground transition-colors",
+                    "rounded-full border border-border bg-background px-2.5 py-0.5 font-mono text-xs tracking-[0.01em] text-muted-foreground transition-colors",
                     "hover:bg-muted hover:text-foreground",
                     cmd.trim() === r && "border-ring text-foreground",
                   )}
