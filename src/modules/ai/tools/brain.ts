@@ -6,6 +6,7 @@ import {
   brainIndexStatus,
   brainLibrarianActivity,
   brainLibrarianStatus,
+  brainMemoryChanges,
   brainNotes,
   brainProposals,
   brainSearch,
@@ -14,7 +15,10 @@ import type { ToolContext } from "./context";
 
 // Read-only Koden Brain tools — how the Librarian grounds its answers. No
 // approval needed (they never mutate), and no curation surface on purpose:
-// memory writes stay propose-only, gated by the review inbox.
+// the curation ENGINE runs autonomously on the Rust worker with snapshot undo
+// (ADR-018), but CHAT can only read — reverting a change or switching curation
+// mode happens in the Brain pane / Settings, never from here (ADR-017 holds
+// for the chat toolset).
 
 const MAX_HITS = 15;
 
@@ -114,7 +118,7 @@ export function buildBrainTools(_ctx: ToolContext) {
 
     brain_proposals: tool({
       description:
-        "List the memory proposals the Brain has QUEUED for human review (the review inbox): pending suggestions to create/update/archive/supersede notes, each with action, title, detail, and status. Read-only — you can explain what's pending, but only the user approves them in the inbox. Omit `project` for every project.",
+        "List the Brain's memory-change activity: recent APPLIED changes (the Librarian curates autonomously by default — each auto-applied with an undo snapshot, plus any the user reverted) and anything still PENDING review (review-first mode, or a change that couldn't apply). Each entry has action (create/update/archive/supersede), title, detail, and status. Read-only — reverting a change or approving a pending one happens in the Brain pane, not here. Omit `project` for every project.",
       inputSchema: z.object({
         project: z
           .string()
@@ -123,7 +127,10 @@ export function buildBrainTools(_ctx: ToolContext) {
           .describe("Project id to scope to. Omit for all projects."),
       }),
       execute: async ({ project }) => {
-        const proposals = await brainProposals(project ?? null);
+        const [proposals, changes] = await Promise.all([
+          brainProposals(project ?? null),
+          brainMemoryChanges(project ?? null).catch(() => []),
+        ]);
         return {
           pending: proposals.length,
           proposals: proposals.map((p) => ({
@@ -133,14 +140,22 @@ export function buildBrainTools(_ctx: ToolContext) {
             detail: p.detail,
             status: p.status,
           })),
-          note: "Read-only. Approval happens in the review inbox, not here.",
+          recentChanges: changes.slice(0, 20).map((c) => ({
+            project: c.project,
+            action: c.action,
+            title: c.title,
+            status: c.status, // "applied" | "reverted"
+            autoApplied: c.auto_applied,
+            revertible: c.revertible,
+          })),
+          note: "Read-only. Reverts and approvals happen in the Brain pane's Memory tab, not here.",
         };
       },
     }),
 
     brain_librarian_info: tool({
       description:
-        "Report the Librarian's own configuration and spend: the LLM provider + model it uses for memory curation, the budget ceiling and cumulative spend (USD), pending-proposal count, and recent paid calls. Use for 'what model are you / how much have you spent / what have you done lately'. Read-only.",
+        "Report the Librarian's own configuration and spend: the LLM provider + model it uses for memory curation, its curation mode ('autonomous' = applies changes itself with undo, 'review' = changes wait in the inbox), the budget ceiling and cumulative spend (USD), pending-proposal count, and recent paid calls. Use for 'what model are you / how much have you spent / what have you done lately'. Read-only.",
       inputSchema: z.object({}),
       execute: async () => {
         const [status, [ceilingUsd, spentUsd], activity] = await Promise.all([
@@ -151,6 +166,7 @@ export function buildBrainTools(_ctx: ToolContext) {
         return {
           provider: status.provider,
           model: status.model,
+          curationMode: status.curation_mode,
           ceilingUsd,
           spentUsd,
           pendingProposals: activity.pending_proposals,

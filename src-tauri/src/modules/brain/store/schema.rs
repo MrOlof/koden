@@ -76,6 +76,15 @@
 ///     forces the derived-table drop/rebuild that re-derives them, and rotates
 ///     the gist cache key — one-time post-upgrade agent-prompt-cache miss,
 ///     expected.
+///
+/// v15 + ADR-018 (NO bump): autonomous curation added COLUMNS TO CANONICAL tables
+///     (`proposals` apply/undo state, `brain_librarian.curation_mode`). Canonical
+///     tables are preserved across bumps (never dropped/rebuilt), so a version bump
+///     cannot deliver new columns to an existing store — instead the idempotent
+///     `migrate::ensure_additive_columns` issues a guarded `ALTER TABLE ... ADD
+///     COLUMN` per missing column on every open (the additive-canonical idiom,
+///     extending the `brain_librarian_pin` new-table precedent below). No gist key
+///     rotation: gist bytes are unaffected by proposal/undo state.
 pub const SCHEMA_VERSION: i64 = 15;
 
 /// Idempotent base DDL (safe to run on every open).
@@ -146,9 +155,16 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 CREATE INDEX IF NOT EXISTS notes_project ON notes(project_id);
 
--- Human-gated proposal queue (P1). Brain-owned, local-only (rebuildable by
--- re-running the doctor) — NEVER auto-applied to user files. `signature` is the
--- plain-join proposalSignature (dedup PK). Status: pending|applied|rejected.
+-- Proposal queue + undo ledger (P1, ADR-018). Brain-owned, local-only. `signature`
+-- is the plain-join proposalSignature (dedup PK). Status: pending|applied|rejected|
+-- reverted. Under ADR-018 autonomous curation the worker APPLIES pending proposals
+-- itself (in 'review' mode they wait for a human, the pre-ADR-018 behavior); either
+-- way the apply snapshots its INVERSE into the undo_* columns BEFORE any file write,
+-- so `brain_revert_proposal` can restore the prior state. The apply/undo columns are
+-- ADDITIVE-canonical: fresh stores get them from this DDL, existing stores from the
+-- guarded `ALTER TABLE ... ADD COLUMN` in `migrate::ensure_additive_columns` — a
+-- SCHEMA_VERSION bump could NOT add them (bumps only rebuild DERIVED tables; this
+-- table is canonical/preserved) and would rotate every gist cache key for nothing.
 CREATE TABLE IF NOT EXISTS proposals (
     project_id TEXT NOT NULL,
     signature  TEXT NOT NULL,
@@ -156,9 +172,16 @@ CREATE TABLE IF NOT EXISTS proposals (
     target_id  TEXT,
     title      TEXT NOT NULL,
     detail     TEXT NOT NULL,
-    source     TEXT NOT NULL,   -- doctor|reflect
+    source     TEXT NOT NULL,   -- doctor|reflect|curate
     status     TEXT NOT NULL,
     created_ms INTEGER NOT NULL,
+    -- ADR-018 apply/undo state (keep in lockstep with migrate::ADDITIVE_CANONICAL_COLUMNS):
+    applied_ms       INTEGER,   -- when the apply landed (epoch ms)
+    reverted_ms      INTEGER,   -- when a revert landed (epoch ms)
+    auto_applied     INTEGER NOT NULL DEFAULT 0, -- 1 = applied by the autonomous worker
+    undo_created_id  TEXT,      -- create/supersede: the minted note id (revert deletes it)
+    undo_prior_path  TEXT,      -- archive/update/supersede: target note rel path
+    undo_prior_bytes TEXT,      -- FULL prior file content (revert restores it verbatim)
     PRIMARY KEY (project_id, signature)
 );
 CREATE INDEX IF NOT EXISTS proposals_project_status ON proposals(project_id, status);
@@ -216,7 +239,11 @@ CREATE TABLE IF NOT EXISTS brain_librarian (
     base_url      TEXT NOT NULL DEFAULT '',
     in_rate_mtok  REAL NOT NULL DEFAULT 1.0,
     out_rate_mtok REAL NOT NULL DEFAULT 5.0,
-    updated_at    INTEGER NOT NULL DEFAULT 0
+    updated_at    INTEGER NOT NULL DEFAULT 0,
+    -- ADR-018: 'autonomous' (worker applies proposals itself, snapshot-undo
+    -- recorded) or 'review' (proposals wait in the inbox). Additive-canonical —
+    -- existing stores get it via migrate::ensure_additive_columns, no version bump.
+    curation_mode TEXT NOT NULL DEFAULT 'autonomous'
 );
 INSERT OR IGNORE INTO brain_librarian (id) VALUES (1);
 

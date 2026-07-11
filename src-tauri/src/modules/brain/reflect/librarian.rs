@@ -68,6 +68,44 @@ pub fn set(conn: &Connection, cfg: &LibrarianConfig, now: i64) -> Result<(), Str
     .map_err(|e| e.to_string())
 }
 
+/// ADR-018 curation modes: `autonomous` — the worker APPLIES proposals itself
+/// (snapshot-undo recorded, everything revertible); `review` — proposals wait for
+/// a human in the inbox (the pre-ADR-018 behavior).
+pub const CURATION_AUTONOMOUS: &str = "autonomous";
+pub const CURATION_REVIEW: &str = "review";
+
+/// True for a recognized curation mode token (the only two the store accepts).
+pub fn is_valid_curation_mode(mode: &str) -> bool {
+    mode == CURATION_AUTONOMOUS || mode == CURATION_REVIEW
+}
+
+/// Read the persisted curation mode. Fails soft to AUTONOMOUS (the ADR-018
+/// default — also what the seeded column defaults to), and normalizes any
+/// unrecognized stored token to it, so the worker's mode gate never errors.
+pub fn curation_mode(conn: &Connection) -> String {
+    let stored: Option<String> = conn
+        .query_row("SELECT curation_mode FROM brain_librarian WHERE id=1", [], |r| r.get(0))
+        .ok();
+    match stored {
+        Some(m) if is_valid_curation_mode(&m) => m,
+        _ => CURATION_AUTONOMOUS.to_string(),
+    }
+}
+
+/// Persist the curation mode (writer-side; the worker calls this). Rejects
+/// unknown tokens so a bad frontend payload can never wedge the mode gate.
+pub fn set_curation_mode(conn: &Connection, mode: &str, now: i64) -> Result<(), String> {
+    if !is_valid_curation_mode(mode) {
+        return Err(format!("unknown curation mode '{mode}' (expected autonomous | review)"));
+    }
+    conn.execute(
+        "UPDATE brain_librarian SET curation_mode=?1, updated_at=?2 WHERE id=1",
+        rusqlite::params![mode, now],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// Read the persisted delta-gate pin (the digest hash of the last round a project
 /// reflected on) — the durable half of `worker::LibrarianAuto.digest_hash`. `None`
 /// when the project has no pinned round yet. Fails soft (a pre-table DB or read race
@@ -167,6 +205,21 @@ mod tests {
         };
         set(&conn, &want, 42).unwrap();
         assert_eq!(config(&conn), want);
+    }
+
+    #[test]
+    fn curation_mode_defaults_autonomous_and_roundtrips() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(curation_mode(&conn), CURATION_AUTONOMOUS, "ADR-018 default");
+        set_curation_mode(&conn, CURATION_REVIEW, 1).unwrap();
+        assert_eq!(curation_mode(&conn), CURATION_REVIEW);
+        set_curation_mode(&conn, CURATION_AUTONOMOUS, 2).unwrap();
+        assert_eq!(curation_mode(&conn), CURATION_AUTONOMOUS);
+        // Unknown tokens are rejected at write and normalized at read.
+        assert!(set_curation_mode(&conn, "yolo", 3).is_err());
+        conn.execute("UPDATE brain_librarian SET curation_mode='garbage' WHERE id=1", []).unwrap();
+        assert_eq!(curation_mode(&conn), CURATION_AUTONOMOUS, "garbage normalizes to the default");
     }
 
     #[test]

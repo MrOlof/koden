@@ -312,10 +312,12 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 // (below), so a MISSING entry means the project was unregistered
                 // mid-flight. [LIB-DESIGN-01 miss2]
                 let now_ms = now_epoch_ms();
+                let mut registered = false;
                 match lib_state.get_mut(&project) {
                     Some(st) => {
                         // Registered: reconcile + validate + enqueue proposals, then
                         // CAS-fold the outcome + persist the digest pin.
+                        registered = true;
                         st.in_flight = false;
                         let (outcome, digest_hash) =
                             reflect::reflect_finish(&index, &project, finish, result, now_ms);
@@ -340,6 +342,16 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         );
                     }
                 }
+                // ADR-018: in autonomous mode, apply what the finished round just
+                // enqueued (plus any leftovers, e.g. from a mode flip), then re-pin
+                // the post-apply digest so the round doesn't self-re-fire. Runs
+                // AFTER the fold so the `st` borrow has ended; skipped for the
+                // unregistered branch, which enqueued nothing.
+                if registered {
+                    if let Some(h) = auto_apply_sweep(&app, &index, &project, now_ms) {
+                        lib_entry(&mut lib_state, &index, &project).digest_hash = Some(h);
+                    }
+                }
             }
             BrainEvent::Doctor { project, now_date } => {
                 let now_ms = now_epoch_ms();
@@ -355,12 +367,19 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     if n > 0 {
                         log::info!("brain: doctor queued {n} proposal(s) for '{pid}'");
                     }
+                    // ADR-018: in autonomous mode the findings land immediately
+                    // (revertible); re-pin so the applies don't re-fire a paid round.
+                    if let Some(h) = auto_apply_sweep(&app, &index, &pid, now_ms) {
+                        lib_entry(&mut lib_state, &index, &pid).digest_hash = Some(h);
+                    }
                 }
             }
             BrainEvent::ResolveProposal { project, signature, reject, reply } => {
                 // Reject = status flip + reject-signature (unchanged). Approve = APPLY:
                 // materialize the note change onto disk on this single writer thread,
                 // where the writer connection + the registry (project root) both live.
+                // (Review-mode path; auto=false — a human clicked Approve.)
+                let now_ms = now_epoch_ms();
                 let result: Result<(), String> = if reject {
                     index
                         .resolve_proposal(&project, &signature, true)
@@ -369,12 +388,14 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 } else {
                     match project_root(&app, &project) {
                         Some(root) => {
-                            let now_date = memory::apply::epoch_ms_to_iso_date(now_epoch_ms());
+                            let now_date = memory::apply::epoch_ms_to_iso_date(now_ms);
                             index.apply_proposal(
                                 &project,
                                 std::path::Path::new(&root),
                                 &signature,
                                 &now_date,
+                                now_ms,
+                                false,
                             )
                         }
                         None => Err(format!("unknown project '{project}'")),
@@ -385,6 +406,41 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 }
                 if let Some(tx) = reply {
                     let _ = tx.send(result); // command awaits this; ignore a dropped rx
+                }
+            }
+            BrainEvent::RevertProposal { project, signature, reply } => {
+                // ADR-018 undo: restore the pre-apply snapshot on this single writer
+                // thread, flip to `reverted`, persist the reject-signature (an undone
+                // change must not be re-proposed + re-applied next round).
+                let now_ms = now_epoch_ms();
+                let mut reverted = false;
+                let result: Result<(), String> = match project_root(&app, &project) {
+                    Some(root) => index
+                        .revert_proposal(&project, std::path::Path::new(&root), &signature, now_ms)
+                        .map(|did| {
+                            reverted = did;
+                        }),
+                    None => Err(format!("unknown project '{project}'")),
+                };
+                if let Err(e) = &result {
+                    log::warn!("brain: revert proposal '{signature}' failed ({e})");
+                }
+                // A revert is a brain-originated memory write too — re-pin so the
+                // next autonomous round doesn't pay to re-read its own undo.
+                if reverted {
+                    let today = utc_date_ymd(now_ms);
+                    if let Some(h) = reflect::pin_corpus_digest(&index, &project, Some(&today), now_ms)
+                    {
+                        lib_entry(&mut lib_state, &index, &project).digest_hash = Some(h);
+                    }
+                }
+                if let Some(tx) = reply {
+                    let _ = tx.send(result);
+                }
+            }
+            BrainEvent::SetCurationMode { mode } => {
+                if let Err(e) = index.set_curation_mode(&mode, now_epoch_ms()) {
+                    log::warn!("brain: set curation mode failed ({e})");
                 }
             }
             BrainEvent::SetBudget { ceiling_usd } => {
@@ -435,6 +491,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                             c.spent_usd
                         );
                     }
+                    // ADR-018: autonomous mode applies the curation verdicts now.
+                    if let Some(h) = auto_apply_sweep(&app, &index, &pid, now_ms) {
+                        lib_entry(&mut lib_state, &index, &pid).digest_hash = Some(h);
+                    }
                 }
             }
             BrainEvent::Reflect { project, now_date } => {
@@ -476,6 +536,11 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         outcome.proposals.len(),
                         outcome.spent_usd
                     );
+                    // ADR-018: autonomous mode applies what this manual round
+                    // enqueued; the sweep re-pins so it doesn't self-re-fire.
+                    if let Some(h) = auto_apply_sweep(&app, &index, &pid, now_ms) {
+                        lib_entry(&mut lib_state, &index, &pid).digest_hash = Some(h);
+                    }
                 }
             }
             BrainEvent::Fs { project, changed } => {
@@ -1165,6 +1230,68 @@ fn persist_lib_pin(index: &SqliteIndex, project_id: &str, st: &LibrarianAuto, no
     }
 }
 
+/// ADR-018 — autonomous curation: APPLY every pending proposal for a project on
+/// the single writer thread, each apply snapshotting its inverse first (undo).
+/// A no-op returning 0 unless the persisted curation mode is `autonomous` (in
+/// 'review' mode proposals keep waiting for a human — behavior unchanged). A soft
+/// apply failure (e.g. the target note was renamed/deleted) leaves THAT proposal
+/// pending — it stays visible in the inbox — and is logged, never fatal to the
+/// sweep. Returns the number applied. `pub` (like [index_dir]) so the `tests/`
+/// integration driver exercises the real sweep; not a stable surface.
+pub fn auto_apply_pending(
+    index: &SqliteIndex,
+    project_id: &str,
+    root: &std::path::Path,
+    now_ms: i64,
+) -> usize {
+    use crate::modules::brain::reflect::librarian;
+    if index.curation_mode() != librarian::CURATION_AUTONOMOUS {
+        return 0;
+    }
+    let sigs = index.pending_proposal_signatures(project_id).unwrap_or_default();
+    if sigs.is_empty() {
+        return 0;
+    }
+    let now_date = memory::apply::epoch_ms_to_iso_date(now_ms);
+    let mut applied = 0usize;
+    for sig in sigs {
+        match index.apply_proposal(project_id, root, &sig, &now_date, now_ms, true) {
+            Ok(()) => applied += 1,
+            Err(e) => {
+                log::warn!("brain: auto-apply of '{sig}' left pending for '{project_id}' ({e})")
+            }
+        }
+    }
+    if applied > 0 {
+        log::info!("brain: auto-applied {applied} memory proposal(s) for '{project_id}' (revertible)");
+    }
+    applied
+}
+
+/// The ADR-018 sweep tail every enqueue site runs: auto-apply pending proposals
+/// (autonomous mode only, unregistered projects skipped — the RemoveProject gate),
+/// then — ONLY when something was applied — re-pin the post-apply corpus digest so
+/// the next autonomous round doesn't pay to reflect on the brain's OWN writes (the
+/// self-feeding loop `build_digest`'s enqueue-only invariant no longer covers).
+/// Returns the new pin for the caller to fold into `LibrarianAuto.digest_hash`.
+/// Deliberate trade-off: the pin covers the whole CURRENT corpus, so a user edit
+/// landing in the same window is skipped for this round and picked up by its next
+/// change (the watcher still fires; the gate short-circuits at $0) — budget
+/// protection outranks reflecting on one intermediate state.
+fn auto_apply_sweep(
+    app: &AppHandle,
+    index: &SqliteIndex,
+    project_id: &str,
+    now_ms: i64,
+) -> Option<String> {
+    let root = project_root(app, project_id)?;
+    if auto_apply_pending(index, project_id, std::path::Path::new(&root), now_ms) == 0 {
+        return None;
+    }
+    let today = utc_date_ymd(now_ms);
+    reflect::pin_corpus_digest(index, project_id, Some(&today), now_ms)
+}
+
 /// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
 /// that has EITHER settled into idle OR just had an AI session exit. No change count,
 /// no fixed clock — the digest hash inside [reflect::reflect_auto] is the real
@@ -1425,6 +1552,11 @@ fn run_doctor_all(app: &AppHandle, index: &SqliteIndex, now_date: Option<&str>) 
         if n > 0 {
             log::info!("brain: doctor seeded {n} proposal(s) for '{}'", proj.name);
         }
+        // ADR-018: autonomous mode lands the seeded findings right away. The
+        // returned pin is dropped — this runs before `lib_state` exists, and
+        // `lib_entry` hydrates from the DURABLE pin the sweep already wrote on the
+        // first sighting of the project this boot. [LIB-SPEND-01]
+        let _ = auto_apply_sweep(app, index, &proj.id, now_ms);
     }
 }
 

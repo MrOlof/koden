@@ -8,11 +8,12 @@ use std::path::PathBuf;
 use crate::modules::brain::reflect::{ReflectFinish, ReflectResponse};
 use crate::modules::brain::ProjectId;
 
-/// Reply channel for a `ResolveProposal`: the worker (the single writer) sends the
-/// apply/reject outcome back so the command can surface a SOFT failure — e.g. a
-/// missing target note on approve — to the caller as `Err(String)`, while the write
-/// itself stays on the writer thread (single-writer discipline). `None` = fire and
-/// forget (the worker just logs a failure).
+/// Reply channel for a `ResolveProposal` / `RevertProposal`: the worker (the single
+/// writer) sends the outcome back so the command can surface a SOFT failure — e.g.
+/// a missing target note on approve, or a pre-ADR-018 row with no undo snapshot on
+/// revert — to the caller as `Err(String)`, while the write itself stays on the
+/// writer thread (single-writer discipline). `None` = fire and forget (the worker
+/// just logs a failure).
 pub type ResolveReply = std::sync::mpsc::Sender<Result<(), String>>;
 
 /// Independent mirror of the pty `koden:agent-signal` JSON payload. Resolves
@@ -59,15 +60,29 @@ pub enum BrainEvent {
         now_date: Option<String>,
     },
     /// Resolve a proposal: `reject` persists its reject-signature + marks it
-    /// rejected; otherwise APPLIES it (materializes the note change onto disk +
-    /// marks it applied). `reply` (if set) receives the outcome so the command can
-    /// surface a soft failure.
+    /// rejected; otherwise APPLIES it (materializes the note change onto disk,
+    /// snapshotting the inverse first, + marks it applied). `reply` (if set)
+    /// receives the outcome so the command can surface a soft failure.
     ResolveProposal {
         project: ProjectId,
         signature: String,
         reject: bool,
         reply: Option<ResolveReply>,
     },
+    /// Revert an APPLIED proposal (ADR-018 undo): restore the pre-apply file
+    /// snapshot, flip the row to `reverted`, and persist its reject-signature so
+    /// the Librarian does not re-propose (and re-auto-apply) the same change next
+    /// round. Idempotent — reverting twice is a no-op. `reply` mirrors
+    /// `ResolveProposal`.
+    RevertProposal {
+        project: ProjectId,
+        signature: String,
+        reply: Option<ResolveReply>,
+    },
+    /// Set the Librarian's curation mode (ADR-018): `autonomous` — the worker
+    /// applies proposals itself (snapshot-undo recorded); `review` — proposals
+    /// wait for a human in the inbox. Writer-side; journaled like SetLibrarian.
+    SetCurationMode { mode: String },
     /// Run a budgeted LLM reflect pass (P4) — the only token-spending path.
     /// Manual-trigger only; `project = None` reflects every registered project.
     /// `now_date` (ISO YYYY-MM-DD) feeds the doctor findings in the digest.

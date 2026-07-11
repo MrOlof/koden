@@ -3,6 +3,10 @@
 - **Status:** Accepted (Kosta 2026-07-11: "the AI tab can be reworked as Librarian…
   I like the idea of being able to talk to ur librarian"); implemented same day,
   commit `5a960e0` on `feat/koden-svart`.
+- **Partially superseded by ADR-018** (autonomous curation): the ENGINE now
+  applies memory changes itself (snapshot-undo, revertible) instead of
+  propose-only — but this ADR's CHAT constraint is unchanged and still enforced:
+  the chat toolset stays read-only (no curation/revert/mode tools).
 - **Supersedes:** the generic "Ask Koden anything" chat identity inherited from Terax
   (persona grid, snippets authoring, five built-in personas).
 

@@ -14,7 +14,9 @@ import {
   brainLibrarianActivity,
   brainLibrarianStatus,
   brainSetBudget,
+  brainSetCurationMode,
   brainSetLibrarian,
+  type CurationMode,
   type LibrarianActivity,
 } from "@/modules/brain/lib/bindings";
 import {
@@ -43,7 +45,7 @@ export function AgentsSection() {
     <div className="flex flex-col gap-7">
       <SectionHeader
         title="Librarian"
-        description="The Librarian is Koden's chat: it answers questions about your projects grounded in the Brain's index and memory notes, and curates that memory over time — every memory change goes through the review inbox."
+        description="The Librarian is Koden's chat: it answers questions about your projects grounded in the Brain's index and memory notes, and curates that memory over time — autonomously by default, with every change revertible, or through the review inbox if you prefer to approve first."
       />
 
       <LibrarianInstructionsBlock value={customInstructions} />
@@ -63,6 +65,9 @@ function BrainLibrarianBlock() {
   const [cap, setCap] = useState("");
   const [spent, setSpent] = useState(0);
   const [enabled, setEnabled] = useState(false);
+  // ADR-018: 'autonomous' (default) applies memory changes itself, revertible;
+  // 'review' parks them in the inbox for approval.
+  const [curation, setCuration] = useState<CurationMode>("autonomous");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -117,6 +122,7 @@ function BrainLibrarianBlock() {
         setProvider(lib.provider as ProviderId);
         setModel(lib.model);
         setBaseUrl(lib.base_url);
+        setCuration(lib.curation_mode === "review" ? "review" : "autonomous");
         setCap(budget[0] > 0 ? String(budget[0]) : "");
         setSpent(budget[1]);
         setEnabled(budget[0] > 0);
@@ -173,6 +179,7 @@ function BrainLibrarianBlock() {
         r.outRate,
       );
       await brainSetBudget(budget > 0 ? budget : 0);
+      await brainSetCurationMode(curation);
       setEnabled(budget > 0);
       setSaved(true);
     } catch (e) {
@@ -207,8 +214,10 @@ function BrainLibrarianBlock() {
       </div>
       <span className="text-[10.5px] text-muted-foreground">
         {enabled
-          ? `Proposes memory updates after you work; nothing lands without your approval. Spent $${spent.toFixed(4)} so far. Clear the cap to $0 to turn it off.`
-          : "Off — indexing and search stay free and always-on. Turn the Librarian on by setting a spending cap; it proposes memory updates, you approve."}
+          ? curation === "autonomous"
+            ? `Curates project memory after you work and applies the changes itself — every one is revertible from the Brain's Memory tab. Spent $${spent.toFixed(4)} so far. Clear the cap to $0 to turn it off.`
+            : `Proposes memory updates after you work; changes wait in the review inbox for your approval. Spent $${spent.toFixed(4)} so far. Clear the cap to $0 to turn it off.`
+          : "Off — indexing and search stay free and always-on. Turn the Librarian on by setting a spending cap; it curates project memory (autonomously by default — everything revertible, or review-first below)."}
       </span>
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -311,6 +320,44 @@ function BrainLibrarianBlock() {
         </div>
       ) : null}
 
+      <div className="flex flex-col gap-1">
+        <Label>Curation</Label>
+        <div className="flex flex-col gap-1.5">
+          {(
+            [
+              {
+                id: "autonomous" as CurationMode,
+                title: "Autonomous",
+                blurb: "applies changes itself; everything revertible",
+              },
+              {
+                id: "review" as CurationMode,
+                title: "Review first",
+                blurb: "changes wait in the inbox for your approval",
+              },
+            ] as const
+          ).map((opt) => (
+            <label
+              key={opt.id}
+              className="flex cursor-pointer items-center gap-2 text-[11.5px]"
+            >
+              <input
+                type="radio"
+                name="librarian-curation"
+                checked={curation === opt.id}
+                onChange={() => {
+                  setCuration(opt.id);
+                  setSaved(false);
+                }}
+                className="accent-[color:var(--primary)]"
+              />
+              <span className="text-foreground/90">{opt.title}</span>
+              <span className="text-muted-foreground">— {opt.blurb}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
       <div className="flex items-end gap-2">
         <div className="flex flex-1 flex-col gap-1">
           <Label>Spending cap (USD)</Label>
@@ -356,6 +403,7 @@ function BrainLibrarianBlock() {
         activity={activity}
         capOn={enabled || Number.parseFloat(cap) > 0}
         needsKey={needsKey}
+        autonomous={curation === "autonomous"}
       />
     </section>
   );
@@ -375,10 +423,12 @@ function LibrarianActivityPanel({
   activity,
   capOn,
   needsKey,
+  autonomous,
 }: {
   activity: LibrarianActivity | null;
   capOn: boolean;
   needsKey: boolean;
+  autonomous: boolean;
 }) {
   return (
     <div className="mt-1 flex flex-col gap-1.5 rounded-md border bg-muted/20 p-2.5">
@@ -404,6 +454,11 @@ function LibrarianActivityPanel({
         <span className={`text-[10.5px] ${WARN_CLS}`}>
           Enabled, but no API key for this provider — reflect can't call. Add a
           key for it above.
+        </span>
+      ) : autonomous ? (
+        <span className="text-[10.5px] text-muted-foreground">
+          Enabled · applies changes autonomously — see Memory changes in the
+          Brain's Memory tab (every change is revertible).
         </span>
       ) : (
         <span className="text-[10.5px] text-muted-foreground">

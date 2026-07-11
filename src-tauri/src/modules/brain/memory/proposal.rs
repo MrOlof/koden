@@ -1,12 +1,16 @@
 //! Memory proposals + the two distinct signature schemes (CONCEPT Flow E/G,
-//! EXECUTION_PLAN §0.3). Proposals are human-gated: the Librarian PROPOSES
-//! changes to user memory, never auto-applies (deletion always confirmed).
+//! EXECUTION_PLAN §0.3). ADR-018 supersedes the original "never auto-applies"
+//! invariant: in the default AUTONOMOUS curation mode the worker applies a
+//! proposal itself, snapshotting its inverse first so `brain_revert_proposal`
+//! can restore the prior state; in 'review' mode proposals still wait for a
+//! human in the inbox. Chat tools remain read-only either way (ADR-017).
 //!
 //! Two signatures stay separate (§0.3):
 //!  - `proposal_signature` — plain field join; the dedup key (table PK) so the
 //!    same proposal isn't queued twice across doctor runs.
 //!  - `reject_signature` — djb2 over `scope|action|normalized-title`, persisted
-//!    on reject so a declined proposal does not reappear.
+//!    on reject AND on revert (an undone change must not be re-proposed and
+//!    re-applied next round) so a declined change does not reappear.
 
 /// Apply-op space: 3 proposal variants (create/update/supersede) + `archive`
 /// (the preserve-biased apply-op). §0.3.
@@ -50,7 +54,27 @@ pub struct MemoryProposal {
     pub title: String,
     pub detail: String,
     pub source: String, // "doctor" | "reflect" | "curate"
-    pub status: String, // "pending" | "applied" | "rejected"
+    pub status: String, // "pending" | "applied" | "rejected" | "reverted"
+}
+
+/// One APPLIED (or reverted) memory change for the "Memory changes" surface
+/// (ADR-018) — a proposal row read back with its apply/undo state. `revertible`
+/// is true when the row is still `applied` AND carries the inverse snapshot the
+/// apply recorded (rows applied before ADR-018 have none).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MemoryChange {
+    pub project: String,
+    pub signature: String,
+    pub action: ProposalAction,
+    pub target_id: Option<String>,
+    pub title: String,
+    pub detail: String,
+    pub source: String,
+    pub status: String, // "applied" | "reverted"
+    pub applied_ms: Option<i64>,
+    pub reverted_ms: Option<i64>,
+    pub auto_applied: bool,
+    pub revertible: bool,
 }
 
 /// In-memory/PK dedup key — a plain field join (Conductr `proposalSignature`).

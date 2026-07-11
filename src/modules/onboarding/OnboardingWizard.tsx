@@ -599,7 +599,7 @@ function HowBody() {
       </FeatureRow>
       <FeatureRow icon={RoboticIcon} title="The Librarian">
         The chat: ask it about your projects, grounded in the Brain. It also
-        proposes memory updates that you approve.
+        curates project memory on its own — every change is revertible.
       </FeatureRow>
     </div>
   );
@@ -819,10 +819,12 @@ function LibrarianBody({
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-muted-foreground">
         The Librarian does light background work, so it runs best on a small,
-        cheap model. It proposes tidy-ups to your project memory; you always
-        approve before anything is saved. The cap below only governs this
-        background curation — chat is available whenever a model is connected,
-        billed by the provider, not counted against the cap.
+        cheap model. It tidies your project memory on its own — every change is
+        revertible from the Brain's Memory tab, and you can switch to
+        review-first in Settings › Librarian if you'd rather approve each one.
+        The cap below only governs this background curation — chat is available
+        whenever a model is connected, billed by the provider, not counted
+        against the cap.
       </p>
 
       <div>
@@ -896,8 +898,8 @@ function LibrarianBody({
             })}
           </select>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            A small, cheap model is recommended; it only writes proposals you
-            approve.
+            A small, cheap model is recommended; every change it makes is
+            revertible.
           </p>
         </div>
       ) : null}
@@ -952,7 +954,7 @@ function DoneBody({
       ok: libEnabled,
       icon: RoboticIcon,
       label: libEnabled
-        ? "Librarian enabled"
+        ? "Librarian enabled — curates memory on its own, every change revertible"
         : "Librarian curation off (enable anytime in Settings › Librarian)",
     },
   ];

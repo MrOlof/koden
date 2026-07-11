@@ -28,6 +28,47 @@ pub(crate) const CANONICAL_TABLES: &[&str] = &[
     "brain_semantic_meta",
 ];
 
+/// Columns added to CANONICAL tables AFTER their first ship (ADR-018) —
+/// `(table, column, column DDL)`. Canonical tables survive version changes by being
+/// absent from the DROP batch, so `CREATE TABLE IF NOT EXISTS` can never add a
+/// column to an EXISTING store, and a SCHEMA_VERSION bump would not either (bumps
+/// only drop/rebuild DERIVED tables, while rotating every gist cache key). The
+/// additive-canonical migration is therefore a guarded `ALTER TABLE ... ADD COLUMN`
+/// run idempotently on every open ([ensure_additive_columns]). Keep this list in
+/// lockstep with the base DDL (fresh stores get the columns from `schema::DDL`;
+/// existing stores from here) — [tests::additive_columns_match_the_ddl] enforces it.
+/// Column DDL must be ALTER-legal: defaults constant, no PK/UNIQUE.
+const ADDITIVE_CANONICAL_COLUMNS: &[(&str, &str, &str)] = &[
+    ("proposals", "applied_ms", "INTEGER"),
+    ("proposals", "reverted_ms", "INTEGER"),
+    ("proposals", "auto_applied", "INTEGER NOT NULL DEFAULT 0"),
+    ("proposals", "undo_created_id", "TEXT"),
+    ("proposals", "undo_prior_path", "TEXT"),
+    ("proposals", "undo_prior_bytes", "TEXT"),
+    ("brain_librarian", "curation_mode", "TEXT NOT NULL DEFAULT 'autonomous'"),
+];
+
+/// Add any missing additive-canonical column (see [ADDITIVE_CANONICAL_COLUMNS]).
+/// Idempotent (PRAGMA table_info gate), cheap on the steady state (one PRAGMA per
+/// table). Runs inside the caller's transaction on the upgrade path.
+fn ensure_additive_columns(conn: &Connection) -> rusqlite::Result<()> {
+    let mut cols_of: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for (table, col, ddl) in ADDITIVE_CANONICAL_COLUMNS {
+        if !cols_of.contains_key(table) {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let names: Vec<String> =
+                stmt.query_map([], |r| r.get::<_, String>(1))?.filter_map(Result::ok).collect();
+            cols_of.insert(table, names);
+        }
+        let existing = cols_of.get_mut(table).expect("probed above");
+        if !existing.iter().any(|c| c == col) {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {ddl};"))?;
+            existing.push((*col).to_string());
+        }
+    }
+    Ok(())
+}
+
 /// Apply pragmas + base DDL and reconcile the stored `schema_version`.
 /// Returns the version now in force.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
@@ -63,8 +104,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
     };
 
     if matches!(current, Some(v) if v == SCHEMA_VERSION) {
-        // Already current: just ensure the (idempotent) DDL is present and return.
+        // Already current: just ensure the (idempotent) DDL is present — plus any
+        // additive-canonical column a same-version store may still be missing
+        // (CREATE TABLE IF NOT EXISTS cannot add columns to an existing table).
         conn.execute_batch(DDL)?;
+        ensure_additive_columns(conn)?;
         return Ok(SCHEMA_VERSION);
     }
 
@@ -94,6 +138,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<i64> {
         }
     }
     tx.execute_batch(DDL)?;
+    // Canonical tables were NOT dropped above, so an older store may still be
+    // missing additive columns the fresh DDL carries — add them here, atomically
+    // with the version stamp.
+    ensure_additive_columns(&tx)?;
     tx.execute(
         "INSERT INTO brain_meta(key,value) VALUES('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -314,6 +362,85 @@ mod tests {
         // …and never overlap.
         for t in DERIVED_TABLES {
             assert!(!CANONICAL_TABLES.contains(t), "'{t}' cannot be both derived and canonical");
+        }
+    }
+
+    #[test]
+    fn additive_columns_added_to_existing_stores_and_defaults_hold() {
+        // ADR-018 migration: a store created BEFORE the additive-canonical columns
+        // (old-shape `proposals` / `brain_librarian`, version already current) must
+        // gain them on the next open, preserving existing rows — the exact path a
+        // real upgrade takes, since canonical tables are never dropped/rebuilt.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE brain_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE proposals (
+                 project_id TEXT NOT NULL, signature TEXT NOT NULL, action TEXT NOT NULL,
+                 target_id TEXT, title TEXT NOT NULL, detail TEXT NOT NULL,
+                 source TEXT NOT NULL, status TEXT NOT NULL, created_ms INTEGER NOT NULL,
+                 PRIMARY KEY (project_id, signature));
+             CREATE TABLE brain_librarian (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 provider TEXT NOT NULL DEFAULT 'anthropic',
+                 model TEXT NOT NULL DEFAULT 'claude-haiku-4-5',
+                 base_url TEXT NOT NULL DEFAULT '',
+                 in_rate_mtok REAL NOT NULL DEFAULT 1.0,
+                 out_rate_mtok REAL NOT NULL DEFAULT 5.0,
+                 updated_at INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO brain_librarian (id, provider) VALUES (1, 'openai');
+             INSERT INTO proposals VALUES ('p','sig','archive','n','t','d','curate','pending',1);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO brain_meta(key,value) VALUES('schema_version', ?1)",
+            [SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+
+        // Columns exist; the legacy row survived with the ALTER defaults.
+        let (status, auto, undo): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, auto_applied, undo_created_id FROM proposals WHERE signature='sig'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "legacy row preserved");
+        assert_eq!(auto, 0, "auto_applied defaults 0");
+        assert_eq!(undo, None, "no snapshot on a legacy row");
+        let (provider, mode): (String, String) = conn
+            .query_row("SELECT provider, curation_mode FROM brain_librarian WHERE id=1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(provider, "openai", "existing librarian selection preserved");
+        assert_eq!(mode, "autonomous", "curation mode defaults AUTONOMOUS (ADR-018)");
+
+        // Idempotent: a second open neither errors nor duplicates columns.
+        assert_eq!(migrate(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn additive_columns_match_the_ddl() {
+        // Lockstep gate: every additive-canonical column must exist on a FRESH store
+        // (i.e. the base DDL also carries it), so fresh and upgraded stores converge
+        // to the same shape — and each must name a real canonical table.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        for (table, col, _) in ADDITIVE_CANONICAL_COLUMNS {
+            assert!(
+                CANONICAL_TABLES.contains(table),
+                "additive column '{col}' targets non-canonical table '{table}'"
+            );
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+            let names: Vec<String> =
+                stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().filter_map(Result::ok).collect();
+            assert!(
+                names.iter().any(|c| c == col),
+                "column '{table}.{col}' missing from the base DDL — add it to schema::DDL too"
+            );
         }
     }
 

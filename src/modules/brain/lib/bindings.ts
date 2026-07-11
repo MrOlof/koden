@@ -97,6 +97,29 @@ export type MemoryProposal = {
   status: string;
 };
 
+/** One applied (or reverted) memory change — a proposal row with its ADR-018
+ *  apply/undo state. `revertible` = still applied AND the apply recorded the
+ *  inverse snapshot (rows applied before ADR-018 have none). */
+export type MemoryChange = {
+  project: string;
+  signature: string;
+  action: ProposalAction;
+  target_id: string | null;
+  title: string;
+  detail: string;
+  source: string;
+  status: string; // "applied" | "reverted"
+  applied_ms: number | null;
+  reverted_ms: number | null;
+  auto_applied: boolean;
+  revertible: boolean;
+};
+
+/** Curation modes (ADR-018): the Librarian applies memory changes itself
+ *  (`autonomous`, the default — everything revertible) or parks them in the
+ *  review inbox (`review`). */
+export type CurationMode = "autonomous" | "review";
+
 /** Structured memory notes (cards). `project = null` = all. */
 export function brainNotes(
   project: string | null = null,
@@ -119,13 +142,38 @@ export function brainDoctor(
   return invoke<void>("brain_doctor", { project, nowDate });
 }
 
-/** Approve (reject=false) or decline (reject=true) a proposal. */
+/** Approve (reject=false) or decline (reject=true) a proposal (review mode). */
 export function brainResolveProposal(
   project: string,
   signature: string,
   reject: boolean,
 ): Promise<void> {
   return invoke<void>("brain_resolve_proposal", { project, signature, reject });
+}
+
+/** Revert an applied memory change (ADR-018 undo): restores the pre-apply file
+ *  snapshot and blocks the same change from being re-proposed. Idempotent; a
+ *  pre-ADR-018 row without a snapshot rejects with a clear error. */
+export function brainRevertProposal(
+  project: string,
+  signature: string,
+): Promise<void> {
+  return invoke<void>("brain_revert_proposal", { project, signature });
+}
+
+/** Recent applied + reverted memory changes, newest first (the "Memory changes"
+ *  list). `project = null` = all projects. */
+export function brainMemoryChanges(
+  project: string | null = null,
+  limit = 50,
+): Promise<MemoryChange[]> {
+  return invoke<MemoryChange[]>("brain_memory_changes", { project, limit });
+}
+
+/** Set the Librarian's curation mode (ADR-018): 'autonomous' applies changes
+ *  itself (revertible), 'review' parks them in the inbox for approval. */
+export function brainSetCurationMode(mode: CurationMode): Promise<void> {
+  return invoke<void>("brain_set_curation_mode", { mode });
 }
 
 /** Trigger a budgeted LLM reflect pass (P4 — the only token-spending path).
@@ -167,7 +215,8 @@ export function brainSetLibrarian(
 /** Run stale-ADR / memory curation (V2 Flow G). `project = null` curates all.
  *  `nowDate` = ISO YYYY-MM-DD for the staleness signal. Decisive stale notes get a
  *  $0 archive proposal; borderline ones escalate to a budget-gated LLM judgment.
- *  Archive-biased + human-gated; results land in the proposal inbox. */
+ *  Archive-biased; in autonomous mode the verdicts apply immediately (revertible,
+ *  ADR-018), in review mode they wait in the proposal inbox. */
 export function brainCurate(
   project: string | null = null,
   nowDate: string | null = null,
@@ -186,10 +235,12 @@ export type LibrarianStatus = {
   base_url: string;
   in_rate_mtok: number;
   out_rate_mtok: number;
+  curation_mode: CurationMode | string;
 };
 
-/** The current Librarian LLM selection (provider/model/base URL + $/Mtok rates).
- *  Defaults to Anthropic Haiku when unset. */
+/** The current Librarian LLM selection (provider/model/base URL + $/Mtok rates)
+ *  plus its curation mode (ADR-018). Defaults to Anthropic Haiku / autonomous
+ *  when unset. */
 export function brainLibrarianStatus(): Promise<LibrarianStatus> {
   return invoke<LibrarianStatus>("brain_librarian_status", {});
 }
@@ -205,7 +256,9 @@ export type LedgerCall = {
 
 /** Read-only "is the Librarian actually working?" snapshot: budget meter, pending
  *  proposal count, and the most recent real LLM calls. Empty calls + $0 spent =
- *  it hasn't run a paid reflect yet (no key / no corpus / not triggered). */
+ *  it hasn't run a paid reflect yet (no key / no corpus / not triggered).
+ *  NOTE: in autonomous curation mode (ADR-018) `pending_proposals` reads ~0 by
+ *  design — changes apply immediately and live in the Memory changes list. */
 export type LibrarianActivity = {
   ceiling_usd: number;
   spent_usd: number;

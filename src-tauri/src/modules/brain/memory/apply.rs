@@ -1,16 +1,17 @@
-//! Materialize an APPROVED memory proposal onto disk (D2). The Librarian only ever
-//! PROPOSES; approval is the exclusive writer — this module is that writer's file
-//! half. Conductr's `apply-proposals.ts` is the reference: create writes a new note,
-//! archive/supersede/update edit the target note's frontmatter/body. Koden's port
-//! carried the proposal QUEUE but dropped the apply half, so review-inbox Approve was
-//! a no-op; this closes it.
+//! Materialize a memory proposal onto disk (D2), and REVERT one (ADR-018). The
+//! writer is either a human approval (review mode) or the autonomous worker
+//! (default mode) — this module is that writer's file half either way. Conductr's
+//! `apply-proposals.ts` is the reference: create writes a new note,
+//! archive/supersede/update edit the target note's frontmatter/body. ADR-018 adds
+//! the inverse: [revert_files] deletes a minted note and/or restores the target's
+//! snapshotted prior bytes, so every apply is undoable.
 //!
 //! Split of concerns: everything here is pure filesystem (read + frontmatter/body
 //! edit + crash-safe write) so it is unit-testable without a store. The DB side
-//! (read the proposal, re-scan the notes table, flip the proposal to `applied`) lives
-//! in `store::sqlite::apply_proposal`, which orchestrates this. The note FILES are
-//! file-canonical (git-committed, not journaled); only the notes TABLE + proposal row
-//! are journaled, by the store.
+//! (read the proposal, snapshot the inverse, re-scan the notes table, flip the
+//! status) lives in `store::sqlite::{apply_proposal, revert_proposal}`, which
+//! orchestrate this. The note FILES are file-canonical (git-committed, not
+//! journaled); only the notes TABLE + proposal row are journaled, by the store.
 //!
 //! Content is already clean: a proposal's title/detail came from the redacted reflect
 //! digest (CONCEPT §7.1), so no new redaction is added here.
@@ -25,11 +26,15 @@ use super::proposal::ProposalAction;
 /// a sessions decision — same kind), falling back to this only if the target has none.
 const DEFAULT_NOTE_TYPE: &str = "insight";
 
-/// Materialize one approved proposal's file change(s). `mem_dir` is
-/// `<root>/.koden-memory`; `target_path` is the resolved absolute path of the target
-/// note (required for archive/update/supersede; `None` for create). `target_id` is
-/// the target note's id (supersede links to it). A missing/invalid target is a SOFT
-/// error (`Err`) — the caller leaves the proposal pending.
+/// Materialize one proposal's file change(s). `mem_dir` is `<root>/.koden-memory`;
+/// `target_path` is the resolved absolute path of the target note (required for
+/// archive/update/supersede; `None` for create). `target_id` is the target note's
+/// id (supersede links to it). A missing/invalid target is a SOFT error (`Err`) —
+/// the caller leaves the proposal pending.
+///
+/// Returns the note id MINTED by this apply (`Some(slug)` for create/supersede,
+/// `None` for archive/update) — the caller records it as the undo snapshot's
+/// created-id so a revert can delete exactly the file this apply wrote (ADR-018).
 pub fn materialize(
     mem_dir: &Path,
     action: ProposalAction,
@@ -38,20 +43,22 @@ pub fn materialize(
     title: &str,
     detail: &str,
     now_date: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     match action {
         ProposalAction::Create => {
             let id = unique_slug(mem_dir, title);
             let content = build_note(&id, DEFAULT_NOTE_TYPE, title, detail, now_date, None);
             atomic_write(&mem_dir.join(format!("{id}.md")), &content)
-                .map_err(|e| format!("write new note: {e}"))
+                .map_err(|e| format!("write new note: {e}"))?;
+            Ok(Some(id))
         }
         ProposalAction::Archive => {
             let tp = target_path.ok_or("archive proposal has no resolved target note")?;
             let raw = std::fs::read_to_string(tp)
                 .map_err(|e| format!("read target note {}: {e}", tp.display()))?;
             let updated = set_frontmatter_field(&raw, "status", "archived")?;
-            atomic_write(tp, &updated).map_err(|e| format!("write archived note: {e}"))
+            atomic_write(tp, &updated).map_err(|e| format!("write archived note: {e}"))?;
+            Ok(None)
         }
         ProposalAction::Update => {
             let tp = target_path.ok_or("update proposal has no resolved target note")?;
@@ -66,7 +73,8 @@ pub fn materialize(
                 updated.push('\n');
             }
             updated.push_str(&format!("\n## Update ({now_date})\n\n{}\n", detail.trim()));
-            atomic_write(tp, &updated).map_err(|e| format!("write updated note: {e}"))
+            atomic_write(tp, &updated).map_err(|e| format!("write updated note: {e}"))?;
+            Ok(None)
         }
         ProposalAction::Supersede => {
             let tp = target_path.ok_or("supersede proposal has no resolved target note")?;
@@ -83,9 +91,59 @@ pub fn materialize(
                 .map_err(|e| format!("write superseding note: {e}"))?;
             // Then wire the old note's back-edge.
             let updated = set_frontmatter_field(&target_raw, "superseded_by", &new_id)?;
-            atomic_write(tp, &updated).map_err(|e| format!("write superseded note: {e}"))
+            atomic_write(tp, &updated).map_err(|e| format!("write superseded note: {e}"))?;
+            Ok(Some(new_id))
         }
     }
+}
+
+/// A note id safe to splice into a `.koden-memory` filename for DELETION: the exact
+/// alphabet `unique_slug`/`slugify` mints (plus `_` for hand-written ids). Rejects
+/// anything path-shaped by construction — a tampered undo row can't escape the dir.
+fn safe_note_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Apply the INVERSE of a materialized proposal (ADR-018 undo), from the snapshot
+/// `apply_proposal` recorded BEFORE it wrote anything:
+///  - `created_id` (create/supersede): delete `<root>/.koden-memory/<id>.md` — the
+///    note that apply minted. Already-gone is fine (idempotent re-run).
+///  - `prior_rel_path` + `prior_bytes` (archive/update/supersede): restore the
+///    target note's FULL prior content verbatim via the same atomic-write idiom.
+///    Full bytes (not a field flip) because e.g. archive may have INSERTED a
+///    `status:` key the original never had — only the snapshot restores exactly.
+/// Both legs validate their path stays inside the memory dir (defense in depth on
+/// top of the store being local-only).
+pub fn revert_files(
+    root: &Path,
+    created_id: Option<&str>,
+    prior_rel_path: Option<&str>,
+    prior_bytes: Option<&str>,
+) -> Result<(), String> {
+    if let Some(id) = created_id {
+        if !safe_note_id(id) {
+            return Err(format!("refusing to delete suspicious note id '{id}'"));
+        }
+        let p = root.join(super::MEMORY_DIR).join(format!("{id}.md"));
+        match std::fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // already gone — idempotent
+            Err(e) => return Err(format!("remove created note {}: {e}", p.display())),
+        }
+    }
+    if let (Some(rel), Some(bytes)) = (prior_rel_path, prior_bytes) {
+        let norm = rel.replace('\\', "/");
+        if !norm.starts_with(&format!("{}/", super::MEMORY_DIR)) || norm.contains("..") {
+            return Err(format!("refusing to restore outside {}: '{rel}'", super::MEMORY_DIR));
+        }
+        atomic_write(&root.join(&norm), bytes)
+            .map_err(|e| format!("restore prior note bytes: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Build a new note file: `---` frontmatter (id/type/title/status/created [+ optional
@@ -315,6 +373,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("read target note"), "clear error: {err}");
+    }
+
+    #[test]
+    fn materialize_returns_minted_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = dir.path().join(".koden-memory");
+        let created =
+            materialize(&mem, ProposalAction::Create, None, None, "A Note", "b", "2026-07-10").unwrap();
+        assert_eq!(created.as_deref(), Some("a-note"), "create returns the minted slug");
+        let tp = mem.join("a-note.md");
+        let sup = materialize(
+            &mem,
+            ProposalAction::Supersede,
+            Some(&tp),
+            Some("a-note"),
+            "A Note",
+            "newer",
+            "2026-07-10",
+        )
+        .unwrap();
+        assert_eq!(sup.as_deref(), Some("a-note-2"), "supersede returns the (collision-suffixed) slug");
+        let arch =
+            materialize(&mem, ProposalAction::Archive, Some(&tp), Some("a-note"), "t", "d", "2026-07-10")
+                .unwrap();
+        assert_eq!(arch, None, "archive mints nothing");
+    }
+
+    #[test]
+    fn revert_files_deletes_created_and_restores_prior_bytes_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mem = root.join(".koden-memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        let prior = "---\nid: t\n---\n# T\n\noriginal\n";
+        std::fs::write(mem.join("t.md"), "MUTATED").unwrap();
+        std::fs::write(mem.join("minted.md"), "new note").unwrap();
+
+        revert_files(root, Some("minted"), Some(".koden-memory/t.md"), Some(prior)).unwrap();
+        assert!(!mem.join("minted.md").exists(), "minted note deleted");
+        assert_eq!(std::fs::read_to_string(mem.join("t.md")).unwrap(), prior, "prior bytes restored verbatim");
+
+        // Idempotent: a second run (minted already gone) still succeeds + converges.
+        revert_files(root, Some("minted"), Some(".koden-memory/t.md"), Some(prior)).unwrap();
+        assert_eq!(std::fs::read_to_string(mem.join("t.md")).unwrap(), prior);
+    }
+
+    #[test]
+    fn revert_files_rejects_path_shaped_ids_and_escaping_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(revert_files(root, Some("../evil"), None, None).is_err());
+        assert!(revert_files(root, Some("a/b"), None, None).is_err());
+        assert!(revert_files(root, None, Some("../outside.md"), Some("x")).is_err());
+        assert!(revert_files(root, None, Some("src/code.rs"), Some("x")).is_err(), "outside the memory dir");
+        assert!(revert_files(root, None, Some(".koden-memory/../up.md"), Some("x")).is_err());
     }
 
     #[test]

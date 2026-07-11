@@ -1,8 +1,10 @@
 //! P4 — budgeted LLM reflect: the ONLY token-spending path in Koden Brain.
 //! Opt-in, default-$0, hard pre-flight budget gate, single-flight, fail-open.
-//! The model PROPOSES memory cleanups; a human approves them via the P1 queue —
-//! reflect NEVER writes user memory and NEVER spends without a durable reservation
-//! passing the ceiling check first.
+//! The model PROPOSES memory cleanups into the P1 queue — reflect itself NEVER
+//! writes user memory and NEVER spends without a durable reservation passing the
+//! ceiling check first. Who then APPLIES the queue is ADR-018's curation mode:
+//! the worker sweep in the default AUTONOMOUS mode (snapshot-undo recorded,
+//! everything revertible), or a human approval in 'review' mode.
 //!
 //! Testability: the Anthropic call sits behind [ReflectClient] so the whole
 //! pipeline (digest → budget → map → enqueue) runs offline/$0/deterministically
@@ -383,6 +385,31 @@ fn append_already_proposed(index: &SqliteIndex, project_id: &str, corpus: String
     let section = format!("## Already proposed (do not re-propose)\n\n{}", lines.join("\n"));
     let redacted = crate::modules::brain::secrets::redact(&section).0;
     format!("{corpus}\n\n{redacted}")
+}
+
+/// Pin the CURRENT corpus digest as a project's delta-gate pin — the ADR-018
+/// self-feeding-loop guard. `build_digest` is a pure function of the note corpus,
+/// so an ENQUEUE never moves it (the invariant it documents) — but an APPLY does:
+/// the autonomous worker writing `.koden-memory` files (an auto-apply batch, a
+/// revert) changes the very corpus the next round would hash, and without re-pinning
+/// every round would chain a paid call on the Librarian's own writes until
+/// quiescent. Called by the worker right AFTER such brain-originated writes; user
+/// edits still unpin naturally (different bytes ⇒ different hash). Returns the
+/// pinned hash (None for an empty corpus) so the caller can fold it into the
+/// in-memory `LibrarianAuto.digest_hash`; the durable write is best-effort (a
+/// failure only risks one re-paid round, logged).
+pub fn pin_corpus_digest(
+    index: &SqliteIndex,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+) -> Option<String> {
+    let corpus = build_digest(index, project_id, now_date)?;
+    let h = hash::hash_bytes(corpus.as_bytes());
+    if let Err(e) = index.set_librarian_pin(project_id, &h, now_ms) {
+        log::warn!("brain: pin post-apply digest for '{project_id}' failed ({e})");
+    }
+    Some(h)
 }
 
 /// Delta-gated reflect core (testable offline): build the digest, and SKIP the model
@@ -895,7 +922,7 @@ mod tests {
         // approving it materializes the archive against the real note.
         let stale = out.proposals.iter().find(|p| p.title == "Archive n1").unwrap();
         assert_eq!(stale.target_id.as_deref(), Some("n1"), "target carried onto the proposal");
-        idx.apply_proposal("p", &root, &stale.signature, "2026-07-10").unwrap();
+        idx.apply_proposal("p", &root, &stale.signature, "2026-07-10", 5_000, false).unwrap();
         let raw = std::fs::read_to_string(root.join(".koden-memory").join("n1.md")).unwrap();
         assert!(raw.contains("status: archived"), "approve archived the target note: {raw}");
         let _ = std::fs::remove_dir_all(&base);

@@ -1,11 +1,13 @@
 /**
- * Optimistic-removal guard for the proposal inbox (ADR-010 cluster 7).
+ * Optimistic-update guards for the proposal inbox (ADR-010 cluster 7) and the
+ * ADR-018 "Memory changes" list.
  *
- * Resolving a proposal enqueues onto the brain worker and removes the card
- * optimistically; the bounded post-action poll re-reads the backend BEFORE the
- * worker applies the resolve, so an unguarded poll clobbers the removed card
- * back into the inbox. The guard hides proposals whose resolve is still in
- * flight and forgets them once the worker has applied them.
+ * Resolving a proposal (or reverting a change) enqueues onto the brain worker
+ * and updates the card optimistically; the bounded post-action poll re-reads
+ * the backend BEFORE the worker lands the write, so an unguarded poll clobbers
+ * the optimistic state back. [reconcileProposals] hides proposals whose resolve
+ * is still in flight; [reconcileChanges] holds a reverting row at `reverted`.
+ * Both forget keys once the worker has landed them.
  */
 
 /** Composite key — proposal signatures are only unique per project. */
@@ -38,5 +40,35 @@ export function reconcileProposals<
   }
   return fetched.filter(
     (p) => !pending.has(proposalKey(p.project, p.signature)),
+  );
+}
+
+/**
+ * The revert twin of [reconcileProposals] for the ADR-018 "Memory changes" list.
+ * A reverted row stays IN the list (status flips, the card shows "Reverted"), so
+ * instead of hiding rows this OVERRIDES the fetched status to `reverted` while a
+ * revert is still in flight on the worker — a stale poll tick can't flash the
+ * Revert button back (double-clicks are idempotent server-side, but the flicker
+ * misleads). Keys are forgotten once the backend reports the row reverted, or —
+ * scope-aware, like reconcileProposals — once a fetch that could have returned
+ * the key no longer does (the row vanished, e.g. its project was removed).
+ */
+export function reconcileChanges<
+  T extends { project: string; signature: string; status: string },
+>(fetched: T[], reverting: Set<string>, scope: string | null): T[] {
+  if (reverting.size === 0) return fetched;
+  const byKey = new Map(
+    fetched.map((c) => [proposalKey(c.project, c.signature), c] as const),
+  );
+  for (const key of reverting) {
+    const row = byKey.get(key);
+    if (row ? row.status === "reverted" : scope === null || key.startsWith(`${scope} `)) {
+      reverting.delete(key);
+    }
+  }
+  return fetched.map((c) =>
+    reverting.has(proposalKey(c.project, c.signature)) && c.status === "applied"
+      ? { ...c, status: "reverted" }
+      : c,
   );
 }

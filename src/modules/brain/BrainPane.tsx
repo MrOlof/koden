@@ -11,21 +11,29 @@ import {
   brainCurate,
   brainDoctor,
   brainIndexStatus,
+  brainLibrarianStatus,
   brainListProjects,
+  brainMemoryChanges,
   brainNotes,
   brainProposals,
   brainReflect,
   brainRemoveProject,
   brainRescan,
   brainResolveProposal,
+  brainRevertProposal,
   brainSearch,
   brainSetBudget,
   type Hit,
+  type MemoryChange,
   type MemoryProposal,
   type NoteSummary,
   type Project,
 } from "./lib/bindings";
-import { proposalKey, reconcileProposals } from "./lib/proposalPoll";
+import {
+  proposalKey,
+  reconcileChanges,
+  reconcileProposals,
+} from "./lib/proposalPoll";
 
 const MIN_QUERY_LEN = 2;
 const DEBOUNCE_MS = 300;
@@ -43,6 +51,18 @@ function today(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Compact relative time for the Memory changes list ("just now", "5m ago", …). */
+function fmtAgo(ms: number | null): string {
+  if (!ms) return "";
+  const d = Date.now() - ms;
+  if (d < 60_000) return "just now";
+  const m = Math.floor(d / 60_000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 function statusLabel(report: BrainStatusReport | null): string {
@@ -77,6 +97,10 @@ export function BrainPane() {
   const [addError, setAddError] = useState<string | null>(null);
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [proposals, setProposals] = useState<MemoryProposal[]>([]);
+  const [changes, setChanges] = useState<MemoryChange[]>([]);
+  // ADR-018: 'autonomous' (default) — the Librarian applies changes itself and
+  // the inbox becomes a revertible "Memory changes" feed; 'review' — classic inbox.
+  const [curationMode, setCurationMode] = useState<string>("autonomous");
   const [budget, setBudget] = useState<[number, number] | null>(null); // [ceiling, spent], global
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -84,6 +108,8 @@ export function BrainPane() {
   // Proposal keys with an in-flight resolve: the optimistic removal must survive
   // the bounded post-action poll until the worker applies it (ADR-010 cluster 7).
   const pendingResolutions = useRef<Set<string>>(new Set());
+  // Change keys with an in-flight revert: held at 'reverted' until the worker lands.
+  const pendingReverts = useRef<Set<string>>(new Set());
 
   const active = query.trim().length > 0;
 
@@ -155,12 +181,14 @@ export function BrainPane() {
 
   const loadMemory = useCallback(async () => {
     try {
-      // Budget is global (not per-project); tolerate its absence so a degraded
-      // budget read never blocks the proposals/notes inbox.
-      const [proposalsRes, notesRes, bud] = await Promise.all([
+      // Budget is global (not per-project); tolerate its absence — and that of the
+      // changes/mode reads — so one degraded read never blocks the inbox.
+      const [proposalsRes, notesRes, bud, changesRes, lib] = await Promise.all([
         brainProposals(project),
         brainNotes(project),
         brainBudgetStatus().catch(() => null),
+        brainMemoryChanges(project).catch(() => [] as MemoryChange[]),
+        brainLibrarianStatus().catch(() => null),
       ]);
       // Hide proposals whose resolve is still in flight on the worker (and forget
       // ones it has applied) — otherwise this poll clobbers the optimistic removal.
@@ -169,6 +197,9 @@ export function BrainPane() {
       setProposals(
         reconcileProposals(proposalsRes, pendingResolutions.current, project),
       );
+      // Same guard for in-flight reverts (held at 'reverted' until the worker lands).
+      setChanges(reconcileChanges(changesRes, pendingReverts.current, project));
+      if (lib) setCurationMode(lib.curation_mode);
       setNotes(notesRes);
       setBudget(bud);
     } catch (e) {
@@ -253,6 +284,25 @@ export function BrainPane() {
     // optimistic removal; the guarded poll reconciles once the worker applies it
     setProposals((prev) =>
       prev.filter((x) => proposalKey(x.project, x.signature) !== key),
+    );
+    pollMemory();
+  };
+
+  // ADR-018 undo: optimistic 'reverted' + the pendingReverts guard, mirroring
+  // resolve(). A failed revert (e.g. a pre-undo legacy row) restores the card.
+  const revert = (ch: MemoryChange) => {
+    const key = proposalKey(ch.project, ch.signature);
+    pendingReverts.current.add(key);
+    brainRevertProposal(ch.project, ch.signature).catch((e) => {
+      console.error("brain_revert_proposal failed:", e);
+      pendingReverts.current.delete(key); // let the next poll restore the button
+    });
+    setChanges((prev) =>
+      prev.map((x) =>
+        proposalKey(x.project, x.signature) === key
+          ? { ...x, status: "reverted" }
+          : x,
+      ),
     );
     pollMemory();
   };
@@ -400,9 +450,12 @@ export function BrainPane() {
         <MemoryView
           notes={notes}
           proposals={proposals}
+          changes={changes}
+          curationMode={curationMode}
           budget={budget}
           onRunDoctor={runDoctor}
           onResolve={resolve}
+          onRevert={revert}
           onSetCeiling={setCeiling}
           onReflect={runReflect}
           onCurate={runCurate}
@@ -536,9 +589,12 @@ function SearchView({
 type MemoryViewProps = {
   notes: NoteSummary[];
   proposals: MemoryProposal[];
+  changes: MemoryChange[];
+  curationMode: string;
   budget: [number, number] | null;
   onRunDoctor: () => void;
   onResolve: (p: MemoryProposal, reject: boolean) => void;
+  onRevert: (ch: MemoryChange) => void;
   onSetCeiling: (usd: number) => void;
   onReflect: () => void;
   onCurate: () => void;
@@ -547,28 +603,37 @@ type MemoryViewProps = {
 function MemoryView({
   notes,
   proposals,
+  changes,
+  curationMode,
   budget,
   onRunDoctor,
   onResolve,
+  onRevert,
   onSetCeiling,
   onReflect,
   onCurate,
 }: MemoryViewProps) {
+  const autonomous = curationMode === "autonomous";
   return (
     <ScrollArea className="min-h-0 flex-1">
       <div className="flex flex-col gap-3 p-2">
         <LibrarianSection
           budget={budget}
+          autonomous={autonomous}
           onSetCeiling={onSetCeiling}
           onReflect={onReflect}
           onCurate={onCurate}
         />
 
-        {/* Review inbox */}
+        {/* ADR-018: autonomous mode shows the revertible change feed; review mode
+            keeps the classic approve/reject inbox. Pending cards still render in
+            autonomous mode (rare: a soft-failed apply, or review-era leftovers). */}
         <section>
           <div className="mb-1 flex items-center gap-2">
             <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Review inbox ({proposals.length})
+              {autonomous
+                ? `Memory changes (${changes.length})`
+                : `Review inbox (${proposals.length})`}
             </h3>
             <button
               type="button"
@@ -579,12 +644,14 @@ function MemoryView({
               Run doctor
             </button>
           </div>
-          {proposals.length === 0 ? (
-            <div className="px-1 py-1 text-[11px] text-muted-foreground">
-              No pending proposals.
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1.5">
+
+          {proposals.length > 0 ? (
+            <div className="mb-1.5 flex flex-col gap-1.5">
+              {autonomous ? (
+                <div className="px-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                  Waiting for review
+                </div>
+              ) : null}
               {proposals.map((p) => (
                 <div
                   key={`${p.project} ${p.signature}`}
@@ -618,7 +685,70 @@ function MemoryView({
                 </div>
               ))}
             </div>
-          )}
+          ) : !autonomous ? (
+            <div className="px-1 py-1 text-[11px] text-muted-foreground">
+              No pending proposals.
+            </div>
+          ) : null}
+
+          {autonomous ? (
+            changes.length === 0 ? (
+              <div className="px-1 py-1 text-[11px] text-muted-foreground">
+                No memory changes yet. The Librarian applies its curation here —
+                every change can be reverted.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {changes.map((ch) => (
+                  <div
+                    key={`${ch.project} ${ch.signature}`}
+                    className={cn(
+                      "rounded border p-2 text-xs",
+                      ch.status === "reverted" && "opacity-60",
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="rounded bg-muted px-1 py-0.5 text-[10px] uppercase text-muted-foreground">
+                        {ch.action}
+                      </span>
+                      <span className="truncate font-medium">{ch.title}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                        {fmtAgo(ch.reverted_ms ?? ch.applied_ms)}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-1.5">
+                      {ch.status === "reverted" ? (
+                        <span className="text-[11px] text-muted-foreground">
+                          Reverted
+                        </span>
+                      ) : ch.revertible ? (
+                        <button
+                          type="button"
+                          onClick={() => onRevert(ch)}
+                          className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                          title="Undo this change (restores the note's previous state)"
+                        >
+                          Revert
+                        </button>
+                      ) : (
+                        <span
+                          className="text-[10px] text-muted-foreground/70"
+                          title="Applied before undo snapshots existed"
+                        >
+                          Applied
+                        </span>
+                      )}
+                      {ch.auto_applied ? (
+                        <span className="text-[10px] text-muted-foreground/70">
+                          auto
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : null}
         </section>
 
         {/* Notes */}
@@ -666,6 +796,7 @@ function MemoryView({
 
 type LibrarianSectionProps = {
   budget: [number, number] | null;
+  autonomous: boolean;
   onSetCeiling: (usd: number) => void;
   onReflect: () => void;
   onCurate: () => void;
@@ -676,9 +807,11 @@ type LibrarianSectionProps = {
  * monthly reset) — the ENABLE knob (0 = off) — plus manual Reflect / Curate triggers. Reflect is purely
  * paid so it's disabled until a ceiling is set; Curate still runs its $0 archive
  * proposals (only borderline judgments escalate to budget-gated LLM calls).
+ * Copy is curation-mode-aware (ADR-018): autonomous applies results itself.
  */
 function LibrarianSection({
   budget,
+  autonomous,
   onSetCeiling,
   onReflect,
   onCurate,
@@ -744,7 +877,9 @@ function LibrarianSection({
           <p className="mt-1 text-[10px] text-muted-foreground">
             Reflect is off. Set a spending cap to enable the paid librarian
             (reflect + contradiction). Curate still runs its free archive
-            proposals.
+            {autonomous
+              ? " pass — applied automatically, revertible below."
+              : " proposals."}
           </p>
         ) : null}
         <div className="mt-1.5 flex gap-1.5">
@@ -760,7 +895,9 @@ function LibrarianSection({
             )}
             title={
               enabled
-                ? "Run a budgeted LLM reflect pass"
+                ? autonomous
+                  ? "Run a budgeted LLM reflect pass (changes apply automatically; revert below)"
+                  : "Run a budgeted LLM reflect pass"
                 : "Set a budget to enable reflect"
             }
           >
@@ -770,7 +907,11 @@ function LibrarianSection({
             type="button"
             onClick={onCurate}
             className="rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent"
-            title="Curate stale/contradictory notes (free archive proposals; paid judgments only within budget)"
+            title={
+              autonomous
+                ? "Curate stale/contradictory notes (applied automatically, revertible; paid judgments only within budget)"
+                : "Curate stale/contradictory notes (free archive proposals; paid judgments only within budget)"
+            }
           >
             Curate
           </button>

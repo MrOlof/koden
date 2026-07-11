@@ -1,7 +1,9 @@
-//! Map a validated LLM `ProposalItem` → a human-gated `MemoryProposal`
+//! Map a validated LLM `ProposalItem` → a `MemoryProposal`
 //! (`reflect-llm.ts:120-160` mapToProposals, adapted). Reflect output flows into
 //! the SAME P1 proposal queue + dedup signature as the doctor — the model only
-//! ever PROPOSES; a human approves before any user file changes.
+//! ever PROPOSES here; the queue is then applied by the autonomous worker sweep
+//! (default mode, snapshot-undo recorded) or by a human approval in 'review'
+//! mode (ADR-018).
 
 use crate::modules::brain::memory::proposal::{proposal_signature, MemoryProposal, ProposalAction};
 
@@ -11,8 +13,9 @@ use super::schema::{Level, ProposalItem, ProposalKind, Scope};
 /// mapToProposals (`reflect-llm.ts:148-156`, which maps conflict→supersede,
 /// stale→update): Koden has no `manual` apply-op and is preserve-biased, so `stale`
 /// → Archive (the preserve-biased op, not a content rewrite) and `conflict` →
-/// Update (flag the conflict for human edit, not an automatic supersede). All
-/// reflect proposals are human-gated regardless, so the apply-op only labels intent.
+/// Update (flag the conflict, not an automatic supersede). Every apply-op is
+/// revertible from its snapshot (ADR-018), so the mapping stays preserve-biased
+/// even under autonomous application.
 fn action_for(kind: ProposalKind) -> ProposalAction {
     match kind {
         ProposalKind::Insight | ProposalKind::ShouldRemember => ProposalAction::Create,

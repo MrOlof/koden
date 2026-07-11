@@ -17,7 +17,9 @@ use rusqlite::{Connection, OpenFlags};
 use super::SearchIndex;
 use crate::modules::brain::ast::{self, Impact, ImpactDirection, ImpactRow, SymbolInfo};
 use crate::modules::brain::memory::doctor::NoteRecord;
-use crate::modules::brain::memory::proposal::{reject_signature, MemoryProposal, ProposalAction};
+use crate::modules::brain::memory::proposal::{
+    reject_signature, MemoryChange, MemoryProposal, ProposalAction,
+};
 use crate::modules::brain::memory::{MemoryNote, NoteSummary};
 use crate::modules::brain::rank::{self, Leg};
 use crate::modules::brain::tokenize;
@@ -733,10 +735,12 @@ impl SqliteIndex {
     /// `(title, detail)` of the proposals the semantic near-dupe gate and the
     /// "already proposed" digest section compare against: EVERY pending proposal for
     /// the project (the live inbox), plus the most recent `resolved_lookback` RESOLVED
-    /// ones (applied|rejected — so a re-worded accepted fact or a declined one under a
-    /// fresh title is still caught, which the exact reject-signature misses). Reads the
-    /// writer connection (called mid-enqueue on the writer thread); best-effort — a
-    /// read error yields fewer/no comparisons, never a failed enqueue.
+    /// ones (applied|rejected|reverted — so a re-worded accepted fact, a declined one
+    /// under a fresh title, or an UNDONE one is still caught, which the exact
+    /// reject-signature misses; under ADR-018 autonomy applied rows are the dominant
+    /// resolved class, since proposals rarely sit pending). Reads the writer
+    /// connection (called mid-enqueue on the writer thread); best-effort — a read
+    /// error yields fewer/no comparisons, never a failed enqueue.
     pub(crate) fn proposal_dedup_texts(
         &self,
         project_id: &str,
@@ -752,7 +756,7 @@ impl SqliteIndex {
             }
         }
         if let Ok(mut stmt) = self.conn.prepare(
-            "SELECT title, detail FROM proposals WHERE project_id=?1 AND status IN ('applied','rejected') \
+            "SELECT title, detail FROM proposals WHERE project_id=?1 AND status IN ('applied','rejected','reverted') \
              ORDER BY created_ms DESC LIMIT ?2",
         ) {
             if let Ok(it) = stmt.query_map(rusqlite::params![project_id, resolved_lookback as i64], row) {
@@ -846,20 +850,23 @@ impl SqliteIndex {
         Ok(true)
     }
 
-    /// APPLY an approved proposal (D2): materialize its change onto the project's
+    /// APPLY a proposal (D2 + ADR-018): materialize its change onto the project's
     /// `.koden-memory/*.md` files, re-sync the notes table from disk, and flip the
-    /// proposal to `applied`. The human-gated WRITE half the Koden port dropped — the
-    /// Librarian only proposes; approval (this) is the exclusive writer.
+    /// proposal to `applied` — recording the inverse SNAPSHOT (captured before any
+    /// write) so [`Self::revert_proposal`] can undo it. The writer is either a human
+    /// approval (review mode) or the autonomous worker sweep (`auto = true`).
     ///
     /// Ordering (files are file-canonical, the table + proposal row are journaled):
     ///  1. read the pending proposal (missing / already-resolved → idempotent no-op),
-    ///  2. resolve the target note's path from the notes table (archive/update/
+    ///  2. resolve the target note's rel path from the notes table (archive/update/
     ///     supersede) — a missing target is a SOFT error that leaves the proposal
     ///     pending (return `Err`, nothing written),
-    ///  3. materialize the file change(s) crash-safely (`memory::apply`),
-    ///  4. re-scan the memory folder so the notes table reflects the new/edited file
+    ///  3. SNAPSHOT the target file's full prior bytes (the undo; None for create),
+    ///  4. materialize the file change(s) crash-safely (`memory::apply`), which
+    ///     returns any minted note id (the rest of the undo),
+    ///  5. re-scan the memory folder so the notes table reflects the new/edited file
     ///     (idempotent), then
-    ///  5. mark the proposal `applied` + journal the status flip.
+    ///  6. mark the proposal `applied` + persist the undo columns + journal the row.
     ///
     /// Reject is unchanged — it stays on [`Self::resolve_proposal`].
     pub fn apply_proposal(
@@ -868,6 +875,8 @@ impl SqliteIndex {
         root: &Path,
         signature: &str,
         now_date: &str,
+        now_ms: i64,
+        auto: bool,
     ) -> Result<(), String> {
         use crate::modules::brain::memory::{self, apply};
 
@@ -883,16 +892,16 @@ impl SqliteIndex {
             return Ok(()); // no such proposal — nothing to apply (idempotent)
         };
         if status != "pending" {
-            return Ok(()); // already applied/rejected — idempotent no-op
+            return Ok(()); // already applied/rejected/reverted — idempotent no-op
         }
         let action = ProposalAction::from_token(&action_s)
             .ok_or_else(|| format!("proposal has unknown action '{action_s}'"))?;
 
-        // Resolve the target note's absolute path (archive/update/supersede). A target
-        // id with no matching notes-table row is a soft failure — the note was renamed
-        // or deleted since the proposal was queued; leave the proposal pending.
-        let target_path = match action {
-            ProposalAction::Create => None,
+        // Resolve the target note's rel + absolute path (archive/update/supersede).
+        // A target id with no matching notes-table row is a soft failure — the note
+        // was renamed or deleted since the proposal was queued; leave it pending.
+        let (target_rel, target_path): (Option<String>, Option<std::path::PathBuf>) = match action {
+            ProposalAction::Create => (None, None),
             ProposalAction::Archive | ProposalAction::Update | ProposalAction::Supersede => {
                 let tid = target_id
                     .as_deref()
@@ -906,13 +915,28 @@ impl SqliteIndex {
                     )
                     .ok();
                 let rel = rel.ok_or_else(|| format!("target note '{tid}' not found"))?;
-                Some(root.join(rel))
+                let abs = root.join(&rel);
+                (Some(rel), Some(abs))
             }
+        };
+
+        // SNAPSHOT the inverse BEFORE any write (ADR-018): the target file's full
+        // prior bytes. Full bytes, not a field diff — e.g. archive may INSERT a
+        // `status:` key the original never had; only the snapshot restores exactly.
+        // An unreadable target is the same soft-error class as materialize's read
+        // (nothing written yet, proposal stays pending).
+        let prior_bytes: Option<String> = match &target_path {
+            Some(tp) => Some(
+                std::fs::read_to_string(tp)
+                    .map_err(|e| format!("read target note {}: {e}", tp.display()))?,
+            ),
+            None => None,
         };
 
         // Materialize the file change(s). A soft error (missing/unreadable target)
         // returns here BEFORE any DB mutation, so the proposal stays pending.
-        apply::materialize(
+        // Returns the minted note id (create/supersede) — the rest of the undo.
+        let created_id = apply::materialize(
             &root.join(memory::MEMORY_DIR),
             action,
             target_path.as_deref(),
@@ -926,11 +950,22 @@ impl SqliteIndex {
         // note is queryable and the UI's notes polling shows it.
         memory::scan_project_memory(self, project_id, root);
 
-        // Mark applied + journal the status flip (mirrors resolve_proposal's tail).
+        // Mark applied + persist the undo snapshot + journal (mirrors
+        // resolve_proposal's tail). One UPDATE so the flip and its undo are atomic.
         self.conn
             .execute(
-                "UPDATE proposals SET status='applied' WHERE project_id=?1 AND signature=?2",
-                rusqlite::params![project_id, signature],
+                "UPDATE proposals SET status='applied', applied_ms=?3, auto_applied=?4,
+                    undo_created_id=?5, undo_prior_path=?6, undo_prior_bytes=?7
+                 WHERE project_id=?1 AND signature=?2",
+                rusqlite::params![
+                    project_id,
+                    signature,
+                    now_ms,
+                    auto as i64,
+                    created_id,
+                    target_rel,
+                    prior_bytes
+                ],
             )
             .map_err(|e| format!("mark proposal applied: {e}"))?;
         self.journal.append_row(
@@ -939,6 +974,145 @@ impl SqliteIndex {
             "project_id=?1 AND signature=?2",
             rusqlite::params![project_id, signature],
         );
+        Ok(())
+    }
+
+    /// REVERT an applied proposal (ADR-018 undo): restore the pre-apply file state
+    /// from the snapshot [`Self::apply_proposal`] recorded, re-scan the notes table,
+    /// flip the row to `reverted`, and persist its reject-signature — an undone
+    /// change must not be re-proposed and re-auto-applied next round (the
+    /// undo-fights-the-librarian loop). Idempotent: a missing row, or any status
+    /// other than `applied`, is an `Ok(false)` no-op (reverting twice = no-op).
+    /// A pre-ADR-018 `applied` row carries no snapshot — soft `Err`, stays applied.
+    ///
+    /// Ordering mirrors the apply: files first (crash-safe — a crash after the file
+    /// restore but before the flip leaves an `applied` row whose re-run converges,
+    /// `revert_files` being idempotent), then one tx for the flip + reject-signature,
+    /// then the journal appends (after commit, lockstep with `resolve_proposal`).
+    pub fn revert_proposal(
+        &self,
+        project_id: &str,
+        root: &Path,
+        signature: &str,
+        now_ms: i64,
+    ) -> Result<bool, String> {
+        use crate::modules::brain::memory::{self, apply};
+
+        type Row = (
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let row: Option<Row> = self
+            .conn
+            .query_row(
+                "SELECT action, target_id, title, status, undo_created_id, undo_prior_path, undo_prior_bytes
+                 FROM proposals WHERE project_id=?1 AND signature=?2",
+                (project_id, signature),
+                |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                },
+            )
+            .ok();
+        let Some((action_s, target_id, title, status, undo_created_id, undo_prior_path, undo_prior_bytes)) =
+            row
+        else {
+            return Ok(false); // no such proposal — nothing to revert (idempotent)
+        };
+        if status != "applied" {
+            return Ok(false); // pending/rejected/reverted — idempotent no-op
+        }
+        let action = ProposalAction::from_token(&action_s)
+            .ok_or_else(|| format!("proposal has unknown action '{action_s}'"))?;
+
+        // A row applied before ADR-018 recorded no inverse — nothing to restore from.
+        let has_snapshot = match action {
+            ProposalAction::Create => undo_created_id.is_some(),
+            ProposalAction::Archive | ProposalAction::Update => {
+                undo_prior_path.is_some() && undo_prior_bytes.is_some()
+            }
+            ProposalAction::Supersede => {
+                undo_created_id.is_some()
+                    && undo_prior_path.is_some()
+                    && undo_prior_bytes.is_some()
+            }
+        };
+        if !has_snapshot {
+            return Err(
+                "proposal was applied before undo snapshots existed; nothing recorded to revert"
+                    .to_string(),
+            );
+        }
+
+        // Files first (see ordering note above), then re-sync the notes table.
+        apply::revert_files(
+            root,
+            undo_created_id.as_deref(),
+            undo_prior_path.as_deref(),
+            undo_prior_bytes.as_deref(),
+        )?;
+        memory::scan_project_memory(self, project_id, root);
+
+        let rej = reject_signature(action, target_id.as_deref(), &title);
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE proposals SET status='reverted', reverted_ms=?3 WHERE project_id=?1 AND signature=?2",
+            rusqlite::params![project_id, signature, now_ms],
+        )
+        .map_err(|e| format!("mark proposal reverted: {e}"))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO reject_signatures(project_id,reject_sig) VALUES(?1,?2)",
+            (project_id, rej.as_str()),
+        )
+        .map_err(|e| format!("persist revert reject-signature: {e}"))?;
+        tx.commit().map_err(|e| e.to_string())?;
+
+        // Journal the new durable state AFTER commit (lockstep with resolve_proposal).
+        self.journal.append_row(
+            &self.conn,
+            "proposals",
+            "project_id=?1 AND signature=?2",
+            rusqlite::params![project_id, signature],
+        );
+        self.journal.append_row(
+            &self.conn,
+            "reject_signatures",
+            "project_id=?1 AND reject_sig=?2",
+            rusqlite::params![project_id, rej],
+        );
+        Ok(true)
+    }
+
+    /// Signatures of every PENDING proposal for a project, oldest first — the
+    /// autonomous worker sweep's work list (ADR-018). Writer-side.
+    pub fn pending_proposal_signatures(&self, project_id: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT signature FROM proposals WHERE project_id=?1 AND status='pending' ORDER BY created_ms",
+        )?;
+        let it = stmt.query_map([project_id], |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for x in it {
+            v.push(x?);
+        }
+        Ok(v)
+    }
+
+    /// The persisted Librarian curation mode (`autonomous` | `review`, ADR-018).
+    /// Fail-soft to AUTONOMOUS (the default). Writer-side read.
+    pub fn curation_mode(&self) -> String {
+        crate::modules::brain::reflect::librarian::curation_mode(&self.conn)
+    }
+
+    /// Persist the Librarian curation mode (ADR-018). Journals the singleton row
+    /// (mirrors [`Self::set_librarian_config`]) so the mode survives a header-wipe
+    /// rebuild. Writer-side.
+    pub fn set_curation_mode(&self, mode: &str, now: i64) -> Result<(), String> {
+        crate::modules::brain::reflect::librarian::set_curation_mode(&self.conn, mode, now)?;
+        self.journal.append_row(&self.conn, "brain_librarian", "id=1", rusqlite::params![]);
         Ok(())
     }
 
@@ -2279,16 +2453,17 @@ pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {
     )
 }
 
-/// The Librarian LLM selection `(provider, model, base_url, in_rate_mtok, out_rate_mtok)`
-/// via a read-only connection (the command-thread status read). Fail-soft to the
-/// Anthropic Haiku default so a pre-table DB or read race never errors the UI.
+/// The Librarian LLM selection `(provider, model, base_url, in_rate_mtok,
+/// out_rate_mtok, curation_mode)` via a read-only connection (the command-thread
+/// status read). Fail-soft to the Anthropic Haiku default + AUTONOMOUS curation
+/// (ADR-018) so a pre-table DB or read race never errors the UI.
 pub fn librarian_config_readonly(
     db_path: &Path,
-) -> rusqlite::Result<(String, String, String, f64, f64)> {
+) -> rusqlite::Result<(String, String, String, f64, f64, String)> {
     let conn = open_readonly(db_path)?;
     Ok(conn
         .query_row(
-            "SELECT provider, model, base_url, in_rate_mtok, out_rate_mtok FROM brain_librarian WHERE id=1",
+            "SELECT provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode FROM brain_librarian WHERE id=1",
             [],
             |r| {
                 Ok((
@@ -2297,11 +2472,19 @@ pub fn librarian_config_readonly(
                     r.get::<_, String>(2)?,
                     r.get::<_, f64>(3)?,
                     r.get::<_, f64>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             },
         )
         .unwrap_or_else(|_| {
-            ("anthropic".to_string(), "claude-haiku-4-5".to_string(), String::new(), 1.0, 5.0)
+            (
+                "anthropic".to_string(),
+                "claude-haiku-4-5".to_string(),
+                String::new(),
+                1.0,
+                5.0,
+                "autonomous".to_string(),
+            )
         }))
 }
 
@@ -2330,6 +2513,9 @@ pub fn librarian_ledger_readonly(
 }
 
 /// Count of unresolved (pending) review-inbox proposals via a read-only connection.
+/// NOTE (ADR-018): in the default AUTONOMOUS curation mode the worker applies
+/// proposals as they are enqueued, so this reads ~0 by design — mode-aware UI copy
+/// points at the "Memory changes" list instead of this count.
 pub fn pending_proposals_readonly(db_path: &Path) -> rusqlite::Result<i64> {
     let conn = open_readonly(db_path)?;
     conn.query_row(
@@ -2403,6 +2589,77 @@ pub fn list_proposals_readonly(
         None => {
             let mut stmt = conn.prepare(&format!("{base} ORDER BY project_id, created_ms"))?;
             let it = stmt.query_map([], proposal_from_row)?;
+            for x in it {
+                rows.push(x?);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn memory_change_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryChange> {
+    let action =
+        ProposalAction::from_token(&r.get::<_, String>(2)?).unwrap_or(ProposalAction::Update);
+    let status: String = r.get(7)?;
+    let undo_created_id: Option<String> = r.get(11)?;
+    let undo_prior_path: Option<String> = r.get(12)?;
+    let has_prior_bytes: bool = r.get::<_, Option<i64>>(13)?.unwrap_or(0) != 0;
+    // Revertible = still applied AND the apply recorded the inverse this action
+    // needs (rows applied before ADR-018 recorded none) — keep in lockstep with
+    // `SqliteIndex::revert_proposal`'s has_snapshot match.
+    let has_snapshot = match action {
+        ProposalAction::Create => undo_created_id.is_some(),
+        ProposalAction::Archive | ProposalAction::Update => {
+            undo_prior_path.is_some() && has_prior_bytes
+        }
+        ProposalAction::Supersede => {
+            undo_created_id.is_some() && undo_prior_path.is_some() && has_prior_bytes
+        }
+    };
+    Ok(MemoryChange {
+        project: r.get(0)?,
+        signature: r.get(1)?,
+        action,
+        target_id: r.get(3)?,
+        title: r.get(4)?,
+        detail: r.get(5)?,
+        source: r.get(6)?,
+        revertible: status == "applied" && has_snapshot,
+        status,
+        applied_ms: r.get(8)?,
+        reverted_ms: r.get(9)?,
+        auto_applied: r.get::<_, i64>(10)? != 0,
+    })
+}
+
+/// Recent APPLIED + REVERTED memory changes (the ADR-018 "Memory changes" surface),
+/// newest first, via a read-only connection. `project = None` = all projects.
+/// The undo snapshot itself is not returned — only whether one exists (`revertible`);
+/// `undo_prior_bytes` can be a whole note and the UI never needs it.
+pub fn list_memory_changes_readonly(
+    db_path: &Path,
+    project: Option<&str>,
+    limit: usize,
+) -> rusqlite::Result<Vec<MemoryChange>> {
+    let conn = open_readonly(db_path)?;
+    let base = "SELECT project_id,signature,action,target_id,title,detail,source,status,\
+                applied_ms,reverted_ms,auto_applied,undo_created_id,undo_prior_path,\
+                (undo_prior_bytes IS NOT NULL) \
+                FROM proposals WHERE status IN ('applied','reverted')";
+    let order = "ORDER BY COALESCE(reverted_ms, applied_ms, created_ms) DESC LIMIT ?";
+    let mut rows = Vec::new();
+    match project {
+        Some(pid) => {
+            let mut stmt = conn.prepare(&format!("{base} AND project_id=?1 {order}2"))?;
+            let it =
+                stmt.query_map(rusqlite::params![pid, limit as i64], memory_change_from_row)?;
+            for x in it {
+                rows.push(x?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare(&format!("{base} {order}1"))?;
+            let it = stmt.query_map([limit as i64], memory_change_from_row)?;
             for x in it {
                 rows.push(x?);
             }

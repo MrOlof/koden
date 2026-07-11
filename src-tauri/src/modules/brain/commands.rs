@@ -528,11 +528,12 @@ pub fn brain_doctor(
 }
 
 /// Resolve a proposal: `reject = true` declines it (persists a reject-signature so it
-/// can't reappear); otherwise APPROVES it, which now MATERIALIZES the change onto the
-/// project's `.koden-memory/*.md` files (D2). The write runs on the worker (single
-/// writer); this command awaits the outcome so a soft failure — e.g. the target note
-/// was renamed/deleted since the proposal was queued — surfaces as `Err(String)` and
-/// the proposal stays pending. Contract unchanged for the frontend: `Result<(), String>`.
+/// can't reappear); otherwise APPROVES it, which MATERIALIZES the change onto the
+/// project's `.koden-memory/*.md` files (D2), snapshotting the inverse first so it is
+/// revertible (ADR-018). The review-mode path — in autonomous mode the worker applies
+/// proposals itself. The write runs on the worker (single writer); this command awaits
+/// the outcome so a soft failure — e.g. the target note was renamed/deleted since the
+/// proposal was queued — surfaces as `Err(String)` and the proposal stays pending.
 #[tauri::command]
 pub async fn brain_resolve_proposal(
     state: State<'_, BrainState>,
@@ -549,6 +550,56 @@ pub async fn brain_resolve_proposal(
             .unwrap_or_else(|_| Err("brain worker stopped before the proposal resolved".to_string()))
     })
     .await?
+}
+
+/// REVERT an applied memory change (ADR-018 undo): restore the pre-apply file
+/// snapshot, flip the proposal to `reverted`, and persist its reject-signature so
+/// the Librarian doesn't re-propose (and re-apply) the same change. Idempotent —
+/// reverting twice is a no-op. Runs on the worker (single writer); awaited like
+/// `brain_resolve_proposal` so a soft failure (e.g. a pre-ADR-018 row with no
+/// recorded snapshot) surfaces as `Err(String)`.
+#[tauri::command]
+pub async fn brain_revert_proposal(
+    state: State<'_, BrainState>,
+    project: String,
+    signature: String,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    enqueue(&state, BrainEvent::RevertProposal { project, signature, reply: Some(tx) })?;
+    blocking(move || {
+        rx.recv()
+            .unwrap_or_else(|_| Err("brain worker stopped before the revert resolved".to_string()))
+    })
+    .await?
+}
+
+/// Recent APPLIED + REVERTED memory changes (the ADR-018 "Memory changes" list),
+/// newest first, with a `revertible` flag per row. `project = None` = all projects.
+#[tauri::command]
+pub async fn brain_memory_changes(
+    state: State<'_, BrainState>,
+    project: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<crate::modules::brain::memory::proposal::MemoryChange>, String> {
+    let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
+        return Ok(Vec::new());
+    };
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    blocking(move || {
+        store::list_memory_changes_readonly(&db, project.as_deref(), limit).unwrap_or_default()
+    })
+    .await
+}
+
+/// Set the Librarian's curation mode (ADR-018): `autonomous` — it applies memory
+/// changes itself, every one revertible; `review` — changes wait for approval in
+/// the inbox. Validated here so a bad payload never reaches the store.
+#[tauri::command]
+pub fn brain_set_curation_mode(state: State<BrainState>, mode: String) -> Result<(), String> {
+    if !crate::modules::brain::reflect::librarian::is_valid_curation_mode(&mode) {
+        return Err("invalid curation mode: expected autonomous | review".to_string());
+    }
+    enqueue(&state, BrainEvent::SetCurationMode { mode })
 }
 
 /// Trigger a budgeted LLM reflect pass (P4) — the only token-spending path.
@@ -598,7 +649,9 @@ pub fn brain_set_librarian(
 
 /// Run stale-ADR / memory curation (V2 Flow G) on the worker. Decisive stale notes
 /// get a $0 archive proposal; borderline ones escalate to a budget-gated LLM
-/// classification. Archive-biased, human-gated — never edits/deletes a user file.
+/// classification. Archive-biased; in autonomous mode the worker applies the
+/// verdicts (revertible, ADR-018), in review mode they wait in the inbox. Never
+/// DELETES a user file — archive flips frontmatter, and every apply is undoable.
 #[tauri::command]
 pub fn brain_curate(
     state: State<BrainState>,
@@ -617,8 +670,9 @@ pub async fn brain_budget_status(state: State<'_, BrainState>) -> Result<(f64, f
     blocking(move || store::budget_state_readonly(&db).unwrap_or((0.0, 0.0))).await
 }
 
-/// The current Librarian LLM selection (read-only). Defaults to Anthropic Haiku
-/// when unset. Lets Settings show + edit which model the reflect/curate path uses.
+/// The current Librarian LLM selection + curation mode (read-only). Defaults to
+/// Anthropic Haiku / autonomous when unset. Lets Settings show + edit which model
+/// the reflect/curate path uses and whether it applies changes itself (ADR-018).
 #[derive(serde::Serialize)]
 pub struct LibrarianStatus {
     pub provider: String,
@@ -626,6 +680,7 @@ pub struct LibrarianStatus {
     pub base_url: String,
     pub in_rate_mtok: f64,
     pub out_rate_mtok: f64,
+    pub curation_mode: String, // "autonomous" | "review"
 }
 
 #[tauri::command]
@@ -636,13 +691,14 @@ pub async fn brain_librarian_status(state: State<'_, BrainState>) -> Result<Libr
         base_url: String::new(),
         in_rate_mtok: 1.0,
         out_rate_mtok: 5.0,
+        curation_mode: "autonomous".to_string(),
     };
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
         return Ok(def());
     };
     blocking(move || match store::librarian_config_readonly(&db) {
-        Ok((provider, model, base_url, in_rate_mtok, out_rate_mtok)) => {
-            LibrarianStatus { provider, model, base_url, in_rate_mtok, out_rate_mtok }
+        Ok((provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode)) => {
+            LibrarianStatus { provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode }
         }
         Err(_) => def(),
     })
