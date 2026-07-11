@@ -166,7 +166,7 @@ real-kill crash sim + real-key smoke (cross-phase DoD evidence).
 via the real `index_dir` pipeline. Three labeled bands (CONCEPT §12.2 / anti-gaming
 §13.12): positives (recall@5, hard floor 0.80), negative control (must be empty,
 hard gate), semantic-intent (P0-lexical expected to miss; reported not asserted).
-Measured from a real run (`docs/koden-brain-BENCH.md`): positives **9/9=1.00**,
+Measured from a real run (`.memory/brain-build/koden-brain-BENCH.md`): positives **9/9=1.00**,
 negative-control leaks **0/3**, semantic-intent **0/2** (the honest lexical gap
 that P5 closes). Deliberately not a flat vanity 1.0 — the discriminating signal is
 the negative control + the semantic band. _(P0-era figures; V2.2 grew the corpus to

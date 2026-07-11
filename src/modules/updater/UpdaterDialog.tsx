@@ -28,9 +28,9 @@ function distroCommand(key: DistroKey, version: string): string {
 }
 
 const DISTROS: { key: DistroKey; label: string }[] = [
-  { key: "arch", label: "Arch" },
   { key: "debian", label: "Debian / Ubuntu" },
   { key: "fedora", label: "Fedora / RHEL" },
+  { key: "arch", label: "AUR (coming soon)" },
 ];
 
 function formatBytes(n: number): string {
@@ -42,7 +42,7 @@ function formatBytes(n: number): string {
 export function UpdaterDialog() {
   const { status, install, dismiss } = useUpdater();
   const [copied, setCopied] = useState(false);
-  const [distro, setDistro] = useState<DistroKey>("arch");
+  const [distro, setDistro] = useState<DistroKey>("debian");
   const manualVersion =
     status.kind === "manual-available" ? status.info.version : "";
   const activeCommand = distroCommand(distro, manualVersion);

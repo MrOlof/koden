@@ -48,11 +48,8 @@ jobs:
           $stagingDir = "signpath-staging"
           New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
           $exe = Get-ChildItem -Path "$bundleDir/nsis" -Filter "*.exe" -ErrorAction Stop | Select-Object -First 1
-          $msi = Get-ChildItem -Path "$bundleDir/msi"  -Filter "*.msi" -ErrorAction Stop | Select-Object -First 1
           if (-not $exe) { throw "No .exe installer produced by Tauri" }
-          if (-not $msi) { throw "No .msi installer produced by Tauri" }
           Copy-Item $exe.FullName -Destination "$stagingDir/koden-setup.exe"
-          Copy-Item $msi.FullName -Destination "$stagingDir/koden.msi"
           Write-Host "Staged files:"
           Get-ChildItem $stagingDir
 
@@ -85,7 +82,7 @@ jobs:
         run: |
           Write-Host "Contents of signed/:"
           Get-ChildItem "signed" -Recurse
-          $files = Get-ChildItem "signed" -Include *.exe,*.msi -Recurse
+          $files = Get-ChildItem "signed" -Include *.exe -Recurse
           if ($files.Count -eq 0) { throw "No signed files found" }
           foreach ($f in $files) {
             $sig = Get-AuthenticodeSignature $f.FullName

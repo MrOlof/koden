@@ -34,10 +34,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "app", "dmg", "deb", "rpm", "appimage"],
     "createUpdaterArtifacts": true,
     "copyright": "Copyright 2026 Kosta Wadenfalk.",
     "license": "Apache-2.0",
+    "licenseFile": "../LICENSE",
     "publisher": "Kosta Wadenfalk",
     "icon": [
       "icons/32x32.png",
@@ -79,6 +80,8 @@
         ],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/installer-header.bmp",
+        "sidebarImage": "icons/installer-sidebar.bmp",
         "installerHooks": "./installer-hooks.nsh"
       }
     },
