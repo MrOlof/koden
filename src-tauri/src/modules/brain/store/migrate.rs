@@ -46,6 +46,8 @@ const ADDITIVE_CANONICAL_COLUMNS: &[(&str, &str, &str)] = &[
     ("proposals", "undo_prior_path", "TEXT"),
     ("proposals", "undo_prior_bytes", "TEXT"),
     ("brain_librarian", "curation_mode", "TEXT NOT NULL DEFAULT 'autonomous'"),
+    // ADR-019 (NO bump, same idiom): the memory-injection toggle.
+    ("brain_librarian", "inject_gist", "INTEGER NOT NULL DEFAULT 1"),
 ];
 
 /// Add any missing additive-canonical column (see [ADDITIVE_CANONICAL_COLUMNS]).

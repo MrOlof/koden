@@ -51,8 +51,14 @@ pub enum BrainEvent {
     /// reconcile every project).
     Rescan { project: Option<ProjectId> },
     /// Unregister a project + prune all its indexed state (writer-side). Does not
-    /// touch user files.
-    RemoveProject { project: ProjectId },
+    /// touch user-authored files. `root` is the removed project's root, captured
+    /// by the command BEFORE the registry entry vanished, so the worker can also
+    /// delete the DERIVED gist hook artifact (ADR-019) — an unregistered project
+    /// must not keep injecting a frozen gist into sessions.
+    RemoveProject {
+        project: ProjectId,
+        root: Option<String>,
+    },
     /// Run the memory doctor and queue proposals. `now_date` (ISO YYYY-MM-DD)
     /// enables the staleness check; `None` runs structural checks only.
     Doctor {
@@ -83,6 +89,11 @@ pub enum BrainEvent {
     /// applies proposals itself (snapshot-undo recorded); `review` — proposals
     /// wait for a human in the inbox. Writer-side; journaled like SetLibrarian.
     SetCurationMode { mode: String },
+    /// Toggle real-time memory injection (ADR-019): ON — the worker maintains a
+    /// per-project gist hook artifact that every Claude Code turn picks up; OFF —
+    /// the worker deletes the artifacts and stops regenerating (the hook then
+    /// finds nothing — no stale memory). Writer-side; journaled like SetLibrarian.
+    SetInjectGist { on: bool },
     /// Run a budgeted LLM reflect pass (P4) — the only token-spending path.
     /// Manual-trigger only; `project = None` reflects every registered project.
     /// `now_date` (ISO YYYY-MM-DD) feeds the doctor findings in the digest.

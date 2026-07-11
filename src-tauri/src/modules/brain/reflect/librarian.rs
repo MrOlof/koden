@@ -106,6 +106,29 @@ pub fn set_curation_mode(conn: &Connection, mode: &str, now: i64) -> Result<(), 
     .map_err(|e| e.to_string())
 }
 
+/// Read the ADR-019 memory-injection toggle: whether the worker maintains the
+/// per-project gist hook artifact that live agent sessions pick up per turn.
+/// Fails soft to ON (the default — also what the seeded column defaults to),
+/// so a pre-column store or a read race never silently disables injection.
+pub fn inject_gist(conn: &Connection) -> bool {
+    conn.query_row("SELECT inject_gist FROM brain_librarian WHERE id=1", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|v| v != 0)
+    .unwrap_or(true)
+}
+
+/// Persist the ADR-019 memory-injection toggle (writer-side; the worker calls
+/// this and then emits/deletes the artifacts to match).
+pub fn set_inject_gist(conn: &Connection, on: bool, now: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE brain_librarian SET inject_gist=?1, updated_at=?2 WHERE id=1",
+        rusqlite::params![i64::from(on), now],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// Read the persisted delta-gate pin (the digest hash of the last round a project
 /// reflected on) — the durable half of `worker::LibrarianAuto.digest_hash`. `None`
 /// when the project has no pinned round yet. Fails soft (a pre-table DB or read race
@@ -220,6 +243,22 @@ mod tests {
         assert!(set_curation_mode(&conn, "yolo", 3).is_err());
         conn.execute("UPDATE brain_librarian SET curation_mode='garbage' WHERE id=1", []).unwrap();
         assert_eq!(curation_mode(&conn), CURATION_AUTONOMOUS, "garbage normalizes to the default");
+    }
+
+    /// ADR-019: the injection toggle defaults ON, round-trips, and fails soft
+    /// to ON when the column/row can't be read.
+    #[test]
+    fn inject_gist_defaults_on_and_roundtrips() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert!(inject_gist(&conn), "ADR-019 default is ON");
+        set_inject_gist(&conn, false, 1).unwrap();
+        assert!(!inject_gist(&conn));
+        set_inject_gist(&conn, true, 2).unwrap();
+        assert!(inject_gist(&conn));
+        // Fail-soft: an unreadable state (no table) reads as ON.
+        let bare = Connection::open_in_memory().unwrap();
+        assert!(inject_gist(&bare));
     }
 
     #[test]

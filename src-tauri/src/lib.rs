@@ -225,6 +225,7 @@ pub fn run() {
             brain::commands::brain_revert_proposal,
             brain::commands::brain_memory_changes,
             brain::commands::brain_set_curation_mode,
+            brain::commands::brain_set_inject_gist,
             brain::commands::brain_rescan,
             brain::commands::brain_reflect,
             brain::commands::brain_set_budget,

@@ -3,7 +3,9 @@ import { Input } from "@/components/ui/input";
 import {
   type BrainStatusReport,
   brainIndexStatus,
+  brainLibrarianStatus,
   brainRescan,
+  brainSetInjectGist,
   brainSetWorkspace,
   brainWorkspaceStatus,
   type WorkspaceStatus,
@@ -23,7 +25,61 @@ export function BrainSection() {
         description="Koden Brain indexes your projects locally — search and context are free and always on. The Librarian's engine and chat settings live in the Librarian tab."
       />
       <IndexBlock />
+      <MemoryInjectionBlock />
     </div>
+  );
+}
+
+// ADR-019: real-time memory injection into agent sessions. Index-side (the
+// worker maintains the artifact from the index), hence this tab rather than
+// the Librarian's engine tab. One switch + one muted line; persists immediately.
+function MemoryInjectionBlock() {
+  const [on, setOn] = useState<boolean | null>(null); // null = still loading
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    brainLibrarianStatus()
+      .then((s) => alive && setOn(s.inject_gist !== false))
+      .catch(() => alive && setOn(true)); // fail-open mirrors the backend default
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    setOn(next);
+    setErr(null);
+    try {
+      await brainSetInjectGist(next);
+    } catch (e) {
+      setOn(!next); // roll the optimistic flip back
+      setErr(String(e));
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-2">
+      <Label>Memory injection</Label>
+      <label className="flex cursor-pointer items-center gap-2 text-[11.5px]">
+        <input
+          type="checkbox"
+          checked={on ?? true}
+          disabled={on === null}
+          onChange={(e) => void toggle(e.target.checked)}
+          className="accent-[color:var(--primary)]"
+        />
+        <span className="text-foreground/90">
+          Inject project memory into agent sessions
+        </span>
+      </label>
+      <span className="text-[10.5px] text-muted-foreground">
+        Keeps a per-project briefing that every Claude Code turn picks up live
+        via a hook — in any terminal, not just Koden. Off deletes the derived
+        files, so sessions never see stale memory.
+      </span>
+      {err ? <span className="text-[10px] text-destructive">{err}</span> : null}
+    </section>
   );
 }
 

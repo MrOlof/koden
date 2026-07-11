@@ -588,3 +588,71 @@ fn journal_records_the_applied_status_flip() {
     assert!(!pend.contains(&applied.signature), "applied flip survived the wipe");
     assert!(pend.contains(&still_pending.signature), "pending proposal replayed");
 }
+
+use koden_lib::modules::brain::gist::artifact::{self, EmitOutcome};
+use koden_lib::modules::brain::worker::index_dir;
+
+/// ADR-019 end to end over the real apply pipeline: the gist hook artifact
+/// refreshes when the autonomous sweep materializes a memory change (the
+/// worker's `auto_apply_sweep` re-emits right after `auto_apply_pending`), an
+/// unchanged corpus re-emits as a byte-stable NO-write (the prompt-cache
+/// contract), and the injection toggle round-trips on the store singleton.
+#[test]
+fn gist_artifact_refreshes_on_autonomous_apply_and_stays_byte_stable() {
+    let (idx, store, _work, root) = setup();
+    let db = store.path().join("i.sqlite");
+    std::fs::write(root.join("main.rs"), "fn main() { auth_flow(); }").unwrap();
+    write_note(&root, "seed", "", "Seed body.");
+    index_dir(&idx, PID, &root);
+    scan_project_memory(&idx, PID, &root);
+
+    // First emission; the document is the COMPLETE UserPromptSubmit stdout JSON.
+    assert_eq!(artifact::emit(&db, PID, "proj", &root).unwrap(), EmitOutcome::Written);
+    let path = artifact::hook_artifact_path(&root);
+    let first = std::fs::read_to_string(&path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&first).expect("artifact is valid JSON");
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+    let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(ctx.contains("Note seed"), "memory layer lists the seeded note: {ctx}");
+
+    // Unchanged memory → byte-stable no-write.
+    assert_eq!(artifact::emit(&db, PID, "proj", &root).unwrap(), EmitOutcome::Unchanged);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+
+    // The autonomous sweep applies a create proposal → the re-emit reflects it.
+    let p = mk_proposal(ProposalAction::Create, None, "Fresh Decision", "because.");
+    idx.insert_proposal(PID, &p, 1).unwrap();
+    assert_eq!(auto_apply_pending(&idx, PID, &root, NOW_MS), 1, "sweep applied");
+    // Watcher parity, driven manually: the materialized note FILE is indexed and
+    // the notes table re-scanned before the worker's re-emit fires.
+    index_dir(&idx, PID, &root);
+    scan_project_memory(&idx, PID, &root);
+    assert_eq!(artifact::emit(&db, PID, "proj", &root).unwrap(), EmitOutcome::Written);
+    let second = std::fs::read_to_string(&path).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert!(
+        v2["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("Fresh Decision"),
+        "artifact content reflects the applied note"
+    );
+
+    // Self-feed guard through the REAL pipeline: a full re-index + re-scan with
+    // the artifact on disk indexes/notes nothing new, so the emit stays a no-write
+    // and the notes table holds exactly the real notes.
+    index_dir(&idx, PID, &root);
+    scan_project_memory(&idx, PID, &root);
+    assert_eq!(artifact::emit(&db, PID, "proj", &root).unwrap(), EmitOutcome::Unchanged);
+    let notes = list_notes_readonly(&db, Some(PID)).unwrap();
+    let mut ids: Vec<&str> = notes.iter().map(|n| n.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["fresh-decision", "seed"], "artifact never becomes a note");
+
+    // The ADR-019 toggle rides the brain_librarian singleton (default ON).
+    assert!(idx.inject_gist(), "default ON");
+    idx.set_inject_gist(false, 2).unwrap();
+    assert!(!idx.inject_gist());
+    // OFF: the worker deletes the artifact (worker glue calls this same remove).
+    assert!(artifact::remove(&root));
+    assert!(!path.exists(), "toggle-off leaves no stale artifact for the hook");
+    idx.set_inject_gist(true, 3).unwrap();
+    assert!(idx.inject_gist());
+}

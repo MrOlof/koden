@@ -77,7 +77,10 @@ pub fn brain_remove_project(state: State<BrainState>, project: String) -> Result
     // mutation back if the prune can't be enqueued, else the index keeps orphaned
     // rows while the persisted project list diverges (ADR-010 cluster 7).
     let removed = state.registry.remove(&project);
-    if let Err(e) = enqueue(&state, BrainEvent::RemoveProject { project }) {
+    // Root captured BEFORE the registry entry vanished, so the worker can also
+    // delete the derived gist hook artifact (ADR-019).
+    let root = removed.as_ref().map(|p| p.root.clone());
+    if let Err(e) = enqueue(&state, BrainEvent::RemoveProject { project, root }) {
         if let Some(p) = removed {
             state.registry.restore(p);
         }
@@ -602,6 +605,16 @@ pub fn brain_set_curation_mode(state: State<BrainState>, mode: String) -> Result
     enqueue(&state, BrainEvent::SetCurationMode { mode })
 }
 
+/// Toggle real-time memory injection (ADR-019): ON — the worker maintains a
+/// per-project `.koden-memory/.koden-gist.json` hook artifact that every Claude
+/// Code turn picks up (any terminal, not just Koden); OFF — the worker deletes
+/// the artifacts and stops regenerating, so the hook finds nothing (never stale
+/// memory). Persisted on the `brain_librarian` singleton; default ON.
+#[tauri::command]
+pub fn brain_set_inject_gist(state: State<BrainState>, on: bool) -> Result<(), String> {
+    enqueue(&state, BrainEvent::SetInjectGist { on })
+}
+
 /// Trigger a budgeted LLM reflect pass (P4) — the only token-spending path.
 /// Runs on the worker (single writer); proposals land in the review inbox and the
 /// spend updates `brain_budget_status`. Off unless a ceiling > 0 is set. Manual only.
@@ -681,6 +694,8 @@ pub struct LibrarianStatus {
     pub in_rate_mtok: f64,
     pub out_rate_mtok: f64,
     pub curation_mode: String, // "autonomous" | "review"
+    /// ADR-019: real-time memory injection into agent sessions (default ON).
+    pub inject_gist: bool,
 }
 
 #[tauri::command]
@@ -692,13 +707,22 @@ pub async fn brain_librarian_status(state: State<'_, BrainState>) -> Result<Libr
         in_rate_mtok: 1.0,
         out_rate_mtok: 5.0,
         curation_mode: "autonomous".to_string(),
+        inject_gist: true,
     };
     let Some(db) = state.db_path.read().ok().and_then(|p| p.clone()) else {
         return Ok(def());
     };
     blocking(move || match store::librarian_config_readonly(&db) {
-        Ok((provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode)) => {
-            LibrarianStatus { provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode }
+        Ok((provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode, inject_gist)) => {
+            LibrarianStatus {
+                provider,
+                model,
+                base_url,
+                in_rate_mtok,
+                out_rate_mtok,
+                curation_mode,
+                inject_gist,
+            }
         }
         Err(_) => def(),
     })

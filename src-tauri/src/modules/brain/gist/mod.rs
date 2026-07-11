@@ -27,6 +27,7 @@
 //! freshness label (current / possibly-stale / historical(superseded)) — are
 //! added while the char budget allows.
 
+pub mod artifact;
 pub mod synth;
 
 use std::path::Path;

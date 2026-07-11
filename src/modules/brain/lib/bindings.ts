@@ -180,6 +180,14 @@ export function brainSetCurationMode(mode: CurationMode): Promise<void> {
   return invoke<void>("brain_set_curation_mode", { mode });
 }
 
+/** Toggle real-time memory injection (ADR-019). ON: the worker maintains a
+ *  per-project `.koden-memory/.koden-gist.json` hook artifact that every Claude
+ *  Code turn picks up — in ANY terminal, not just Koden. OFF: the artifacts are
+ *  deleted and regeneration stops (the hook then finds nothing — never stale). */
+export function brainSetInjectGist(on: boolean): Promise<void> {
+  return invoke<void>("brain_set_inject_gist", { on });
+}
+
 /** Trigger a budgeted LLM reflect pass (P4 — the only token-spending path).
  *  `project = null` reflects every registered project. `nowDate` = ISO YYYY-MM-DD
  *  for the doctor findings in the digest. Off unless a ceiling > 0 is set. */
@@ -240,6 +248,8 @@ export type LibrarianStatus = {
   in_rate_mtok: number;
   out_rate_mtok: number;
   curation_mode: CurationMode | string;
+  /** ADR-019: real-time memory injection into agent sessions (default ON). */
+  inject_gist: boolean;
 };
 
 /** The current Librarian LLM selection (provider/model/base URL + $/Mtok rates)

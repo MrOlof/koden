@@ -36,6 +36,20 @@ pub fn rel_under_skip_dir(rel: &str) -> bool {
     rel.split('/').any(|c| BASE_SKIP_DIRS.contains(&c))
 }
 
+/// ADR-019: the Brain's DERIVED per-project gist hook artifact (and its
+/// atomic-write temp) is reserved — never indexed, at ANY depth. Basename
+/// match, applied by BOTH the full walk (below) and the watcher's single-file
+/// gate (`worker::index_changed`): the artifact's freshness line embeds the
+/// project fingerprint, so indexing it would rotate the fingerprint on every
+/// emit → rewrite → reindex, an unbounded write/index oscillation (and a
+/// permanent agent prompt-cache bust). One-sided filtering re-opens exactly the
+/// index/prune oscillation this module exists to close (see the builder note).
+pub fn is_reserved_artifact(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(crate::modules::brain::gist::artifact::is_hook_artifact_name)
+}
+
 fn in_skip_dir(path: &Path, root: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(root) else {
         return false;
@@ -189,6 +203,12 @@ fn walk_files_capped(root: &Path, start: &Path, cap: usize) -> Walked {
         if in_skip_dir(&path, root) {
             continue;
         }
+        // ADR-019: the derived gist hook artifact is reserved (see the fn doc) —
+        // this single gate also covers the watcher's dir-event subtree path,
+        // which funnels through `walk_files_under` into this function.
+        if is_reserved_artifact(&path) {
+            continue;
+        }
         if secrets::is_denylisted_path(&path.to_string_lossy()) {
             continue;
         }
@@ -311,6 +331,33 @@ mod tests {
         // Negative control: a dir merely NAMED like it is not skipped.
         assert!(!rel_under_skip_dir("src/claude/notes.md"));
         assert!(!rel_under_skip_dir("claude-tools/x.ts"));
+    }
+
+    /// ADR-019 self-feed guard: the DERIVED gist hook artifact (its temp too)
+    /// is never yielded — indexed, every emit would rotate the project
+    /// fingerprint → rewrite the artifact → re-fire the watcher, an unbounded
+    /// write/index oscillation plus permanent agent prompt-cache busts. Real
+    /// note files in the same folder stay indexed (deliberately searchable).
+    #[test]
+    fn gist_hook_artifact_is_never_indexed() {
+        use crate::modules::brain::gist::artifact::HOOK_ARTIFACT_BASENAME;
+        let dir = tempfile::tempdir().unwrap();
+        let mem = dir.path().join(".koden-memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join("note.md"), b"# a real note").unwrap();
+        std::fs::write(mem.join(HOOK_ARTIFACT_BASENAME), b"{}").unwrap();
+        std::fs::write(mem.join(format!("{HOOK_ARTIFACT_BASENAME}.koden-tmp")), b"{}").unwrap();
+        let got = names(&walk_files(dir.path()));
+        assert!(got.contains(&"note.md".into()), "real notes stay indexed: {got:?}");
+        assert!(
+            !got.iter().any(|n| n.starts_with(HOOK_ARTIFACT_BASENAME)),
+            "artifact + temp must be excluded: {got:?}"
+        );
+        // The watcher gate agrees (same predicate on both sides).
+        assert!(is_reserved_artifact(&mem.join(HOOK_ARTIFACT_BASENAME)));
+        assert!(is_reserved_artifact(Path::new("x/.koden-gist.json.koden-tmp")));
+        assert!(!is_reserved_artifact(&mem.join("note.md")));
+        assert!(!is_reserved_artifact(Path::new("/x/koden-gist.json")), "no leading dot → user file");
     }
 
     #[test]

@@ -85,6 +85,11 @@
 ///     COLUMN` per missing column on every open (the additive-canonical idiom,
 ///     extending the `brain_librarian_pin` new-table precedent below). No gist key
 ///     rotation: gist bytes are unaffected by proposal/undo state.
+///
+/// v15 + ADR-019 (NO bump): real-time memory injection added
+///     `brain_librarian.inject_gist` — the same additive-canonical idiom. Gist
+///     BYTES are unchanged (the hook artifact is a new serialization AROUND the
+///     existing gist), so no key rotation is warranted.
 pub const SCHEMA_VERSION: i64 = 15;
 
 /// Idempotent base DDL (safe to run on every open).
@@ -243,7 +248,11 @@ CREATE TABLE IF NOT EXISTS brain_librarian (
     -- ADR-018: 'autonomous' (worker applies proposals itself, snapshot-undo
     -- recorded) or 'review' (proposals wait in the inbox). Additive-canonical —
     -- existing stores get it via migrate::ensure_additive_columns, no version bump.
-    curation_mode TEXT NOT NULL DEFAULT 'autonomous'
+    curation_mode TEXT NOT NULL DEFAULT 'autonomous',
+    -- ADR-019: real-time memory injection — 1 = the worker maintains a per-project
+    -- gist hook artifact every Claude Code turn picks up; 0 = artifacts deleted +
+    -- regeneration stopped. Additive-canonical, same idiom as curation_mode.
+    inject_gist INTEGER NOT NULL DEFAULT 1
 );
 INSERT OR IGNORE INTO brain_librarian (id) VALUES (1);
 

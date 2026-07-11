@@ -182,6 +182,18 @@ pub fn scan_project_memory(index: &SqliteIndex, project_id: &str, root: &Path) -
                     continue;
                 };
                 let path = entry.path();
+                // ADR-019 defense in depth: the Brain's own DERIVED hook artifact
+                // lives in this folder — it must never become a note (the gist
+                // would quote itself; the Librarian would pay to reflect on it).
+                // Its non-.md name already fails the extension gate below; this
+                // explicit skip keeps that true for any derived sibling.
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(crate::modules::brain::gist::artifact::is_hook_artifact_name)
+                {
+                    continue;
+                }
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
                 }
@@ -316,5 +328,27 @@ mod tests {
         let n = parse("---\nid: x\n--- \nbody\n", "fb");
         assert_eq!(n.id, "x");
         assert!(n.body.contains("body"));
+    }
+
+    /// ADR-019 self-feed guard, notes side: the DERIVED gist hook artifact in
+    /// `.koden-memory/` must never be parsed into the notes table — from there
+    /// it would feed the gist Memory section, the overdue-set cache key, intent
+    /// synthesis, the reflect digest, and the doctor. Real notes still scan.
+    #[test]
+    fn scan_skips_the_gist_hook_artifact() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let mem = work.path().join(MEMORY_DIR);
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join("real.md"), "---\nid: real\ntitle: Real\n---\nBody.").unwrap();
+        std::fs::write(
+            mem.join(crate::modules::brain::gist::artifact::HOOK_ARTIFACT_BASENAME),
+            "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\"}}",
+        )
+        .unwrap();
+        let idx = SqliteIndex::open(&store_dir.path().join("i.sqlite")).unwrap();
+        let n = scan_project_memory(&idx, "p", work.path());
+        assert_eq!(n, 1, "only the real note is parsed");
+        assert_eq!(idx.existing_note_ids("p").unwrap(), vec!["real".to_string()]);
     }
 }

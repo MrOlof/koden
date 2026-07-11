@@ -1146,6 +1146,21 @@ impl SqliteIndex {
         Ok(())
     }
 
+    /// The ADR-019 memory-injection toggle (per-project gist hook artifacts).
+    /// Fail-soft ON (the default). Writer-side read.
+    pub fn inject_gist(&self) -> bool {
+        crate::modules::brain::reflect::librarian::inject_gist(&self.conn)
+    }
+
+    /// Persist the ADR-019 memory-injection toggle. Journals the singleton row
+    /// (mirrors [`Self::set_curation_mode`]) so the choice survives a
+    /// header-wipe rebuild. Writer-side.
+    pub fn set_inject_gist(&self, on: bool, now: i64) -> Result<(), String> {
+        crate::modules::brain::reflect::librarian::set_inject_gist(&self.conn, on, now)?;
+        self.journal.append_row(&self.conn, "brain_librarian", "id=1", rusqlite::params![]);
+        Ok(())
+    }
+
     /// Flush the WAL (called on the idle tick).
     pub fn checkpoint(&self) {
         let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
@@ -2484,16 +2499,17 @@ pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {
 }
 
 /// The Librarian LLM selection `(provider, model, base_url, in_rate_mtok,
-/// out_rate_mtok, curation_mode)` via a read-only connection (the command-thread
-/// status read). Fail-soft to the Anthropic Haiku default + AUTONOMOUS curation
-/// (ADR-018) so a pre-table DB or read race never errors the UI.
+/// out_rate_mtok, curation_mode, inject_gist)` via a read-only connection (the
+/// command-thread status read). Fail-soft to the Anthropic Haiku default +
+/// AUTONOMOUS curation (ADR-018) + injection ON (ADR-019) so a pre-table DB or
+/// read race never errors the UI.
 pub fn librarian_config_readonly(
     db_path: &Path,
-) -> rusqlite::Result<(String, String, String, f64, f64, String)> {
+) -> rusqlite::Result<(String, String, String, f64, f64, String, bool)> {
     let conn = open_readonly(db_path)?;
     Ok(conn
         .query_row(
-            "SELECT provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode FROM brain_librarian WHERE id=1",
+            "SELECT provider, model, base_url, in_rate_mtok, out_rate_mtok, curation_mode, inject_gist FROM brain_librarian WHERE id=1",
             [],
             |r| {
                 Ok((
@@ -2503,6 +2519,7 @@ pub fn librarian_config_readonly(
                     r.get::<_, f64>(3)?,
                     r.get::<_, f64>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)? != 0,
                 ))
             },
         )
@@ -2514,6 +2531,7 @@ pub fn librarian_config_readonly(
                 1.0,
                 5.0,
                 "autonomous".to_string(),
+                true,
             )
         }))
 }

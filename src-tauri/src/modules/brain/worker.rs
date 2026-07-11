@@ -11,6 +11,7 @@ use tauri::{AppHandle, Listener, Manager};
 use crate::modules::brain::events::{AgentSignalPayload, BrainEvent};
 use crate::modules::brain::freshness::{hash, walk, watch};
 use crate::modules::brain::curate;
+use crate::modules::brain::gist;
 use crate::modules::brain::memory;
 use crate::modules::brain::reflect;
 use crate::modules::brain::registry::Project;
@@ -225,6 +226,14 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     warm_population(&app, &index);
     // Seed the review inbox with structural doctor findings (no date check yet).
     run_doctor_all(&app, &index, None);
+    // ADR-019: first emission once every project is ready (byte-compare-gated, so
+    // an unchanged relaunch rewrites nothing and the agents' turn context — and
+    // with it their prompt-cache behavior — stays byte-identical).
+    emit_all_gist_artifacts(&app, &index);
+    // Day-boundary tracker for the Tick re-emit: the overdue-note set (and thus
+    // the possibly-stale labels) transitions at UTC midnight; purely event-driven
+    // re-emission would leave a wrong label until the next memory event.
+    let mut last_emit_day = utc_date_ymd(now_epoch_ms());
     set_status(&app, BrainStatus::Ready);
 
     // Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
@@ -255,7 +264,11 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         .try_state::<BrainState>()
                         .and_then(|s| s.registry.projects().into_iter().find(|p| p.id == pid));
                     match proj {
-                        Some(p) => index_project(&index, &p),
+                        Some(p) => {
+                            index_project(&index, &p);
+                            // ADR-019: the rescan just converged — refresh the artifact.
+                            emit_gist_artifact(&app, &index, &p.id);
+                        }
                         None => log::debug!("brain: rescan for unknown project '{pid}' ignored"),
                     }
                 }
@@ -274,12 +287,15 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     // ("Indexing… 50%") forever after a mid-session add/rescan —
                     // only the boot path (brain_loop) set Ready.
                     set_status(&app, BrainStatus::Ready);
+                    // ADR-019: full reconcile done — refresh every artifact (a
+                    // newly-registered project gets its first emission here).
+                    emit_all_gist_artifacts(&app, &index);
                     if let Some(s) = app.try_state::<BrainState>() {
                         s.registry.save_to(&cfg_path); // persist the project list
                     }
                 }
             },
-            BrainEvent::RemoveProject { project } => {
+            BrainEvent::RemoveProject { project, root } => {
                 if let Err(e) = index.remove_project(&project) {
                     log::warn!("brain: remove_project '{project}' prune failed ({e})");
                 } else {
@@ -291,6 +307,16 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 // handler would find a stale entry and re-persist the pin the prune just
                 // deleted. [LIB-DESIGN-01 miss2]
                 lib_state.remove(&project);
+                // ADR-019: delete the DERIVED gist hook artifact too (root captured
+                // by the command before the registry entry vanished) — an
+                // unregistered project must not keep injecting a frozen gist.
+                // Serialized on this writer thread AFTER any queued emits, so a
+                // racing emit can't resurrect it. Never touches user-authored files.
+                if let Some(r) = &root {
+                    if gist::artifact::remove(std::path::Path::new(r)) {
+                        log::debug!("brain: removed gist hook artifact for '{project}'");
+                    }
+                }
                 // Arm-then-drop (same rationale as the full Rescan): the removed
                 // root stops being watched when the OLD watcher retires; its
                 // in-flight events resolve to an unregistered project and no-op.
@@ -304,6 +330,15 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             BrainEvent::Tick => {
                 index.checkpoint();
                 run_librarian_rounds(&app, &index, &mut lib_state, &tx);
+                // ADR-019 day-boundary refresh: the overdue-note set is
+                // day-granular, so labels can flip at UTC midnight with no memory
+                // event to piggyback on. Once per day; the per-project byte
+                // compare keeps an unaffected artifact untouched.
+                let today = utc_date_ymd(now_epoch_ms());
+                if today != last_emit_day {
+                    last_emit_day = today;
+                    emit_all_gist_artifacts(&app, &index);
+                }
             }
             BrainEvent::LibrarianDone { project, finish, result } => {
                 // The offloaded provider call finished (LIB-DESIGN-01). Complete the
@@ -404,6 +439,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 if let Err(e) = &result {
                     log::warn!("brain: resolve proposal '{signature}' failed ({e})");
                 }
+                // ADR-019: a review-mode approve just materialized a memory change.
+                if !reject && result.is_ok() {
+                    emit_gist_artifact(&app, &index, &project);
+                }
                 if let Some(tx) = reply {
                     let _ = tx.send(result); // command awaits this; ignore a dropped rx
                 }
@@ -433,6 +472,8 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     {
                         lib_entry(&mut lib_state, &index, &project).digest_hash = Some(h);
                     }
+                    // ADR-019: the undo changed memory — refresh the artifact.
+                    emit_gist_artifact(&app, &index, &project);
                 }
                 if let Some(tx) = reply {
                     let _ = tx.send(result);
@@ -441,6 +482,25 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             BrainEvent::SetCurationMode { mode } => {
                 if let Err(e) = index.set_curation_mode(&mode, now_epoch_ms()) {
                     log::warn!("brain: set curation mode failed ({e})");
+                }
+            }
+            BrainEvent::SetInjectGist { on } => {
+                if let Err(e) = index.set_inject_gist(on, now_epoch_ms()) {
+                    log::warn!("brain: set inject_gist failed ({e})");
+                }
+                if on {
+                    emit_all_gist_artifacts(&app, &index);
+                } else {
+                    // OFF deletes the artifacts AND stops regeneration (every emit
+                    // path re-checks the toggle) — the hook then finds nothing, so
+                    // sessions never see stale memory (ADR-019).
+                    if let Some(state) = app.try_state::<BrainState>() {
+                        for p in state.registry.projects() {
+                            if gist::artifact::remove(std::path::Path::new(&p.root)) {
+                                log::debug!("brain: removed gist hook artifact for '{}'", p.name);
+                            }
+                        }
+                    }
                 }
             }
             BrainEvent::SetBudget { ceiling_usd } => {
@@ -559,6 +619,17 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         // first sighting of this project this boot, so a code-only edge
                         // (digest-neutral) after a restart won't re-pay. [LIB-SPEND-01]
                         note_content_change(lib_entry(&mut lib_state, &index, &project), now_epoch_ms());
+                    }
+                    // ADR-019: a note-FILE change is gist-material — refresh the
+                    // artifact after `index_changed`'s note re-scan. Deliberately
+                    // NOT keyed on plain code edits (the temporal digest moves on
+                    // every real edit; re-emitting there would churn the file — and
+                    // each session's turn context — near-constantly). The artifact's
+                    // OWN write event lands here too and converges as a byte-
+                    // identical no-write instead of oscillating.
+                    let mem_marker = format!("/{}/", memory::MEMORY_DIR);
+                    if changed.iter().any(|p| to_canon(p).contains(&mem_marker)) {
+                        emit_gist_artifact(&app, &index, &project);
                     }
                 }
             }
@@ -1073,7 +1144,14 @@ pub fn index_changed(
         // Skip-dir gate on the PROJECT-RELATIVE path: an absolute-path check
         // would zero out incremental updates for a project that itself lives
         // under a dir named e.g. `build/` or `vendor/` (ADR-010 cluster 2).
-        if walk::rel_under_skip_dir(&rel) || secrets::is_denylisted_path(&to_canon(path)) {
+        // The reserved-artifact gate (ADR-019) mirrors the full walk's — any
+        // source honored on one side but not the other re-opens index/prune
+        // oscillation, and for the gist artifact that oscillation is unbounded
+        // (its bytes embed the project fingerprint).
+        if walk::rel_under_skip_dir(&rel)
+            || walk::is_reserved_artifact(path)
+            || secrets::is_denylisted_path(&to_canon(path))
+        {
             continue;
         }
         // Ignore-file gate: the full walk never yields a .gitignore'd/.kodenignore'd
@@ -1289,7 +1367,58 @@ fn auto_apply_sweep(
         return None;
     }
     let today = utc_date_ymd(now_ms);
-    reflect::pin_corpus_digest(index, project_id, Some(&today), now_ms)
+    let pin = reflect::pin_corpus_digest(index, project_id, Some(&today), now_ms);
+    // ADR-019: the sweep just materialized memory changes (autonomous applies
+    // after LibrarianDone / Doctor / Curate / Reflect / boot) — refresh the
+    // per-project gist hook artifact so live sessions see them next turn.
+    emit_gist_artifact(app, index, project_id);
+    pin
+}
+
+/// The store path the worker registered in [BrainState] (set early in
+/// `brain_loop`, before any emit site can run).
+fn state_db_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.try_state::<BrainState>()
+        .and_then(|s| s.db_path.read().ok().and_then(|p| p.clone()))
+}
+
+/// ADR-019: emit/refresh ONE project's gist hook artifact. Toggle-gated
+/// (`brain_librarian.inject_gist`), byte-compare-gated inside
+/// [gist::artifact::emit] (unchanged memory → no write, no mtime churn — the
+/// prompt-cache contract), and fail-open: any miss just skips this round.
+fn emit_gist_artifact(app: &AppHandle, index: &SqliteIndex, project_id: &str) {
+    if !index.inject_gist() {
+        return;
+    }
+    let Some(db) = state_db_path(app) else { return };
+    let Some(proj) = app
+        .try_state::<BrainState>()
+        .and_then(|s| s.registry.projects().into_iter().find(|p| p.id == project_id))
+    else {
+        return;
+    };
+    match gist::artifact::emit(&db, &proj.id, &proj.name, std::path::Path::new(&proj.root)) {
+        Ok(gist::artifact::EmitOutcome::Written) => {
+            log::debug!("brain: gist hook artifact refreshed for '{}'", proj.name);
+        }
+        Ok(_) => {} // Unchanged / NotReady — nothing touched
+        Err(e) => {
+            log::debug!("brain: gist hook artifact write for '{}' failed ({e})", proj.name);
+        }
+    }
+}
+
+/// ADR-019: emit/refresh every registered project's artifact (boot, full
+/// rescan, toggle-on, day boundary). Byte-compare keeps unaffected files
+/// untouched, so calling this broadly is cheap.
+fn emit_all_gist_artifacts(app: &AppHandle, index: &SqliteIndex) {
+    if !index.inject_gist() {
+        return;
+    }
+    let Some(state) = app.try_state::<BrainState>() else { return };
+    for p in state.registry.projects() {
+        emit_gist_artifact(app, index, &p.id);
+    }
 }
 
 /// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
