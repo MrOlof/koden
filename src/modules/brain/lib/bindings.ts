@@ -3,7 +3,10 @@
 //   Hit                 -> src-tauri/src/modules/brain/mod.rs (Hit)
 //   Project             -> src-tauri/src/modules/brain/registry.rs (Project)
 //   BrainStatus/Report  -> src-tauri/src/modules/brain/{mod.rs,commands.rs}
-// Brain command params are single-word, so no snake_case/camelCase conversion.
+// Multi-word command params MUST be passed camelCase here — Tauri v2 converts
+// them to the Rust fns' snake_case (nowDate -> now_date, ceilingUsd ->
+// ceiling_usd, baseUrl/inRateUsdMtok -> base_url/in_rate_usd_mtok). Passing a
+// snake_case key fails at runtime with an arg mismatch tsc cannot catch.
 import { invoke } from "@tauri-apps/api/core";
 
 export type Hit = { project: string; path: string; score: number };

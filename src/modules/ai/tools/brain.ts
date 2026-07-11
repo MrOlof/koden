@@ -22,7 +22,7 @@ export function buildBrainTools(_ctx: ToolContext) {
   return {
     brain_search: tool({
       description:
-        "Search the Koden Brain index (project files + memory notes) with a lexical query. Returns scored hits `{project, path, score}` — cite the project + path when you use one. Omit `project` to search every indexed project.",
+        "Search the Koden Brain index (project files + memory notes) with a lexical query. Returns scored hits `{project, path, score}` — cite the project + path when you use one. Omit `project` to search every indexed project. Hit paths are RELATIVE TO THAT PROJECT'S ROOT (roots come from brain_status) — join them before read_file; a bare relative path resolves against the terminal cwd, which may be a different project.",
       inputSchema: z.object({
         query: z.string().describe("Search terms (BM25 lexical, not regex)."),
         project: z
@@ -40,7 +40,7 @@ export function buildBrainTools(_ctx: ToolContext) {
 
     brain_notes: tool({
       description:
-        "List the structured memory notes (cards) the Koden Brain holds: id, title, type, status, path, and anchors. Omit `project` for every indexed project. Use read_file on a note's path for its full body.",
+        "List the structured memory notes (cards) the Koden Brain holds: id, title, type, status, path, and anchors. Omit `project` for every indexed project. For a note's full body, join its project's root (from brain_status) with the note path before read_file — note paths are project-relative, and bare relative paths resolve against the terminal cwd.",
       inputSchema: z.object({
         project: z
           .string()
