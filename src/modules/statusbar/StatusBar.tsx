@@ -3,6 +3,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useUsageStore } from "@/modules/agents/store/usageStore";
 import { useChatStore } from "@/modules/ai";
 import { AgentStatusPill } from "@/modules/ai/components/AgentStatusPill";
 import { AiStatusBarControls } from "@/modules/ai/components/AiStatusBarControls";
@@ -35,6 +36,15 @@ export function StatusBar({
   privateActive,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
+  const pauseActive = useUsageStore((s) => s.pauseActive);
+  const resetEpochMs = useUsageStore((s) => s.latest?.resetEpochMs ?? null);
+  const resetLabel =
+    resetEpochMs !== null
+      ? new Date(resetEpochMs).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : null;
 
   return (
     <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-border/60 bg-card/60 px-3 font-mono text-[11px] tracking-[0.01em]">
@@ -60,6 +70,22 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        {pauseActive ? (
+          <span
+            title={
+              resetLabel
+                ? `Usage limit reached. New agents resume around ${resetLabel}.`
+                : "Usage limit reached. New agents resume when usage drops."
+            }
+            className="flex shrink-0 cursor-default items-center gap-1 rounded-full bg-foreground/[0.06] px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground"
+          >
+            <span
+              aria-hidden
+              className="size-1.5 rounded-full bg-[color:var(--terminal-ansi-yellow)]"
+            />
+            <span>Usage guard: paused</span>
+          </span>
+        ) : null}
         <AgentStatusPill onClick={onOpenMini} />
         {/* The launcher moved to the header ("Koden" button); the status bar only
             shows the inline controls while the panel is open. */}

@@ -113,6 +113,11 @@ function Column({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
+        {col.cardIds.length === 0 ? (
+          <p className="px-2 py-6 text-center text-xs leading-relaxed text-muted-foreground">
+            No cards. Add one below.
+          </p>
+        ) : null}
         {col.cardIds.map((cardId) => {
           const card = cards[cardId];
           if (!card) return null;

@@ -5,7 +5,8 @@ type Props = {
 };
 
 /** Mono lowercase "koden" trailed by a spruce block cursor with a slow blink.
- * Identity mark only — used in the About header and the main empty state. */
+ * Identity mark only — used in the About header and the Librarian chat empty
+ * state. */
 export function Wordmark({ className }: Props) {
   return (
     <span

@@ -21,6 +21,7 @@ import {
   AlertCircleIcon,
   ArrowTurnBackwardIcon,
   CommandIcon,
+  KeyboardIcon,
   Tick02Icon,
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
@@ -80,6 +81,13 @@ export function CommandPalette({
   );
 
   const mru = useMemo(() => (open ? mruSnapshot() : {}), [open]);
+
+  // Static "?" row that jumps to the shortcuts settings — reuses the existing
+  // shortcuts.open command so the action stays wired in one place.
+  const shortcutsItem = useMemo(
+    () => commandItems.find((i) => i.id === "shortcuts.open") ?? null,
+    [commandItems],
+  );
 
   const rankedCommands = useMemo(() => {
     if (inThemes || parsed.mode !== "commands") return [];
@@ -394,8 +402,26 @@ export function CommandPalette({
                       {hint.sigil}
                     </kbd>
                     <span>{hint.label}</span>
+                    <span className="ml-auto truncate text-[11px] font-normal text-muted-foreground">
+                      {hint.example}
+                    </span>
                   </CommandItem>
                 ))}
+                {shortcutsItem ? (
+                  <CommandItem
+                    value="hint:shortcuts"
+                    onSelect={() => runCommand(shortcutsItem)}
+                    className="text-[12.5px]"
+                  >
+                    <HugeiconsIcon
+                      icon={KeyboardIcon}
+                      size={14}
+                      strokeWidth={1.75}
+                      className="text-muted-foreground"
+                    />
+                    <span>Keyboard shortcuts</span>
+                  </CommandItem>
+                ) : null}
               </CommandGroup>
             )}
           </CommandList>

@@ -1,6 +1,11 @@
 import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
-import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
+import {
+  fmtShortcut,
+  IS_MAC,
+  MOD_KEY,
+  USE_CUSTOM_WINDOW_CONTROLS,
+} from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
 import { useChatStore } from "@/modules/ai";
 import { BrainHeaderMenu } from "@/modules/brain";
@@ -144,7 +149,7 @@ export function Header({
       <div className="flex shrink-0 items-center gap-0.5">
         <Button
           onClick={onToggleSidebar}
-          title="Toggle sidebar"
+          title={`Toggle sidebar (${fmtShortcut(MOD_KEY, "B")})`}
           variant="ghost"
           size="icon-sm"
           className="shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -156,7 +161,7 @@ export function Header({
           size="icon-sm"
           variant="ghost"
           onClick={onOpenCommandPalette}
-          title="Command palette"
+          title={`Command palette (${fmtShortcut(MOD_KEY, "P")})`}
           className="shrink-0 gap-1.5 rounded-md px-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <HugeiconsIcon icon={CommandIcon} size={14} strokeWidth={1.75} />
@@ -219,7 +224,7 @@ export function Header({
         size="sm"
         variant="outline"
         onClick={openMini}
-        title="Librarian — chat about your code & projects"
+        title={`Librarian — chat about your code & projects (${fmtShortcut(MOD_KEY, "I")})`}
         className="h-7 shrink-0 gap-1.5 rounded-md px-2 text-[12px]"
       >
         <HugeiconsIcon icon={Brain02Icon} size={14} strokeWidth={1.75} />

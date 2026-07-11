@@ -10,6 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import type { SpaceMeta } from "@/modules/spaces";
 import {
@@ -177,7 +178,7 @@ export function VerticalTabs({
               variant="ghost"
               size="icon"
               className="size-6 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-              title="New tab"
+              title={`New tab (${fmtShortcut(MOD_KEY, "T")})`}
             >
               <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={2} />
             </Button>

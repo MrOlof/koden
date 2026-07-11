@@ -4,6 +4,7 @@ import {
   MAX_TOTAL_PANES_PER_TAB,
   type Tab,
 } from "@/modules/tabs";
+import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { countTerminalLeaves, leafIds } from "@/modules/terminal";
 import {
   Cancel01Icon,
@@ -15,6 +16,7 @@ import {
   Globe02Icon,
   HierarchySquare01Icon,
   IncognitoIcon,
+  InformationCircleIcon,
   KanbanIcon,
   KeyboardIcon,
   LayoutTwoColumnIcon,
@@ -22,6 +24,7 @@ import {
   MessageMultiple01Icon,
   Note01Icon,
   PaintBoardIcon,
+  RocketIcon,
   Search01Icon,
   Settings01Icon,
   SidebarLeftIcon,
@@ -138,9 +141,27 @@ export function createCommandItems(
       id: "shortcuts.open",
       title: "Keyboard shortcuts",
       group: "General",
-      keywords: ["keys", "keybindings", "settings"],
+      keywords: ["keys", "keybindings", "settings", "help"],
       icon: KeyboardIcon,
       run: ctx.openKeyboardShortcuts,
+    },
+    {
+      id: "help.setupGuide",
+      title: "Setup guide",
+      group: "General",
+      keywords: ["help", "onboarding", "getting started", "welcome"],
+      icon: RocketIcon,
+      // Same window event the Brain header menu fires; the onboarding wizard
+      // listens for it (OnboardingWizard.tsx).
+      run: () => window.dispatchEvent(new CustomEvent("koden:open-onboarding")),
+    },
+    {
+      id: "help.about",
+      title: "About Koden",
+      group: "General",
+      keywords: ["help", "version", "github"],
+      icon: InformationCircleIcon,
+      run: () => void openSettingsWindow("about"),
     },
     {
       id: "spaces.overview",

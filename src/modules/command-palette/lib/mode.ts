@@ -21,7 +21,11 @@ export function parseQuery(raw: string): ParsedQuery {
   return { mode: "commands", term: raw.trim(), raw };
 }
 
-export const MODE_HINTS: ReadonlyArray<{ sigil: string; label: string }> = [
-  { sigil: ">", label: "Search command history" },
-  { sigil: "#", label: "Find text in files" },
+export const MODE_HINTS: ReadonlyArray<{
+  sigil: string;
+  label: string;
+  example: string;
+}> = [
+  { sigil: ">", label: "Search command history", example: "> git rebase" },
+  { sigil: "#", label: "Find text in files", example: "# TODO" },
 ];

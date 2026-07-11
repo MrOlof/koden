@@ -34,6 +34,7 @@ import {
   PlusSignIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { STATUS_META } from "@/modules/orchestration/lib/roleMeta";
 import type { SpaceMeta } from "@/modules/spaces";
 import { isRenamableKind } from "./lib/useTabs";
 import {
@@ -350,7 +351,7 @@ export function TabBar({
               variant="ghost"
               size="icon"
               className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-              title="New tab"
+              title={`New tab (${fmtShortcut(MOD_KEY, "T")})`}
             >
               <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={2} />
             </Button>
@@ -416,7 +417,7 @@ export function TabBar({
               <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} />
               <span className="flex-1">Preview</span>
               <span className="text-xs text-muted-foreground">
-                {fmtShortcut(MOD_KEY, "P")}
+                {fmtShortcut(MOD_KEY, SHIFT_KEY, "O")}
               </span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewGitGraph()}>
@@ -454,14 +455,33 @@ export function TabBar({
   );
 }
 
+// Derived from the orchestration STATUS_META (single source of truth for
+// status hues/labels) so the tab dot never drifts from the agent-dock dot.
+// Tabs only surface the four roll-up states from tabStatus.ts.
 const TAB_STATUS_META: Record<
   TabStatus,
   { color: string; pulse: boolean; label: string }
 > = {
-  working: { color: "#60a5fa", pulse: true, label: "Working" },
-  waiting: { color: "#f97316", pulse: true, label: "Needs your input" },
-  done: { color: "#22c55e", pulse: false, label: "Ready" },
-  error: { color: "#ef4444", pulse: false, label: "Error" },
+  working: {
+    color: STATUS_META.working.dot,
+    pulse: STATUS_META.working.pulse,
+    label: STATUS_META.working.label,
+  },
+  waiting: {
+    color: STATUS_META.waiting.dot,
+    pulse: STATUS_META.waiting.pulse,
+    label: STATUS_META.waiting.label,
+  },
+  done: {
+    color: STATUS_META.done.dot,
+    pulse: STATUS_META.done.pulse,
+    label: STATUS_META.done.label,
+  },
+  error: {
+    color: STATUS_META.error.dot,
+    pulse: STATUS_META.error.pulse,
+    label: STATUS_META.error.label,
+  },
 };
 
 export function TabStatusPill({ tabId }: { tabId: number }) {

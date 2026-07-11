@@ -424,6 +424,10 @@ export function AgentDock({
               to spawn agents as you go, or pick a team template — then give
               it a goal.
             </EmptyDescription>
+            <EmptyDescription className="text-[11px] text-muted-foreground/70">
+              Dot colors: blue working · amber needs you · green done · red
+              error.
+            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (

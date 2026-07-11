@@ -22,6 +22,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { clipboardWriteText } from "@/lib/clipboard";
+import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -37,6 +38,7 @@ import {
   MoreVerticalIcon,
   Note01Icon,
   Search01Icon,
+  SparklesIcon,
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -304,6 +306,10 @@ function PaneContextMenu({
   // Cursor point the menu anchors to. State (not a ref) so the compiler treats
   // the new position as a reactive input and re-renders the anchor at it.
   const [point, setPoint] = useState({ x: 0, y: 0 });
+  // Whether the terminal had a selection when the menu opened — gates the
+  // "Ask Librarian about selection" row (same precondition as the Mod+J
+  // shortcut; App disables that binding when nothing is selected).
+  const [hasSelection, setHasSelection] = useState(false);
   const nodeRef = useRef<HTMLDivElement | null>(null);
 
   // Native capture listener: fires for events over the foreign xterm DOM that
@@ -342,6 +348,11 @@ function PaneContextMenu({
       e.preventDefault();
       e.stopPropagation();
       setPoint({ x: e.clientX, y: e.clientY });
+      // Header right-clicks keep the terminal selection alive (the copy path
+      // above only claims content-area clicks), so snapshot it here.
+      setHasSelection(
+        getLiveSlotForLeaf(leafId)?.term.hasSelection() ?? false,
+      );
       setOpen(true);
     };
     node.addEventListener("contextmenu", onContextMenu, { capture: true });
@@ -372,6 +383,33 @@ function PaneContextMenu({
             className="min-w-40"
             onCloseAutoFocus={(e) => e.preventDefault()}
           >
+            {kind === "terminal" ? (
+              <>
+                <DropdownMenuItem
+                  disabled={!hasSelection}
+                  onSelect={() =>
+                    // App-level handler (askFromSelection) listens for this;
+                    // same window-event decoupling as file attach.
+                    window.dispatchEvent(
+                      new CustomEvent("koden:ai-ask-selection"),
+                    )
+                  }
+                >
+                  <HugeiconsIcon
+                    icon={SparklesIcon}
+                    size={14}
+                    strokeWidth={1.75}
+                  />
+                  <span className="flex-1">
+                    Ask Librarian about selection
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {fmtShortcut(MOD_KEY, "J")}
+                  </span>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
             <PaneMenuItems
               parts={DROPDOWN_PARTS}
               locked={locked}

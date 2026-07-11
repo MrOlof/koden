@@ -852,6 +852,15 @@ export default function App() {
     activeTab,
   ]);
 
+  // The pane right-click menu lives deep under the tab layer (PaneTreeView)
+  // with no prop path to the ask handler; it dispatches this window event
+  // instead — same decoupling pattern as "koden:ai-attach-file".
+  useEffect(() => {
+    const onAsk = () => askFromSelection();
+    window.addEventListener("koden:ai-ask-selection", onAsk);
+    return () => window.removeEventListener("koden:ai-ask-selection", onAsk);
+  }, [askFromSelection]);
+
   const openNewTab = useCallback(() => {
     newTab(inheritedCwdForNewTab());
   }, [newTab, inheritedCwdForNewTab]);
