@@ -99,7 +99,10 @@ export type MemoryProposal = {
 
 /** One applied (or reverted) memory change — a proposal row with its ADR-018
  *  apply/undo state. `revertible` = still applied AND the apply recorded the
- *  inverse snapshot (rows applied before ADR-018 have none). */
+ *  inverse snapshot (rows applied before ADR-018 have none) AND no newer applied
+ *  change touches the same note: stacked changes revert newest-first, since a
+ *  full-file snapshot restore would wipe newer siblings. `blocked_by_newer`
+ *  marks that stacking gate (vs the no-snapshot case) so the UI can say why. */
 export type MemoryChange = {
   project: string;
   signature: string;
@@ -113,6 +116,7 @@ export type MemoryChange = {
   reverted_ms: number | null;
   auto_applied: boolean;
   revertible: boolean;
+  blocked_by_newer: boolean;
 };
 
 /** Curation modes (ADR-018): the Librarian applies memory changes itself

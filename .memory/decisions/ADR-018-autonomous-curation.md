@@ -59,6 +59,20 @@ next round (the undo-fights-the-librarian loop). Rows applied before ADR-018
 carry no snapshot: revert refuses with a clear soft error and the UI lists them
 as non-revertible.
 
+**Newest-first ordering (stacked changes).** Snapshots are FULL prior files
+with no merge, so when several applied changes touch the same note they must
+unwind newest-first: restoring an OLDER snapshot would silently wipe every
+newer applied change, and reverting the newer one afterwards would resurrect
+the content just undone. Both enforcement points share one SQL predicate
+(`NEWER_APPLIED_SIBLING_SQL` — note-id overlap across
+`target_id`/`undo_created_id`, apply order by `applied_ms` then rowid):
+`revert_proposal` refuses an out-of-order revert with a soft error naming the
+blocking change, and the changes feed clears `revertible` on the gated rows
+(`blocked_by_newer` tells the UI why). Reverting the newest change re-exposes
+the next one, so the whole stack is still fully unwindable, one click at a
+time. Legacy pre-ADR-018 applied rows (NULL `applied_ms`) never block — they
+predate every snapshotted apply.
+
 Status vocabulary grows by exactly one value (`reverted`); the resolved-dedup
 lookback and the "already proposed" advisory include it. `pending` semantics are
 untouched, so `remove_note`'s cascade, the curate pending-dedup gate, and the
@@ -121,3 +135,7 @@ control proving the pin is load-bearing).
    `autonomous` gate in `MemoryView` if reverting should surface there too.
 4. In autonomous mode a mid-flight `RemoveProject` skips the sweep (root gone);
    enqueued-then-pruned rows are already handled by the existing prune path.
+5. A USER hand-edit made between an apply and its (in-order) revert is still
+   clobbered by the full-file restore — snapshot undo has no 3-way merge.
+   Accepted at memory-note scale; the newest-first gate only protects against
+   the Librarian's own stacked changes.

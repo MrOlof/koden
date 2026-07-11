@@ -2,9 +2,10 @@
 //! scenario). Free signals (P1 doctor + `superseded_present`) feed the two-stage
 //! significance gate ([detect]); decisive candidates ACT (propose the preserve-
 //! biased archive for $0), borderline ones ESCALATE to a Tier-2 LLM that classifies
-//! and grades the action. The model only ever PROPOSES into the human-gated P1
-//! queue (never editing or deleting a user file; deletion is always a human call),
-//! and declined proposals stick via the existing reject-signature.
+//! and grades the action. The model only ever PROPOSES into the P1 queue —
+//! ADR-018 decides what happens next: autonomous mode auto-applies with a
+//! revert snapshot, review mode parks for approval. Notes only, never a user
+//! source file; declined/reverted proposals stick via the reject-signature.
 //!
 //! Reuses the P4 money path: ONE budget ledger + the `ReflectClient` seam +
 //! charge-on-uncertainty. $0-testable via a fake client ([curate_with_client]).

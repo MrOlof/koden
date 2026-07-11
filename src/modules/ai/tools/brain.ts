@@ -147,6 +147,8 @@ export function buildBrainTools(_ctx: ToolContext) {
             status: c.status, // "applied" | "reverted"
             autoApplied: c.auto_applied,
             revertible: c.revertible,
+            // Stacked changes on one note revert newest-first; this marks the gated older ones.
+            blockedByNewer: c.blocked_by_newer,
           })),
           note: "Read-only. Reverts and approvals happen in the Brain pane's Memory tab, not here.",
         };

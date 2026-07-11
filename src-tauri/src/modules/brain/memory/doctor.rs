@@ -1,6 +1,7 @@
 //! Deterministic memory doctor (CONCEPT Flow G, ADR-006 P1). Reads the structured
-//! notes + the index and emits Findings, each of which becomes a human-gated
-//! `MemoryProposal`. Pure check logic is separated from persistence for
+//! notes + the index and emits Findings, each of which becomes a `MemoryProposal`
+//! (auto-applied with a revert snapshot in autonomous mode, parked for approval
+//! in review mode — ADR-018). Pure check logic is separated from persistence for
 //! deterministic testing (a controlled `now_date`, no wall clock — §13.21).
 //!
 //! P1 ships a meaningful, code-grounded SUBSET of checks. The full 18-check port

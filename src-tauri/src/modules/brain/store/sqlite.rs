@@ -985,6 +985,14 @@ impl SqliteIndex {
     /// other than `applied`, is an `Ok(false)` no-op (reverting twice = no-op).
     /// A pre-ADR-018 `applied` row carries no snapshot — soft `Err`, stays applied.
     ///
+    /// Ordering guard (stacked changes): snapshots are FULL prior files, so reverts
+    /// on the same note must run NEWEST-FIRST — restoring an OLDER snapshot would
+    /// silently wipe every newer applied change (and reverting the newer one later
+    /// would resurrect the content just undone). A newer applied sibling touching
+    /// the same note therefore refuses with a soft `Err` naming the blocker
+    /// ([`NEWER_APPLIED_SIBLING_SQL`], the same predicate that clears `revertible`
+    /// in the changes feed). Reverting the newest change re-exposes the next one.
+    ///
     /// Ordering mirrors the apply: files first (crash-safe — a crash after the file
     /// restore but before the flip leaves an `applied` row whose re-run converges,
     /// `revert_files` being idempotent), then one tx for the flip + reject-signature,
@@ -1046,6 +1054,28 @@ impl SqliteIndex {
                 "proposal was applied before undo snapshots existed; nothing recorded to revert"
                     .to_string(),
             );
+        }
+
+        // Newest-first guard (see doc above): a newer applied change touching the
+        // same note blocks this revert — its content is inside neither snapshot and
+        // a full-file restore would clobber it.
+        let blocker: Option<String> = match self.conn.query_row(
+            &format!(
+                "SELECT q.title FROM proposals p JOIN proposals q ON {NEWER_APPLIED_SIBLING_SQL} \
+                 WHERE p.project_id=?1 AND p.signature=?2 \
+                 ORDER BY q.applied_ms DESC, q.rowid DESC LIMIT 1"
+            ),
+            (project_id, signature),
+            |r| r.get(0),
+        ) {
+            Ok(title) => Some(title),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(format!("check revert ordering: {e}")),
+        };
+        if let Some(newer) = blocker {
+            return Err(format!(
+                "a newer applied change ('{newer}') touches the same note; revert changes newest-first"
+            ));
         }
 
         // Files first (see ordering note above), then re-sync the notes table.
@@ -2597,6 +2627,22 @@ pub fn list_proposals_readonly(
     Ok(rows)
 }
 
+/// Shared predicate for the ADR-018 newest-first revert order (`p` = the row under
+/// test, `q` = a sibling): is there a NEWER applied proposal touching the same
+/// note file(s) as `p`? Touched note ids per action: create → `undo_created_id`;
+/// archive/update → `target_id`; supersede → both (note ids equal file stems, so
+/// id overlap = file overlap). Snapshots are FULL prior files, so restoring an
+/// older one while a newer applied sibling exists would clobber the sibling's
+/// content — `revert_proposal` refuses and `memory_change_from_row` clears
+/// `revertible` on exactly this predicate. Ties on `applied_ms` break by rowid
+/// (the sweep applies in insertion order). Legacy rows applied pre-ADR-018 have
+/// NULL `applied_ms` and never block: they predate every snapshotted apply.
+const NEWER_APPLIED_SIBLING_SQL: &str = "q.project_id = p.project_id \
+    AND q.signature <> p.signature AND q.status = 'applied' \
+    AND (q.applied_ms > p.applied_ms OR (q.applied_ms = p.applied_ms AND q.rowid > p.rowid)) \
+    AND ((q.target_id IS NOT NULL AND q.target_id IN (p.target_id, p.undo_created_id)) \
+      OR (q.undo_created_id IS NOT NULL AND q.undo_created_id IN (p.target_id, p.undo_created_id)))";
+
 fn memory_change_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryChange> {
     let action =
         ProposalAction::from_token(&r.get::<_, String>(2)?).unwrap_or(ProposalAction::Update);
@@ -2604,9 +2650,13 @@ fn memory_change_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryChange> {
     let undo_created_id: Option<String> = r.get(11)?;
     let undo_prior_path: Option<String> = r.get(12)?;
     let has_prior_bytes: bool = r.get::<_, Option<i64>>(13)?.unwrap_or(0) != 0;
+    let blocked_by_newer: bool = r.get::<_, i64>(14)? != 0;
     // Revertible = still applied AND the apply recorded the inverse this action
     // needs (rows applied before ADR-018 recorded none) — keep in lockstep with
-    // `SqliteIndex::revert_proposal`'s has_snapshot match.
+    // `SqliteIndex::revert_proposal`'s has_snapshot match — AND no newer applied
+    // change touches the same note (NEWER_APPLIED_SIBLING_SQL, computed in the
+    // SELECT): stacked changes revert newest-first or an older full-file snapshot
+    // would wipe them.
     let has_snapshot = match action {
         ProposalAction::Create => undo_created_id.is_some(),
         ProposalAction::Archive | ProposalAction::Update => {
@@ -2624,7 +2674,8 @@ fn memory_change_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryChange> {
         title: r.get(4)?,
         detail: r.get(5)?,
         source: r.get(6)?,
-        revertible: status == "applied" && has_snapshot,
+        revertible: status == "applied" && has_snapshot && !blocked_by_newer,
+        blocked_by_newer: status == "applied" && blocked_by_newer,
         status,
         applied_ms: r.get(8)?,
         reverted_ms: r.get(9)?,
@@ -2635,17 +2686,23 @@ fn memory_change_from_row(r: &rusqlite::Row) -> rusqlite::Result<MemoryChange> {
 /// Recent APPLIED + REVERTED memory changes (the ADR-018 "Memory changes" surface),
 /// newest first, via a read-only connection. `project = None` = all projects.
 /// The undo snapshot itself is not returned — only whether one exists (`revertible`);
-/// `undo_prior_bytes` can be a whole note and the UI never needs it.
+/// `undo_prior_bytes` can be a whole note and the UI never needs it. `revertible`
+/// also honors the newest-first stacking gate ([`NEWER_APPLIED_SIBLING_SQL`]):
+/// when several applied changes touch the same note, only the newest offers
+/// Revert (`blocked_by_newer` marks the gated ones so the UI can say why).
 pub fn list_memory_changes_readonly(
     db_path: &Path,
     project: Option<&str>,
     limit: usize,
 ) -> rusqlite::Result<Vec<MemoryChange>> {
     let conn = open_readonly(db_path)?;
-    let base = "SELECT project_id,signature,action,target_id,title,detail,source,status,\
-                applied_ms,reverted_ms,auto_applied,undo_created_id,undo_prior_path,\
-                (undo_prior_bytes IS NOT NULL) \
-                FROM proposals WHERE status IN ('applied','reverted')";
+    let base = format!(
+        "SELECT project_id,signature,action,target_id,title,detail,source,status,\
+         applied_ms,reverted_ms,auto_applied,undo_created_id,undo_prior_path,\
+         (undo_prior_bytes IS NOT NULL),\
+         EXISTS(SELECT 1 FROM proposals q WHERE {NEWER_APPLIED_SIBLING_SQL}) \
+         FROM proposals p WHERE status IN ('applied','reverted')"
+    );
     let order = "ORDER BY COALESCE(reverted_ms, applied_ms, created_ms) DESC LIMIT ?";
     let mut rows = Vec::new();
     match project {

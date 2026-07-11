@@ -733,7 +733,11 @@ function MemoryView({
                       ) : (
                         <span
                           className="text-[10px] text-muted-foreground/70"
-                          title="Applied before undo snapshots existed"
+                          title={
+                            ch.blocked_by_newer
+                              ? "A newer change touches the same note — revert changes newest-first"
+                              : "Applied before undo snapshots existed"
+                          }
                         >
                           Applied
                         </span>

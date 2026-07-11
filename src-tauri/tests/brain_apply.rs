@@ -5,7 +5,9 @@
 //! `.koden-memory/*.md` FILE materializes/changes, the notes TABLE reflects it, a
 //! re-scan is idempotent, a missing target soft-fails leaving the proposal pending,
 //! reject writes a reject-signature and materializes nothing, every apply snapshots
-//! an inverse that revert restores VERBATIM (idempotently), the autonomous sweep
+//! an inverse that revert restores VERBATIM (idempotently), stacked changes on one
+//! note revert NEWEST-FIRST (an older revert is gated while a newer applied change
+//! touches the same note), the autonomous sweep
 //! applies in `autonomous` mode and parks in `review` mode, the post-apply digest
 //! pin keeps the delta gate at $0, and both status flips are journaled (survive a
 //! header wipe).
@@ -353,6 +355,89 @@ fn pre_adr018_applied_row_without_snapshot_soft_fails_and_stays_applied() {
     let ch = change_row(&db, &p.signature);
     assert_eq!(ch.status, "applied", "row untouched by the failed revert");
     assert!(!ch.revertible, "listed as not revertible");
+}
+
+/// Stacked applied changes on ONE note must unwind newest-first: snapshots are
+/// full prior files, so restoring an OLDER snapshot would silently wipe every
+/// newer applied change (and reverting the newer one afterwards would resurrect
+/// the content just undone). Both the feed's `revertible` flag and
+/// `revert_proposal` itself enforce the gate; the cascade B-then-A converges to
+/// the original bytes.
+#[test]
+fn stacked_changes_on_one_note_revert_newest_first_only() {
+    let (idx, store, _work, root) = setup();
+    let db = store.path().join("i.sqlite");
+    write_note(&root, "hot", "", "Original prose.");
+    scan_project_memory(&idx, PID, &root);
+    let original = read_note(&root, "hot");
+
+    // A then B on the SAME note: update (snapshot S0), then archive (snapshot S0+A).
+    let a = mk_proposal(ProposalAction::Update, Some("hot"), "Refine hot", "Fact A.");
+    idx.insert_proposal(PID, &a, 1).unwrap();
+    idx.apply_proposal(PID, &root, &a.signature, NOW, 1_000, true).unwrap();
+    let after_a = read_note(&root, "hot");
+    let b = mk_proposal(ProposalAction::Archive, Some("hot"), "Archive hot", "stale");
+    idx.insert_proposal(PID, &b, 2).unwrap();
+    idx.apply_proposal(PID, &root, &b.signature, NOW, 2_000, true).unwrap();
+    let after_b = read_note(&root, "hot");
+    assert!(after_b.contains("Fact A.") && after_b.contains("status: archived"));
+
+    // The feed gates the OLDER change; only the newest applied row offers Revert.
+    let ch_a = change_row(&db, &a.signature);
+    assert!(!ch_a.revertible, "older stacked change is gated");
+    assert!(ch_a.blocked_by_newer, "and marked as gated by a newer sibling");
+    let ch_b = change_row(&db, &b.signature);
+    assert!(ch_b.revertible && !ch_b.blocked_by_newer, "newest change revertible");
+
+    // Reverting the OLDER change is refused: its snapshot predates B's archive.
+    let err = idx.revert_proposal(PID, &root, &a.signature, 3_000).unwrap_err();
+    assert!(err.contains("newest-first"), "clear soft error: {err}");
+    assert_eq!(read_note(&root, "hot"), after_b, "file untouched by the refused revert");
+    assert_eq!(change_row(&db, &a.signature).status, "applied", "row untouched");
+
+    // Newest-first cascade: revert B (A's update survives), then A (original bytes).
+    assert!(idx.revert_proposal(PID, &root, &b.signature, 4_000).unwrap());
+    assert_eq!(read_note(&root, "hot"), after_a, "B undone, A's content intact");
+    let ch_a = change_row(&db, &a.signature);
+    assert!(ch_a.revertible && !ch_a.blocked_by_newer, "A re-exposed once B is gone");
+    assert!(idx.revert_proposal(PID, &root, &a.signature, 5_000).unwrap());
+    assert_eq!(read_note(&root, "hot"), original, "stack fully unwound");
+}
+
+/// The gate also spans MINTED notes: a create's undo deletes the file, so a newer
+/// applied change TARGETING that minted note (target_id == the create's
+/// undo_created_id) blocks the create's revert. Unrelated notes never gate each
+/// other.
+#[test]
+fn revert_of_create_is_blocked_while_a_newer_change_touches_the_minted_note() {
+    let (idx, store, _work, root) = setup();
+    let db = store.path().join("i.sqlite");
+    let c = mk_proposal(ProposalAction::Create, None, "Minted Note", "Body.");
+    idx.insert_proposal(PID, &c, 1).unwrap();
+    idx.apply_proposal(PID, &root, &c.signature, NOW, 1_000, true).unwrap();
+    let u = mk_proposal(ProposalAction::Update, Some("minted-note"), "Refine minted", "More.");
+    idx.insert_proposal(PID, &u, 2).unwrap();
+    idx.apply_proposal(PID, &root, &u.signature, NOW, 2_000, true).unwrap();
+
+    let ch_c = change_row(&db, &c.signature);
+    assert!(!ch_c.revertible && ch_c.blocked_by_newer, "create gated behind the update");
+    let err = idx.revert_proposal(PID, &root, &c.signature, 3_000).unwrap_err();
+    assert!(err.contains("newest-first"), "clear soft error: {err}");
+    assert!(
+        root.join(".koden-memory").join("minted-note.md").exists(),
+        "minted note NOT deleted out from under the applied update"
+    );
+
+    // A newer change on a DIFFERENT note gates nothing.
+    let other = mk_proposal(ProposalAction::Create, None, "Unrelated", "x");
+    idx.insert_proposal(PID, &other, 3).unwrap();
+    idx.apply_proposal(PID, &root, &other.signature, NOW, 4_000, true).unwrap();
+    assert!(change_row(&db, &u.signature).revertible, "unrelated newer change doesn't gate");
+
+    // Cascade unwinds: revert the update, then the (now unblocked) create.
+    assert!(idx.revert_proposal(PID, &root, &u.signature, 5_000).unwrap());
+    assert!(idx.revert_proposal(PID, &root, &c.signature, 6_000).unwrap(), "unblocked after cascade");
+    assert!(!root.join(".koden-memory").join("minted-note.md").exists());
 }
 
 #[test]

@@ -59,8 +59,12 @@ pub struct MemoryProposal {
 
 /// One APPLIED (or reverted) memory change for the "Memory changes" surface
 /// (ADR-018) — a proposal row read back with its apply/undo state. `revertible`
-/// is true when the row is still `applied` AND carries the inverse snapshot the
-/// apply recorded (rows applied before ADR-018 have none).
+/// is true when the row is still `applied`, carries the inverse snapshot the
+/// apply recorded (rows applied before ADR-018 have none), AND no newer applied
+/// change touches the same note — stacked changes revert newest-first, because a
+/// full-file snapshot restore would wipe newer siblings. `blocked_by_newer`
+/// distinguishes that stacking gate from the no-snapshot case so the UI can say
+/// "revert newer changes first" instead of a generic not-revertible.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct MemoryChange {
     pub project: String,
@@ -75,6 +79,7 @@ pub struct MemoryChange {
     pub reverted_ms: Option<i64>,
     pub auto_applied: bool,
     pub revertible: bool,
+    pub blocked_by_newer: bool,
 }
 
 /// In-memory/PK dedup key — a plain field join (Conductr `proposalSignature`).

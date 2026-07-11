@@ -37,7 +37,7 @@ const TOOL_LABELS: Record<string, (input: Record<string, unknown>) => string> =
     brain_notes: () => `Reading memory notes`,
     brain_status: () => `Checking the brain index`,
     brain_gist: () => `Building a project briefing`,
-    brain_proposals: () => `Reading the review inbox`,
+    brain_proposals: () => `Reading recent memory changes`,
     brain_librarian_info: () => `Checking Librarian config & spend`,
     read_file: (i) => `Reading ${shortPath(i.path)}`,
     list_directory: (i) => `Listing ${shortPath(i.path)}`,
