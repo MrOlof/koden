@@ -17,6 +17,7 @@ import {
   providerSupportsKey,
 } from "@/modules/ai/config";
 import { getAllKeys, hasAnyKey, setKey } from "@/modules/ai/lib/keyring";
+import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import {
   brainSetBudget,
   brainSetLibrarian,
@@ -44,6 +45,7 @@ import {
   RoboticIcon,
   RocketIcon,
   type Search01Icon,
+  TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -74,7 +76,10 @@ type StepMeta = { title: string; subtitle: string };
 const STEPS: StepMeta[] = [
   { title: "Welcome to Koden", subtitle: "An AI workspace for your code." },
   { title: "How Koden works", subtitle: "Three pieces, set up once." },
-  { title: "Connect an AI model", subtitle: "Bring your own, cloud or local." },
+  {
+    title: "Connect an AI model",
+    subtitle: "Powers the Librarian chat. Bring your own, cloud or local.",
+  },
   {
     title: "Choose your projects folder",
     subtitle: "The source of truth for the brain.",
@@ -118,6 +123,7 @@ export function OnboardingWizard() {
   const [wsPath, setWsPath] = useState("");
   const [wsBusy, setWsBusy] = useState(false);
   const [wsAdded, setWsAdded] = useState<number | null>(null);
+  const [wsRoot, setWsRoot] = useState<string | null>(null);
 
   // Librarian step
   const [libProvider, setLibProvider] = useState<ProviderId | "">("");
@@ -142,18 +148,35 @@ export function OnboardingWizard() {
   }, []);
 
   // First-run: show once, only when setup isn't done AND no workspace is configured.
+  // Fail-open: if the status probe fails twice (one retry), show the wizard anyway —
+  // a broken probe must not hide setup from a brand-new user.
   useEffect(() => {
     let alive = true;
+    let timer: number | undefined;
     if (localStorage.getItem(DONE_KEY)) return;
-    brainWorkspaceStatus()
-      .then((s) => {
-        if (!alive || s.configured) return;
-        setShow(true);
-        void loadKeys();
-      })
-      .catch(() => {});
+    const openIt = () => {
+      setShow(true);
+      void loadKeys();
+    };
+    const probe = (retriesLeft: number) => {
+      brainWorkspaceStatus()
+        .then((s) => {
+          if (!alive || s.configured) return;
+          openIt();
+        })
+        .catch(() => {
+          if (!alive) return;
+          if (retriesLeft > 0) {
+            timer = window.setTimeout(() => probe(retriesLeft - 1), 1500);
+          } else {
+            openIt();
+          }
+        });
+    };
+    probe(1);
     return () => {
       alive = false;
+      window.clearTimeout(timer);
     };
   }, [loadKeys]);
 
@@ -163,9 +186,16 @@ export function OnboardingWizard() {
     const openIt = () => {
       setStep(0);
       setLibProvider("");
+      setLibEnabled(false);
       setError(null);
+      setWsPath("");
+      setWsAdded(null);
+      setApiKey("");
       setShow(true);
       void loadKeys();
+      brainWorkspaceStatus()
+        .then((s) => setWsRoot(s.configured ? s.root : null))
+        .catch(() => {});
     };
     window.addEventListener("koden:open-onboarding", openIt);
     return () => window.removeEventListener("koden:open-onboarding", openIt);
@@ -179,14 +209,13 @@ export function OnboardingWizard() {
   ];
 
   // Switch the Librarian to a provider: cloud → its cheapest model; local → a
-  // model-name field + the server's default URL, and a nominal cap so one click
-  // enables it (local is free, but ceiling > 0 is the on-switch).
+  // model-name field + the server's default URL. No budget prefill for local:
+  // the model is still empty, and a prefilled cap with no model is a dead-end.
   const pickLibProvider = useCallback((p: ProviderId) => {
     setLibProvider(p);
     if (isLocalLibProvider(p)) {
       setLibBaseUrl(libLocalBaseUrl(p));
       setLibModel("");
-      setLibBudget((b) => (b.trim() ? b : "1"));
     } else {
       setLibModel(cheapestLibModel(p));
       setLibBaseUrl("");
@@ -281,6 +310,12 @@ export function OnboardingWizard() {
     }
     const model = libModel.trim();
     if (!model) {
+      // Local provider with no model named: not an error — the user hasn't
+      // picked anything to run, so leave the Librarian off and move on.
+      if (isLocalLibProvider(libProvider)) {
+        next();
+        return;
+      }
       setError("Choose a model for the Librarian.");
       return;
     }
@@ -352,6 +387,7 @@ export function OnboardingWizard() {
               path={wsPath}
               onPath={setWsPath}
               onBrowse={() => void browseWorkspace()}
+              configuredRoot={wsRoot}
             />
           )}
           {step === 4 && (
@@ -394,7 +430,9 @@ export function OnboardingWizard() {
             {step < STEPS.length - 1 ? (
               <button
                 type="button"
-                onClick={finish}
+                // Skip lands on the summary (pointers to Settings / the Brain),
+                // never straight out — finish() only fires from Done.
+                onClick={() => setStep(STEPS.length - 1)}
                 className="rounded-lg px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
               >
                 Skip setup
@@ -465,7 +503,12 @@ export function OnboardingWizard() {
               >
                 {libBusy
                   ? "Saving…"
-                  : libBudgetOn
+                  : libBudgetOn &&
+                      !(
+                        libProvider !== "" &&
+                        isLocalLibProvider(libProvider) &&
+                        !libModel.trim()
+                      )
                     ? "Enable & continue"
                     : "Leave it off"}
                 <HugeiconsIcon
@@ -529,9 +572,10 @@ function WelcomeBody() {
   return (
     <div className="space-y-3 text-center">
       <p className="text-sm leading-relaxed text-muted-foreground">
-        Koden is a terminal and editor with an AI that actually does the work.
-        It reads your code, runs commands, and remembers how your projects fit
-        together.
+        Koden is a workspace for working with coding agents. Your agents
+        (Claude Code, Codex) run in its terminals, a local Brain indexes and
+        remembers your projects, and the Librarian answers questions grounded
+        in that memory.
       </p>
       <p className="text-sm leading-relaxed text-muted-foreground">
         This quick setup gets you running in under a minute. You can skip any
@@ -544,18 +588,18 @@ function WelcomeBody() {
 function HowBody() {
   return (
     <div className="space-y-4">
-      <FeatureRow icon={HierarchySquare01Icon} title="The Brain">
-        A local index of your projects for instant search and a live map of how
-        your code connects. Nothing is uploaded.
+      <FeatureRow icon={TerminalIcon} title="Terminals + your agents">
+        Run your real coding agents (Claude Code, Codex) in Koden's terminals.
+        Koden auto-installs hooks so every session feeds the workspace —
+        status, turns, what changed.
       </FeatureRow>
-      <FeatureRow icon={CloudIcon} title="The AI">
-        Bring your own model: a cloud API key (Anthropic, OpenAI, …) or a local
-        model (Ollama, LM Studio). You're in control of cost and privacy.
+      <FeatureRow icon={HierarchySquare01Icon} title="The Brain">
+        A local index plus curated memory of your projects. Free and always
+        on; nothing is uploaded.
       </FeatureRow>
       <FeatureRow icon={RoboticIcon} title="The Librarian">
-        Koden's chat: it answers questions about your projects from the
-        Brain's memory, and optionally tidies your notes over time. Curation
-        is off by default; you can turn it on in a moment.
+        The chat: ask it about your projects, grounded in the Brain. It also
+        proposes memory updates that you approve.
       </FeatureRow>
     </div>
   );
@@ -653,13 +697,28 @@ function WorkspaceBody({
   path,
   onPath,
   onBrowse,
+  configuredRoot,
 }: {
   path: string;
   onPath: (v: string) => void;
   onBrowse: () => void;
+  configuredRoot: string | null;
 }) {
   return (
     <div className="space-y-4">
+      {configuredRoot ? (
+        <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
+          <HugeiconsIcon
+            icon={CheckmarkCircle02Icon}
+            size={15}
+            strokeWidth={2}
+            className="shrink-0"
+          />
+          <span className="min-w-0 truncate">
+            Workspace already set: {configuredRoot} — leave blank to keep it.
+          </span>
+        </div>
+      ) : null}
       <div className="rounded-xl border bg-muted/20 px-4 py-3">
         <svg
           viewBox="0 0 256 76"
@@ -682,9 +741,9 @@ function WorkspaceBody({
             className="fill-muted stroke-muted-foreground/60"
           />
           {[
-            { cy: 14, c: "#6ee7b7" },
-            { cy: 40, c: "#93c5fd" },
-            { cy: 64, c: "#fcd34d" },
+            { cy: 14, c: "var(--chart-1)" },
+            { cy: 40, c: "var(--chart-2)" },
+            { cy: 64, c: "var(--chart-5)" },
           ].map((n) => (
             <circle
               key={n.cy}
@@ -761,7 +820,9 @@ function LibrarianBody({
       <p className="text-xs leading-relaxed text-muted-foreground">
         The Librarian does light background work, so it runs best on a small,
         cheap model. It proposes tidy-ups to your project memory; you always
-        approve before anything is saved.
+        approve before anything is saved. The cap below only governs this
+        background curation — chat is available whenever a model is connected,
+        billed by the provider, not counted against the cap.
       </p>
 
       <div>
@@ -915,6 +976,23 @@ function DoneBody({
             </span>
           </div>
         ))}
+      </div>
+      <div className="space-y-1.5 border-t pt-3 text-xs leading-relaxed text-muted-foreground">
+        {aiConfigured ? (
+          <p>
+            Press{" "}
+            <span className="text-foreground">{fmtShortcut(MOD_KEY, "I")}</span>{" "}
+            to ask the Librarian about your code.
+          </p>
+        ) : null}
+        <p>
+          Open a terminal and run your agent (<code>claude</code>,{" "}
+          <code>codex</code>) — Koden captures the session.
+        </p>
+        <p>
+          <span className="text-foreground">{fmtShortcut(MOD_KEY, "P")}</span>{" "}
+          runs any command.
+        </p>
       </div>
     </div>
   );

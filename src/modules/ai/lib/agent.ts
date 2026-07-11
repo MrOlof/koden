@@ -89,7 +89,7 @@ export async function buildLanguageModel(
 ): Promise<LanguageModel> {
   if (providerNeedsKey(provider) && !keys[provider]) {
     throw new Error(
-      `No API key configured for ${provider}. Open Settings → AI to add one.`,
+      `No API key configured for ${provider}. Open Settings → Models to add one.`,
     );
   }
   const key = keys[provider] ?? "";
