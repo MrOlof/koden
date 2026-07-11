@@ -269,6 +269,11 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     watcher = arm_watcher(&app, &tx);
                     drop(old);
                     warm_population(&app, &index); // full reconcile (add/change/delete)
+                    // GUI-validation D1: warm_population only emits Warming{pct}
+                    // steps; without this the status sticks at the last pct
+                    // ("Indexing… 50%") forever after a mid-session add/rescan —
+                    // only the boot path (brain_loop) set Ready.
+                    set_status(&app, BrainStatus::Ready);
                     if let Some(s) = app.try_state::<BrainState>() {
                         s.registry.save_to(&cfg_path); // persist the project list
                     }
@@ -280,6 +285,12 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 } else {
                     log::info!("brain: removed project '{project}' (unregistered + pruned)");
                 }
+                // Drop the per-project librarian state too, so a round still in flight
+                // (offloaded provider call) completes on the reconcile-only path — no
+                // orphan proposals, no resurrected pin. Without this the LibrarianDone
+                // handler would find a stale entry and re-persist the pin the prune just
+                // deleted. [LIB-DESIGN-01 miss2]
+                lib_state.remove(&project);
                 // Arm-then-drop (same rationale as the full Rescan): the removed
                 // root stops being watched when the OLD watcher retires; its
                 // in-flight events resolve to an unregistered project and no-op.
@@ -292,7 +303,43 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             }
             BrainEvent::Tick => {
                 index.checkpoint();
-                run_librarian_rounds(&app, &index, &mut lib_state);
+                run_librarian_rounds(&app, &index, &mut lib_state, &tx);
+            }
+            BrainEvent::LibrarianDone { project, finish, result } => {
+                // The offloaded provider call finished (LIB-DESIGN-01). Complete the
+                // round on THIS single writer thread. Whether the project is still
+                // registered decides the tail: `lib_state` is pruned on RemoveProject
+                // (below), so a MISSING entry means the project was unregistered
+                // mid-flight. [LIB-DESIGN-01 miss2]
+                let now_ms = now_epoch_ms();
+                match lib_state.get_mut(&project) {
+                    Some(st) => {
+                        // Registered: reconcile + validate + enqueue proposals, then
+                        // CAS-fold the outcome + persist the digest pin.
+                        st.in_flight = false;
+                        let (outcome, digest_hash) =
+                            reflect::reflect_finish(&index, &project, finish, result, now_ms);
+                        // Guard the pin against a manual Reflect that pinned a newer
+                        // digest while this round's call was in flight. [miss1]
+                        let expected = st.in_flight_from.take();
+                        fold_offloaded_outcome(st, expected, &outcome.reason, digest_hash);
+                        persist_lib_pin(&index, &project, st, now_ms);
+                        log_round_outcome(&project, &outcome, st);
+                    }
+                    None => {
+                        // Unregistered mid-flight: reconcile the budget reservation
+                        // ONLY. Enqueuing proposals would leave orphan rows and
+                        // re-persisting the pin would resurrect the one remove_project
+                        // deliberately deleted (re-added identical corpus → Unchanged/$0
+                        // forever, pruned proposals never regenerate). [miss2]
+                        let outcome =
+                            reflect::reflect_reconcile_only(&index, &project, finish, result, now_ms);
+                        log::debug!(
+                            "brain: librarian result for gone project '{project}' reconciled ({:?})",
+                            outcome.reason
+                        );
+                    }
+                }
             }
             BrainEvent::Doctor { project, now_date } => {
                 let now_ms = now_epoch_ms();
@@ -310,8 +357,35 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     }
                 }
             }
-            BrainEvent::ResolveProposal { project, signature, reject } => {
-                let _ = index.resolve_proposal(&project, &signature, reject);
+            BrainEvent::ResolveProposal { project, signature, reject, reply } => {
+                // Reject = status flip + reject-signature (unchanged). Approve = APPLY:
+                // materialize the note change onto disk on this single writer thread,
+                // where the writer connection + the registry (project root) both live.
+                let result: Result<(), String> = if reject {
+                    index
+                        .resolve_proposal(&project, &signature, true)
+                        .map(|_| ())
+                        .map_err(|e| format!("reject proposal: {e}"))
+                } else {
+                    match project_root(&app, &project) {
+                        Some(root) => {
+                            let now_date = memory::apply::epoch_ms_to_iso_date(now_epoch_ms());
+                            index.apply_proposal(
+                                &project,
+                                std::path::Path::new(&root),
+                                &signature,
+                                &now_date,
+                            )
+                        }
+                        None => Err(format!("unknown project '{project}'")),
+                    }
+                };
+                if let Err(e) = &result {
+                    log::warn!("brain: resolve proposal '{signature}' failed ({e})");
+                }
+                if let Some(tx) = reply {
+                    let _ = tx.send(result); // command awaits this; ignore a dropped rx
+                }
             }
             BrainEvent::SetBudget { ceiling_usd } => {
                 if let Err(e) = index.set_budget_ceiling(ceiling_usd, now_epoch_ms()) {
@@ -382,7 +456,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     // (resets the failure streak); InvalidOutput = paid but rejected —
                     // identical bytes would fail identically, so pin its hash too.
                     if digest_hash.is_some() {
-                        let st = lib_state.entry(pid.clone()).or_default();
+                        let st = lib_entry(&mut lib_state, &index, &pid);
                         match outcome.reason {
                             reflect::ReflectReason::Ok => {
                                 st.digest_hash = digest_hash;
@@ -391,6 +465,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                             reflect::ReflectReason::InvalidOutput => st.digest_hash = digest_hash,
                             _ => {} // CallFailed: retrying the same digest is legitimate
                         }
+                        // Persist the manually-reflected digest too, so the next
+                        // autonomous round (this session OR after a restart) does not
+                        // re-pay it. [LIB-SPEND-01]
+                        persist_lib_pin(&index, &pid, st, now_ms);
                     }
                     log::info!(
                         "brain: reflect '{pid}' → {:?} ({} proposal(s), ${:.4})",
@@ -412,7 +490,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         // Record the change (dirty + when). The Librarian settles in
                         // after a quiet spell, deciding via the digest hash whether
                         // there's actually anything new to reflect on.
-                        note_content_change(lib_state.entry(project.clone()).or_default(), now_epoch_ms());
+                        // `lib_entry` hydrates the persisted delta-gate pin on the
+                        // first sighting of this project this boot, so a code-only edge
+                        // (digest-neutral) after a restart won't re-pay. [LIB-SPEND-01]
+                        note_content_change(lib_entry(&mut lib_state, &index, &project), now_epoch_ms());
                     }
                 }
             }
@@ -1032,6 +1113,17 @@ pub struct LibrarianAuto {
     /// CONSECUTIVE failed PAID rounds (CallFailed/InvalidOutput) since the last
     /// success — drives the backoff + the stop-re-arming cap (ADR-010 cluster 5).
     pub fail_streak: u32,
+    /// A round for this project is dispatched and its provider call is running on a
+    /// helper thread; the worker skips new rounds for it until the matching
+    /// `BrainEvent::LibrarianDone` lands. Prevents overlapping paid rounds / double
+    /// reservations while the network call is offloaded. [LIB-DESIGN-01]
+    pub in_flight: bool,
+    /// The delta-gate pin captured when the in-flight round was DISPATCHED. On
+    /// `LibrarianDone` the handler CAS-folds this round's prepare-time hash into the
+    /// pin ONLY if `digest_hash` still equals this — otherwise a manual `Reflect` that
+    /// landed mid-flight already pinned a NEWER digest, and clobbering it with this
+    /// (older) round's hash would make the next auto round re-pay it. [LIB-DESIGN-01 miss1]
+    pub in_flight_from: Option<String>,
 }
 
 /// Fold one indexed content change into the state — the Fs-handler half of the
@@ -1041,6 +1133,36 @@ pub struct LibrarianAuto {
 pub fn note_content_change(st: &mut LibrarianAuto, now_ms: i64) {
     st.dirty = true;
     st.last_change_ms = now_ms;
+}
+
+/// Get-or-create the per-project state, HYDRATING the delta-gate pin from the
+/// persisted store the first time a project is seen this boot. `lib_state` is a
+/// HashMap rebuilt EMPTY on every worker start (:232), so without this read-through
+/// the first post-restart round would run with `prev_digest_hash=None` and re-pay a
+/// byte-identical digest — a call the pin would have short-circuited to Unchanged at
+/// $0. The DB read happens only on the miss (`or_insert_with`), never when the entry
+/// already exists. [LIB-SPEND-01]
+pub fn lib_entry<'a>(
+    state: &'a mut std::collections::HashMap<String, LibrarianAuto>,
+    index: &SqliteIndex,
+    project_id: &str,
+) -> &'a mut LibrarianAuto {
+    state
+        .entry(project_id.to_string())
+        .or_insert_with(|| LibrarianAuto { digest_hash: index.librarian_pin(project_id), ..Default::default() })
+}
+
+/// Persist a project's delta-gate pin after a round, so the "Unchanged => $0"
+/// short-circuit survives a restart. A no-op when the pin is still `None` (no round
+/// has established a digest yet); a repeat of an unchanged value is a harmless upsert.
+/// A failed write is logged, never propagated — the in-memory pin still gates the
+/// rest of THIS session, and the next successful round re-attempts the write. [LIB-SPEND-01]
+fn persist_lib_pin(index: &SqliteIndex, project_id: &str, st: &LibrarianAuto, now_ms: i64) {
+    if let Some(h) = st.digest_hash.as_deref() {
+        if let Err(e) = index.set_librarian_pin(project_id, h, now_ms) {
+            log::warn!("brain: persist librarian pin for '{project_id}' failed ({e})");
+        }
+    }
 }
 
 /// Pure round predicate (testable): a dirty project, past the anti-hammer min-gap,
@@ -1103,6 +1225,29 @@ fn apply_round_outcome(
     }
 }
 
+/// Fold an OFFLOADED round's outcome, guarding the delta-gate pin against a manual
+/// `Reflect` that re-pinned a NEWER digest while this round's provider call was in
+/// flight (LIB-DESIGN-01 miss1). `expected_pin` is the pin captured when this round
+/// was DISPATCHED (`st.in_flight_from`); if `st.digest_hash` no longer equals it, a
+/// mid-flight manual round already paid for + pinned a newer digest — keep that pin
+/// rather than clobbering it with this round's (older) prepare-time hash, which would
+/// make the next autonomous round re-pay a byte-identical, already-paid digest. All
+/// other bookkeeping (fail_streak / dirty / re-arm) is identical to
+/// [apply_round_outcome] — only the pin write is conditionally preserved.
+fn fold_offloaded_outcome(
+    st: &mut LibrarianAuto,
+    expected_pin: Option<String>,
+    reason: &reflect::ReflectReason,
+    digest_hash: Option<String>,
+) {
+    let repinned = st.digest_hash != expected_pin;
+    let newer_pin = st.digest_hash.clone();
+    apply_round_outcome(st, reason, digest_hash);
+    if repinned {
+        st.digest_hash = newer_pin; // preserve the mid-flight manual pin
+    }
+}
+
 /// One project's full round step — the production sequencing (ADR-010 cluster 5):
 /// gate via [due_for_round], consume the dirty/boundary flags, stamp `last_pass_ms`
 /// (the next round is gated regardless of outcome), run exactly ONE reflect attempt
@@ -1119,61 +1264,128 @@ pub fn librarian_round_step<F>(
 where
     F: FnOnce(Option<&str>) -> (reflect::ReflectOutcome, Option<String>),
 {
+    let prev = librarian_round_begin(st, now_ms)?;
+    let (outcome, digest_hash) = run(prev.as_deref());
+    apply_round_outcome(st, &outcome.reason, digest_hash);
+    Some(outcome)
+}
+
+/// The "begin" half of a round, split out of [librarian_round_step] so the
+/// OFFLOADED worker path (LIB-DESIGN-01) can start a round, run the provider call on
+/// a helper thread, and fold the outcome later via [apply_round_outcome]. Decides
+/// whether a round is due; if so, CONSUMES the dirty/boundary flags and stamps
+/// `last_pass_ms` (the next round is gated regardless of outcome), returning the
+/// previous digest hash for the delta gate. Returns `None` when not due. Does NOT
+/// touch `in_flight` — the caller sets it after a Pending dispatch.
+pub fn librarian_round_begin(st: &mut LibrarianAuto, now_ms: i64) -> Option<Option<String>> {
     if !due_for_round(st.dirty, st.boundary, st.last_change_ms, st.last_pass_ms, now_ms, st.fail_streak) {
         return None;
     }
     st.dirty = false;
     st.boundary = false;
     st.last_pass_ms = now_ms; // gate the next round regardless of outcome
-    let prev = st.digest_hash.clone();
-    let (outcome, digest_hash) = run(prev.as_deref());
-    apply_round_outcome(st, &outcome.reason, digest_hash);
-    Some(outcome)
+    Some(st.digest_hash.clone())
 }
 
 /// One Librarian sweep (driven by the periodic Tick): for each project that changed
-/// since its last round and is past the round interval, run ONE delta-gated reflect.
-/// End-to-end safe: [reflect::reflect_auto] no-ops (Disabled) without a budget
-/// ceiling and skips the paid call ($0, Unchanged) when the digest is byte-identical
-/// to the last round. The network call briefly blocks this worker — acceptable for a
-/// rare, budgeted background action.
+/// since its last round and is past the round interval, dispatch ONE delta-gated
+/// reflect. End-to-end safe: [reflect::reflect_prepare] no-ops (Disabled) without a
+/// budget ceiling and skips the paid call ($0, Unchanged) when the digest is
+/// byte-identical to the last round.
+///
+/// LIB-DESIGN-01: the provider call is OFFLOADED to a helper thread rather than run
+/// inline. `reflect_prepare` does the fast, index-touching work on this worker thread
+/// (digest read + delta gate + durable budget reserve); when a call is warranted the
+/// resulting [reflect::ReflectPending] is moved to a short-lived thread that performs
+/// only the network round-trip and posts the result back as
+/// [BrainEvent::LibrarianDone]. The worker returns to the event loop immediately, so
+/// incremental indexing (`Fs`) is never stalled for the full provider-call duration.
+/// Every index WRITE still happens on this single worker thread (prepare here, finish
+/// on the `LibrarianDone` handler) — the single-writer invariant is preserved.
 fn run_librarian_rounds(
     app: &AppHandle,
     index: &SqliteIndex,
     state: &mut std::collections::HashMap<String, LibrarianAuto>,
+    tx: &mpsc::Sender<BrainEvent>,
 ) {
     let now_ms = now_epoch_ms();
     // Real current date (UTC) so date-dependent findings (stale_revalidate) are
     // visible to autonomous rounds, not only to manual clicks (ADR-010 cluster 5).
     let today = utc_date_ymd(now_ms);
     for (project_id, st) in state.iter_mut() {
-        let Some(outcome) = librarian_round_step(st, now_ms, |prev| {
-            reflect::reflect_auto(app, index, project_id, Some(&today), now_ms, prev)
-        }) else {
+        // A round already dispatched for this project is still running on a helper
+        // thread; skip until its LibrarianDone lands (no overlap, no double reserve).
+        if st.in_flight {
+            continue;
+        }
+        let Some(prev) = librarian_round_begin(st, now_ms) else {
             continue;
         };
-        match &outcome.reason {
-            reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
-                log::info!(
-                    "brain: auto-reflect '{project_id}' → {:?} ({} proposal(s), ${:.4})",
-                    outcome.reason,
-                    outcome.proposals.len(),
-                    outcome.spent_usd
-                );
+        match reflect::reflect_prepare(app, index, project_id, Some(&today), now_ms, prev.as_deref()) {
+            // No provider call needed — the outcome is already final (Unchanged /
+            // Disabled / NoKey / OverBudget / EmptyCorpus). Fold + log inline; this
+            // path never touched the network, so it stays on the worker thread.
+            reflect::ReflectDispatch::Ready(outcome, digest_hash) => {
+                apply_round_outcome(st, &outcome.reason, digest_hash);
+                persist_lib_pin(index, project_id, st, now_ms);
+                log_round_outcome(project_id, &outcome, st);
             }
-            // PAID failures — surface them (real money), with the retry stance.
-            reflect::ReflectReason::CallFailed(_) | reflect::ReflectReason::InvalidOutput => {
-                log::warn!(
-                    "brain: auto-reflect '{project_id}' paid round failed ({:?}, ${:.4}); {} consecutive failure(s), {}",
-                    outcome.reason,
-                    outcome.spent_usd,
-                    st.fail_streak,
-                    if st.dirty { "retrying with backoff" } else { "parked until new content changes" }
-                );
+            // A provider call is required — offload it. The worker keeps serving Fs.
+            reflect::ReflectDispatch::Pending(pending) => {
+                let tx = tx.clone();
+                let pid = project_id.clone();
+                match std::thread::Builder::new()
+                    .name("koden-brain-librarian".into())
+                    .spawn(move || {
+                        let (result, finish) = pending.call();
+                        // The worker owns the store; hand the raw result back to it
+                        // to reconcile + enqueue on the single writer thread.
+                        let _ = tx.send(BrainEvent::LibrarianDone { project: pid, finish, result });
+                    }) {
+                    Ok(_) => {
+                        st.in_flight = true;
+                        // Snapshot the pin at dispatch so LibrarianDone can detect a
+                        // mid-flight manual re-pin and not clobber it. [LIB-DESIGN-01 miss1]
+                        st.in_flight_from = prev.clone();
+                    }
+                    Err(e) => {
+                        // Could not spawn the helper: don't wedge the project in_flight.
+                        // Re-arm so a later tick retries; the reservation just placed is
+                        // folded by the boot sweep if this attempt never completes (it
+                        // still counts against the ceiling meanwhile, never under-charges).
+                        log::warn!("brain: librarian offload spawn failed ({e}); round deferred");
+                        st.dirty = true;
+                    }
+                }
             }
-            // $0 pre-flight skips (re-armed; recover once a budget/key is set).
-            other => log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}"),
         }
+    }
+}
+
+/// Log one autonomous round's outcome with the paid-retry stance — shared by the
+/// inline `Ready` path and the offloaded `LibrarianDone` path.
+fn log_round_outcome(project_id: &str, outcome: &reflect::ReflectOutcome, st: &LibrarianAuto) {
+    match &outcome.reason {
+        reflect::ReflectReason::Ok | reflect::ReflectReason::Unchanged => {
+            log::info!(
+                "brain: auto-reflect '{project_id}' → {:?} ({} proposal(s), ${:.4})",
+                outcome.reason,
+                outcome.proposals.len(),
+                outcome.spent_usd
+            );
+        }
+        // PAID failures — surface them (real money), with the retry stance.
+        reflect::ReflectReason::CallFailed(_) | reflect::ReflectReason::InvalidOutput => {
+            log::warn!(
+                "brain: auto-reflect '{project_id}' paid round failed ({:?}, ${:.4}); {} consecutive failure(s), {}",
+                outcome.reason,
+                outcome.spent_usd,
+                st.fail_streak,
+                if st.dirty { "retrying with backoff" } else { "parked until new content changes" }
+            );
+        }
+        // $0 pre-flight skips (re-armed; recover once a budget/key is set).
+        other => log::debug!("brain: auto-reflect '{project_id}' skipped: {other:?}"),
     }
 }
 
@@ -1377,6 +1589,78 @@ mod tests {
         apply_round_outcome(&mut st, &R::Ok, Some("h2".into()));
         assert_eq!(st.fail_streak, 0);
         assert_eq!(st.digest_hash.as_deref(), Some("h2"));
+    }
+
+    /// LIB-DESIGN-01 miss1: the offloaded LibrarianDone fold must NOT clobber a pin a
+    /// manual Reflect set while the round's provider call was in flight. `expected_pin`
+    /// = the pin snapshotted at dispatch; if `digest_hash` moved off it meanwhile, a
+    /// mid-flight manual round already paid+pinned a newer digest — keep it.
+    #[test]
+    fn fold_offloaded_outcome_cas_guards_mid_flight_manual_pin() {
+        use reflect::ReflectReason as R;
+
+        // No mid-flight re-pin (the common case): behaves exactly like apply_round_outcome.
+        // Dispatched with pin = None (never reflected); round reflected on hA.
+        let mut st = LibrarianAuto { digest_hash: None, ..Default::default() };
+        fold_offloaded_outcome(&mut st, None, &R::Ok, Some("hA".into()));
+        assert_eq!(st.digest_hash.as_deref(), Some("hA"), "no re-pin ⇒ this round's hash folds in");
+        assert_eq!(st.fail_streak, 0);
+
+        // Mid-flight manual re-pin: dispatched with pin = None, but a manual Reflect
+        // pinned hB before LibrarianDone landed. Folding this round's (older) hA must
+        // NOT clobber hB — otherwise the next auto round re-pays the already-paid hB.
+        let mut st = LibrarianAuto { digest_hash: Some("hB".into()), fail_streak: 3, ..Default::default() };
+        fold_offloaded_outcome(&mut st, None, &R::Ok, Some("hA".into()));
+        assert_eq!(st.digest_hash.as_deref(), Some("hB"), "manual pin hB preserved, NOT clobbered by hA");
+        assert_eq!(st.fail_streak, 0, "the paid round still succeeded ⇒ streak resets");
+
+        // Re-pin with a PAID-but-rejected outcome (InvalidOutput) likewise keeps hB
+        // and still counts the failure — only the pin write is guarded.
+        let mut st = LibrarianAuto { digest_hash: Some("hB".into()), ..Default::default() };
+        fold_offloaded_outcome(&mut st, None, &R::InvalidOutput, Some("hA".into()));
+        assert_eq!(st.digest_hash.as_deref(), Some("hB"), "InvalidOutput must not clobber the manual pin either");
+        assert_eq!(st.fail_streak, 1);
+
+        // CallFailed never writes the pin at all; the guard is a no-op on it.
+        let mut st = LibrarianAuto { digest_hash: Some("hB".into()), ..Default::default() };
+        fold_offloaded_outcome(&mut st, Some("hB".into()), &R::CallFailed("x".into()), None);
+        assert_eq!(st.digest_hash.as_deref(), Some("hB"));
+        assert_eq!(st.fail_streak, 1);
+    }
+
+    /// LIB-SPEND-01: the delta-gate pin must be durable. `lib_entry` hydrates a
+    /// fresh in-memory entry from the persisted store (so a restart doesn't re-pay a
+    /// byte-identical digest), and `persist_lib_pin` writes a settled pin through —
+    /// but never persists a still-`None` pin.
+    #[test]
+    fn lib_entry_hydrates_persisted_pin_and_persist_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("koden-libpin-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("index.sqlite");
+        let idx = SqliteIndex::open_with_recovery(&db).expect("open store");
+
+        // Fresh project: lib_entry hydrates to None (this project has never reflected).
+        let mut state: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
+        assert_eq!(lib_entry(&mut state, &idx, "p").digest_hash, None, "no persisted pin yet");
+
+        // A round settles on a digest; persist_lib_pin writes it through to the store.
+        state.get_mut("p").unwrap().digest_hash = Some("deadbeef".into());
+        persist_lib_pin(&idx, "p", state.get("p").unwrap(), 42);
+        assert_eq!(idx.librarian_pin("p").as_deref(), Some("deadbeef"), "pin persisted");
+
+        // Simulate a restart: drop the map; a new entry must hydrate from the store.
+        let mut restarted: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
+        assert_eq!(
+            lib_entry(&mut restarted, &idx, "p").digest_hash.as_deref(),
+            Some("deadbeef"),
+            "the pin survives the in-memory reset (the whole point)"
+        );
+
+        // A still-None pin (a project seen but not yet reflected) is never written.
+        persist_lib_pin(&idx, "q", &LibrarianAuto::default(), 43);
+        assert_eq!(idx.librarian_pin("q"), None, "a None pin is not persisted");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ADR-010 cluster 6: a worker panic must flip status to Degraded (via the

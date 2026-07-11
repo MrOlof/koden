@@ -5,7 +5,15 @@
 
 use std::path::PathBuf;
 
+use crate::modules::brain::reflect::{ReflectFinish, ReflectResponse};
 use crate::modules::brain::ProjectId;
+
+/// Reply channel for a `ResolveProposal`: the worker (the single writer) sends the
+/// apply/reject outcome back so the command can surface a SOFT failure — e.g. a
+/// missing target note on approve — to the caller as `Err(String)`, while the write
+/// itself stays on the writer thread (single-writer discipline). `None` = fire and
+/// forget (the worker just logs a failure).
+pub type ResolveReply = std::sync::mpsc::Sender<Result<(), String>>;
 
 /// Independent mirror of the pty `koden:agent-signal` JSON payload. Resolves
 /// blocker **B2** without touching `pty/agent_detect.rs`: the brain `app.listen`s
@@ -51,11 +59,14 @@ pub enum BrainEvent {
         now_date: Option<String>,
     },
     /// Resolve a proposal: `reject` persists its reject-signature + marks it
-    /// rejected; otherwise marks it applied.
+    /// rejected; otherwise APPLIES it (materializes the note change onto disk +
+    /// marks it applied). `reply` (if set) receives the outcome so the command can
+    /// surface a soft failure.
     ResolveProposal {
         project: ProjectId,
         signature: String,
         reject: bool,
+        reply: Option<ResolveReply>,
     },
     /// Run a budgeted LLM reflect pass (P4) — the only token-spending path.
     /// Manual-trigger only; `project = None` reflects every registered project.
@@ -84,5 +95,16 @@ pub enum BrainEvent {
     Curate {
         project: Option<ProjectId>,
         now_date: Option<String>,
+    },
+    /// A librarian round's provider call finished on a helper thread
+    /// (LIB-DESIGN-01): the worker completes the round (reconcile + validate +
+    /// enqueue) on the single writer thread. Offloading the call is what keeps the
+    /// worker free to serve `Fs` deltas while the model is thinking — the network
+    /// wait never stalls incremental indexing. `finish` carries the reservation +
+    /// config captured at prepare time; `result` is the raw provider outcome.
+    LibrarianDone {
+        project: ProjectId,
+        finish: ReflectFinish,
+        result: Result<ReflectResponse, String>,
     },
 }

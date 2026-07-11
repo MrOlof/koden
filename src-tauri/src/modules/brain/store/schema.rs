@@ -220,6 +220,23 @@ CREATE TABLE IF NOT EXISTS brain_librarian (
 );
 INSERT OR IGNORE INTO brain_librarian (id) VALUES (1);
 
+-- Librarian delta-gate pin, PER PROJECT (LIB-SPEND-01). `digest_hash` is the hash
+-- of the last digest a completed autonomous/manual round reflected on; the worker
+-- short-circuits reflect to Unchanged ($0) when the freshly built digest hashes to
+-- the pinned value (reflect/mod.rs `reflect_auto_with_client`). The live in-memory
+-- pin (`worker::LibrarianAuto.digest_hash`) lives in a HashMap that is rebuilt EMPTY
+-- on every worker boot, so without this durable copy the first post-restart round
+-- for a project re-pays a byte-identical digest. CANONICAL/preserved (spend-integrity
+-- state, not re-derivable) — ABSENT from the upgrade DROP batch, salvaged on a
+-- corrupt-cache rebuild. No seed row: populated at runtime, per project, on the first
+-- round. Additive via IF NOT EXISTS (like `brain_librarian`) so no SCHEMA_VERSION bump
+-- is needed — the idempotent DDL creates it on the next open of any existing store.
+CREATE TABLE IF NOT EXISTS brain_librarian_pin (
+    project_id  TEXT PRIMARY KEY,
+    digest_hash TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
 -- Semantic embedderId header (P5). CANONICAL/preserved singleton. Empty in v1 (no
 -- embedder compiled); set when the `semantic` feature is enabled so a later build
 -- can detect a model/dimension change and rebuild the vector index rather than

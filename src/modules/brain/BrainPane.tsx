@@ -180,23 +180,16 @@ export function BrainPane() {
     if (mode === "memory") void loadMemory();
   }, [mode, loadMemory]);
 
-  // Keep the spend meter live (it ticks up as a reflect/curate pass charges) while
-  // the Memory tab is open — the worker LLM call can outlast the post-action poll.
+  // Keep proposals/notes/spend live while the Memory tab is open — a paid reflect
+  // (or curate) pass can outlast the bounded post-action poll (pollMemory), which
+  // otherwise leaves a completed proposal sitting unseen until the user toggles
+  // tabs (D3). loadMemory already reconciles in-flight resolutions, so this is
+  // safe to call on a plain interval.
   useEffect(() => {
     if (mode !== "memory") return;
-    let alive = true;
-    const id = setInterval(() => {
-      brainBudgetStatus()
-        .then((bud) => {
-          if (alive) setBudget(bud);
-        })
-        .catch(() => {});
-    }, STATUS_POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, [mode]);
+    const id = setInterval(() => void loadMemory(), STATUS_POLL_MS);
+    return () => clearInterval(id);
+  }, [mode, loadMemory]);
 
   const copyPath = (path: string) => {
     void navigator.clipboard?.writeText(path);

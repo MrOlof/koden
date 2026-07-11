@@ -166,6 +166,10 @@ pub const SEARCH_LEG_LABELS: &[&str] = &["identity", "content"];
 
 pub struct SqliteIndex {
     conn: Connection,
+    /// Append-only canonical-tail backup sited next to the DB (ADR: the DB is the
+    /// source of truth; this is the backup of last resort, replayed only when a
+    /// header-destroyed store defeats the ATTACH salvage). See `store::journal`.
+    journal: super::journal::CanonicalJournal,
 }
 
 /// Boot busy-retry budget: transient SQLITE_BUSY/LOCKED at startup (another Koden
@@ -244,7 +248,8 @@ impl SqliteIndex {
         }
         let conn = Connection::open(path)?;
         super::migrate::migrate(&conn)?;
-        Ok(Self { conn })
+        let journal = super::journal::CanonicalJournal::open(path);
+        Ok(Self { conn, journal })
     }
 
     /// Open with the boot recovery ladder (ADR-006: the index is a REBUILDABLE
@@ -270,7 +275,14 @@ impl SqliteIndex {
         let mut busy_left = busy_retries;
         loop {
             let err = match Self::open(path) {
-                Ok(i) => return Ok(i),
+                Ok(i) => {
+                    // Healthy open: bound the journal from live state if it has grown
+                    // past the cap. Safe here (the DB holds the true canonical state);
+                    // NEVER in the Corrupt branch below, where the fresh DB is empty
+                    // and a rewrite would erase the backup before replay.
+                    i.journal.compact_if_large(&i.conn);
+                    return Ok(i);
+                }
                 Err(e) => e,
             };
             match classify_open_failure(&err) {
@@ -299,6 +311,12 @@ impl SqliteIndex {
                     // cache-level, and propagates (no rename loop).
                     let fresh = Self::open(path)?;
                     fresh.salvage_canonical(&aside);
+                    // Replay the sidecar journal (backup of last resort) ON TOP of
+                    // whatever the ATTACH salvage recovered: when the header is
+                    // destroyed so badly the salvage attaches nothing, this is the
+                    // only path that restores proposals / reject-sigs / budget spend
+                    // / pins. Idempotent, so it's harmless when salvage already won.
+                    fresh.replay_canonical_journal();
                     return Ok(fresh);
                 }
                 _ => return Err(err),
@@ -360,9 +378,27 @@ impl SqliteIndex {
         &self.conn
     }
 
+    /// Replay the canonical-tail sidecar journal into this store. Called by the
+    /// corrupt-cache rebuild path (and re-callable: idempotent via the in-DB
+    /// high-water mark).
+    pub(crate) fn replay_canonical_journal(&self) {
+        self.journal.replay(&self.conn);
+    }
+
+    /// Journal the current `brain_budget` singleton — the durable spend state. Called
+    /// after a reconcile that ran through `conn()` outside these methods (the reflect
+    /// / curate spend path), so a header-destroyed store can restore "already spent"
+    /// and the Librarian can't re-spend the ceiling. The ledger itself is intentionally
+    /// NOT journaled (see `journal::JOURNALED_TABLES`).
+    pub(crate) fn journal_budget(&self) {
+        self.journal.append_row(&self.conn, "brain_budget", "id=1", rusqlite::params![]);
+    }
+
     /// Set the reflect spend ceiling (USD; 0.0 disables). Writer-side (P4).
     pub fn set_budget_ceiling(&self, ceiling_usd: f64, now: i64) -> Result<(), String> {
-        crate::modules::brain::reflect::budget::set_ceiling(&self.conn, ceiling_usd, now)
+        crate::modules::brain::reflect::budget::set_ceiling(&self.conn, ceiling_usd, now)?;
+        self.journal_budget();
+        Ok(())
     }
 
     /// Current reflect budget as `(ceiling_usd, spent_total_usd)` (P4).
@@ -378,13 +414,43 @@ impl SqliteIndex {
         cfg: &crate::modules::brain::reflect::librarian::LibrarianConfig,
         now: i64,
     ) -> Result<(), String> {
-        crate::modules::brain::reflect::librarian::set(&self.conn, cfg, now)
+        crate::modules::brain::reflect::librarian::set(&self.conn, cfg, now)?;
+        self.journal.append_row(&self.conn, "brain_librarian", "id=1", rusqlite::params![]);
+        Ok(())
+    }
+
+    /// The persisted Librarian delta-gate pin for a project — the digest hash the
+    /// last completed round reflected on, or `None` if this project has never
+    /// completed a round. Read-through on the writer connection; the worker hydrates
+    /// its in-memory pin from this on first sight of a project each boot, so the
+    /// "Unchanged => $0" short-circuit survives a restart. [LIB-SPEND-01]
+    pub fn librarian_pin(&self, project_id: &str) -> Option<String> {
+        crate::modules::brain::reflect::librarian::pin(&self.conn, project_id)
+    }
+
+    /// Persist (upsert) the Librarian delta-gate pin for a project (writer-side).
+    /// Written after every round so a restart never re-pays a byte-identical digest.
+    pub fn set_librarian_pin(&self, project_id: &str, digest_hash: &str, now: i64) -> Result<(), String> {
+        crate::modules::brain::reflect::librarian::set_pin(&self.conn, project_id, digest_hash, now)?;
+        self.journal.append_row(
+            &self.conn,
+            "brain_librarian_pin",
+            "project_id=?1",
+            rusqlite::params![project_id],
+        );
+        Ok(())
     }
 
     /// Boot sweep: charge any reservation orphaned by a mid-call crash at its
     /// estimate, so a crashed reflect over-counts rather than leaking free spend (P4).
     pub fn sweep_orphaned_reservations(&self, now: i64) -> Result<usize, String> {
-        crate::modules::brain::reflect::budget::sweep_orphaned_reservations(&self.conn, now)
+        let swept = crate::modules::brain::reflect::budget::sweep_orphaned_reservations(&self.conn, now)?;
+        if swept > 0 {
+            // The sweep folded estimates into `spent_total_usd` — journal the new
+            // durable spend so a later rebuild restores it.
+            self.journal_budget();
+        }
+        Ok(swept)
     }
 
     /// Record a meaningful touch of a file for the V2 temporal re-rank ([DP-12]):
@@ -573,6 +639,12 @@ impl SqliteIndex {
             (project_id, id),
         )?;
         tx.commit()?;
+        // Journal the canonical delete (the `notes` row itself is DERIVED, not
+        // journaled). Keyed so replay reissues the same guarded DELETE.
+        self.journal.append_delete(
+            "proposals",
+            serde_json::json!({ "project_id": project_id, "target_id": id, "status": "pending" }),
+        );
         Ok(n > 0)
     }
 
@@ -658,6 +730,38 @@ impl SqliteIndex {
         Ok(n > 0)
     }
 
+    /// `(title, detail)` of the proposals the semantic near-dupe gate and the
+    /// "already proposed" digest section compare against: EVERY pending proposal for
+    /// the project (the live inbox), plus the most recent `resolved_lookback` RESOLVED
+    /// ones (applied|rejected — so a re-worded accepted fact or a declined one under a
+    /// fresh title is still caught, which the exact reject-signature misses). Reads the
+    /// writer connection (called mid-enqueue on the writer thread); best-effort — a
+    /// read error yields fewer/no comparisons, never a failed enqueue.
+    pub(crate) fn proposal_dedup_texts(
+        &self,
+        project_id: &str,
+        resolved_lookback: usize,
+    ) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT title, detail FROM proposals WHERE project_id=?1 AND status='pending' ORDER BY created_ms",
+        ) {
+            if let Ok(it) = stmt.query_map([project_id], row) {
+                out.extend(it.flatten());
+            }
+        }
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT title, detail FROM proposals WHERE project_id=?1 AND status IN ('applied','rejected') \
+             ORDER BY created_ms DESC LIMIT ?2",
+        ) {
+            if let Ok(it) = stmt.query_map(rusqlite::params![project_id, resolved_lookback as i64], row) {
+                out.extend(it.flatten());
+            }
+        }
+        out
+    }
+
     /// Queue a proposal (dedup by signature). Returns true if it was newly added.
     pub fn insert_proposal(
         &self,
@@ -674,6 +778,14 @@ impl SqliteIndex {
                 p.detail, p.source, p.status, created_ms
             ],
         )?;
+        if n > 0 {
+            self.journal.append_row(
+                &self.conn,
+                "proposals",
+                "project_id=?1 AND signature=?2",
+                rusqlite::params![project_id, p.signature],
+            );
+        }
         Ok(n > 0)
     }
 
@@ -712,7 +824,122 @@ impl SqliteIndex {
             }
         }
         tx.commit()?;
+        // Journal the new proposal state (status flip) + any reject-signature — after
+        // commit, so the backup only ever reflects durable state.
+        self.journal.append_row(
+            &self.conn,
+            "proposals",
+            "project_id=?1 AND signature=?2",
+            rusqlite::params![project_id, signature],
+        );
+        if reject {
+            if let Some(action) = ProposalAction::from_token(&action_s) {
+                let sig = reject_signature(action, target_id.as_deref(), &title);
+                self.journal.append_row(
+                    &self.conn,
+                    "reject_signatures",
+                    "project_id=?1 AND reject_sig=?2",
+                    rusqlite::params![project_id, sig],
+                );
+            }
+        }
         Ok(true)
+    }
+
+    /// APPLY an approved proposal (D2): materialize its change onto the project's
+    /// `.koden-memory/*.md` files, re-sync the notes table from disk, and flip the
+    /// proposal to `applied`. The human-gated WRITE half the Koden port dropped — the
+    /// Librarian only proposes; approval (this) is the exclusive writer.
+    ///
+    /// Ordering (files are file-canonical, the table + proposal row are journaled):
+    ///  1. read the pending proposal (missing / already-resolved → idempotent no-op),
+    ///  2. resolve the target note's path from the notes table (archive/update/
+    ///     supersede) — a missing target is a SOFT error that leaves the proposal
+    ///     pending (return `Err`, nothing written),
+    ///  3. materialize the file change(s) crash-safely (`memory::apply`),
+    ///  4. re-scan the memory folder so the notes table reflects the new/edited file
+    ///     (idempotent), then
+    ///  5. mark the proposal `applied` + journal the status flip.
+    ///
+    /// Reject is unchanged — it stays on [`Self::resolve_proposal`].
+    pub fn apply_proposal(
+        &self,
+        project_id: &str,
+        root: &Path,
+        signature: &str,
+        now_date: &str,
+    ) -> Result<(), String> {
+        use crate::modules::brain::memory::{self, apply};
+
+        let row: Option<(String, Option<String>, String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT action, target_id, title, detail, status FROM proposals WHERE project_id=?1 AND signature=?2",
+                (project_id, signature),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .ok();
+        let Some((action_s, target_id, title, detail, status)) = row else {
+            return Ok(()); // no such proposal — nothing to apply (idempotent)
+        };
+        if status != "pending" {
+            return Ok(()); // already applied/rejected — idempotent no-op
+        }
+        let action = ProposalAction::from_token(&action_s)
+            .ok_or_else(|| format!("proposal has unknown action '{action_s}'"))?;
+
+        // Resolve the target note's absolute path (archive/update/supersede). A target
+        // id with no matching notes-table row is a soft failure — the note was renamed
+        // or deleted since the proposal was queued; leave the proposal pending.
+        let target_path = match action {
+            ProposalAction::Create => None,
+            ProposalAction::Archive | ProposalAction::Update | ProposalAction::Supersede => {
+                let tid = target_id
+                    .as_deref()
+                    .ok_or_else(|| format!("{} proposal has no target note", action.as_str()))?;
+                let rel: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT path FROM notes WHERE project_id=?1 AND id=?2",
+                        (project_id, tid),
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let rel = rel.ok_or_else(|| format!("target note '{tid}' not found"))?;
+                Some(root.join(rel))
+            }
+        };
+
+        // Materialize the file change(s). A soft error (missing/unreadable target)
+        // returns here BEFORE any DB mutation, so the proposal stays pending.
+        apply::materialize(
+            &root.join(memory::MEMORY_DIR),
+            action,
+            target_path.as_deref(),
+            target_id.as_deref(),
+            &title,
+            &detail,
+            now_date,
+        )?;
+
+        // Re-sync the structured notes table from disk (idempotent) so the new/edited
+        // note is queryable and the UI's notes polling shows it.
+        memory::scan_project_memory(self, project_id, root);
+
+        // Mark applied + journal the status flip (mirrors resolve_proposal's tail).
+        self.conn
+            .execute(
+                "UPDATE proposals SET status='applied' WHERE project_id=?1 AND signature=?2",
+                rusqlite::params![project_id, signature],
+            )
+            .map_err(|e| format!("mark proposal applied: {e}"))?;
+        self.journal.append_row(
+            &self.conn,
+            "proposals",
+            "project_id=?1 AND signature=?2",
+            rusqlite::params![project_id, signature],
+        );
+        Ok(())
     }
 
     /// Flush the WAL (called on the idle tick).
@@ -867,7 +1094,17 @@ impl SqliteIndex {
         tx.execute("DELETE FROM code_nodes WHERE project_id=?1", [project_id])?;
         tx.execute("DELETE FROM code_imports WHERE project_id=?1", [project_id])?;
         tx.execute("DELETE FROM code_edges WHERE project_id=?1", [project_id])?;
+        // Also drop the Librarian delta-gate pin, else a re-added project with an
+        // identical corpus short-circuits to Unchanged/$0 and never regenerates the
+        // proposals this removal just pruned (and the orphan row leaks). [LIB-SPEND-01]
+        tx.execute("DELETE FROM brain_librarian_pin WHERE project_id=?1", [project_id])?;
         tx.commit()?;
+        // Journal the canonical deletes so a rebuild doesn't resurrect a removed
+        // project's proposals / reject history / pin. Derived tables are not journaled.
+        for t in ["proposals", "reject_signatures", "brain_librarian_pin"] {
+            self.journal
+                .append_delete(t, serde_json::json!({ "project_id": project_id }));
+        }
         Ok(())
     }
 
@@ -3505,5 +3742,239 @@ mod tests {
             !dmax.rows.iter().any(|r| r.path == "src/f21.ts"),
             "hop 21 must be cut by the depth ceiling"
         );
+    }
+
+    // ---- Canonical-tail sidecar journal (store::journal) ----------------------
+
+    use crate::modules::brain::memory::proposal::proposal_signature;
+    use crate::modules::brain::reflect::{budget, ReflectReason};
+
+    fn journal_file(db: &std::path::Path) -> std::path::PathBuf {
+        db.with_file_name("index.canonical.jsonl")
+    }
+
+    fn sample_proposal() -> MemoryProposal {
+        MemoryProposal {
+            project: "p".into(),
+            signature: proposal_signature(ProposalAction::Archive, Some("n1"), "Stale note"),
+            action: ProposalAction::Archive,
+            target_id: Some("n1".into()),
+            title: "Stale note".into(),
+            detail: "the body".into(),
+            source: "curate".into(),
+            status: "pending".into(),
+        }
+    }
+
+    /// Destroy the SQLite header (first 100 bytes) so the store classifies as
+    /// NotADatabase → the rename-aside recovery branch fires and the ATTACH salvage
+    /// can read nothing (the exact gap the sidecar journal closes).
+    fn destroy_header(db: &std::path::Path) {
+        use std::io::Write as _;
+        // Drop any checkpointed WAL/SHM so recovery reads only the corrupt main file.
+        for suffix in ["-wal", "-shm"] {
+            let name = format!("{}{suffix}", db.file_name().unwrap().to_string_lossy());
+            let _ = std::fs::remove_file(db.with_file_name(name));
+        }
+        let mut f = std::fs::OpenOptions::new().write(true).open(db).unwrap();
+        f.write_all(&[0xFFu8; 100]).unwrap();
+        f.flush().unwrap();
+    }
+
+    /// (a) Every DB-only-canonical write appends exactly one journal line.
+    #[test]
+    fn canonical_writes_are_journaled() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).expect("open");
+        idx.set_budget_ceiling(1.0, 1).unwrap();
+        idx.insert_proposal("p", &sample_proposal(), 1).unwrap();
+        idx.set_librarian_pin("p", "digest-1", 1).unwrap();
+
+        let contents = std::fs::read_to_string(journal_file(&path)).expect("journal written");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3, "one line per canonical write: {contents}");
+        // Each line is valid JSON with a monotonic seq and the right table.
+        let seqs: Vec<u64> = lines
+            .iter()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3], "monotonic seq");
+        assert!(contents.contains("\"table\":\"brain_budget\""));
+        assert!(contents.contains("\"table\":\"proposals\""));
+        assert!(contents.contains("\"table\":\"brain_librarian_pin\""));
+
+        // An index_file (DERIVED) write must NOT be journaled.
+        idx.index_file("p", "a.rs", "fn a() {}", "h", 9).unwrap();
+        let after = std::fs::read_to_string(journal_file(&path)).unwrap();
+        assert_eq!(after.lines().count(), 3, "derived writes are not journaled");
+    }
+
+    /// (b) A header-destroyed DB → rename-aside → replay restores proposals +
+    /// reject-sigs + budget spend + pins, and the Librarian cannot re-spend.
+    #[test]
+    fn replay_restores_canonical_state_after_header_destruction() {
+        let (_dir, path) = temp_db();
+        let reject_sig = reject_signature(ProposalAction::Archive, Some("n1"), "Stale note");
+        let sig = proposal_signature(ProposalAction::Archive, Some("n1"), "Stale note");
+        {
+            let idx = SqliteIndex::open(&path).expect("open");
+            idx.set_budget_ceiling(0.05, 1).unwrap();
+            // Spend to the ceiling through the real reserve→reconcile path, then
+            // journal as the reflect reconcile site does.
+            let rid = budget::check_and_reserve(idx.conn(), "m", 0.05, 2).unwrap();
+            budget::reconcile(idx.conn(), rid, 0.05, 3).unwrap();
+            idx.journal_budget();
+            // A proposal, then rejected → reject-signature.
+            idx.insert_proposal("p", &sample_proposal(), 1).unwrap();
+            idx.resolve_proposal("p", &sig, true).unwrap();
+            idx.set_librarian_pin("p", "digest-xyz", 4).unwrap();
+            idx.checkpoint();
+        } // dropped → WAL flushed
+
+        destroy_header(&path);
+        let idx = SqliteIndex::open_with_recovery(&path).expect("recovery open");
+
+        // Budget spend restored → the Librarian CANNOT spend the ceiling again.
+        let (ceiling, spent) = idx.budget_state();
+        assert_eq!(ceiling, 0.05, "ceiling restored");
+        assert!((spent - 0.05).abs() < 1e-9, "spent restored: {spent}");
+        let r = budget::check_and_reserve(idx.conn(), "m", 0.01, 5);
+        assert!(matches!(r, Err(ReflectReason::OverBudget)), "restored ceiling cannot be re-spent");
+
+        // Proposal (rejected) + reject-signature + pin restored.
+        assert!(idx.proposal_exists("p", &sig).unwrap(), "proposal restored");
+        assert!(idx.is_rejected("p", &reject_sig).unwrap(), "reject history restored");
+        assert_eq!(idx.librarian_pin("p"), Some("digest-xyz".to_string()), "pin restored");
+
+        // The corrupt original was kept aside, never deleted.
+        let aside = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .count();
+        assert_eq!(aside, 1, "corrupt store moved aside");
+    }
+
+    /// (c) A healthy open NEVER replays the journal — replay is scoped to the
+    /// corrupt-cache rebuild branch only.
+    #[test]
+    fn healthy_open_never_replays() {
+        let (_dir, path) = temp_db();
+        {
+            let idx = SqliteIndex::open(&path).expect("open");
+            idx.set_librarian_pin("p", "real", 1).unwrap();
+        }
+        // Inject a PHANTOM line for a project the DB never had. A replay would apply
+        // it; a healthy open must not.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(journal_file(&path)).unwrap();
+            writeln!(
+                f,
+                "{{\"seq\":999,\"table\":\"brain_librarian_pin\",\"op\":\"upsert\",\"data\":{{\"project_id\":\"ghost\",\"digest_hash\":\"phantom\",\"updated_at\":0}},\"ts\":0}}"
+            )
+            .unwrap();
+        }
+        let idx = SqliteIndex::open_with_recovery(&path).expect("healthy open");
+        assert_eq!(idx.librarian_pin("ghost"), None, "healthy open must not replay the journal");
+        assert_eq!(idx.librarian_pin("p"), Some("real".to_string()), "real row present");
+    }
+
+    /// (d) A truncated (partial) last line is skipped; the good lines still replay.
+    #[test]
+    fn replay_tolerates_a_truncated_last_line() {
+        let (_dir, path) = temp_db();
+        {
+            let idx = SqliteIndex::open(&path).expect("open");
+            idx.set_librarian_pin("p", "good-digest", 1).unwrap();
+            idx.checkpoint();
+        }
+        // Append a truncated JSON fragment (a crash mid-append).
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(journal_file(&path)).unwrap();
+            write!(f, "{{\"seq\":2,\"table\":\"brain_librarian_pin\",\"op\":\"ups").unwrap();
+        }
+        destroy_header(&path);
+        let idx = SqliteIndex::open_with_recovery(&path).expect("recovery open");
+        assert_eq!(
+            idx.librarian_pin("p"),
+            Some("good-digest".to_string()),
+            "the good line replayed despite the truncated tail"
+        );
+    }
+
+    /// (e) Replay is idempotent — running it a second time is a no-op (the in-DB
+    /// high-water mark prevents any double-apply), same end state.
+    #[test]
+    fn replay_twice_is_idempotent() {
+        let (_dir, path) = temp_db();
+        let sig = proposal_signature(ProposalAction::Archive, Some("n1"), "Stale note");
+        {
+            let idx = SqliteIndex::open(&path).expect("open");
+            idx.set_budget_ceiling(0.02, 1).unwrap();
+            let rid = budget::check_and_reserve(idx.conn(), "m", 0.02, 2).unwrap();
+            budget::reconcile(idx.conn(), rid, 0.02, 3).unwrap();
+            idx.journal_budget();
+            idx.insert_proposal("p", &sample_proposal(), 1).unwrap();
+            idx.checkpoint();
+        }
+        destroy_header(&path);
+        // First replay happens inside recovery.
+        let idx = SqliteIndex::open_with_recovery(&path).expect("recovery open");
+        let snapshot = |idx: &SqliteIndex| {
+            let props: i64 = idx
+                .conn
+                .query_row("SELECT COUNT(*) FROM proposals", [], |r| r.get(0))
+                .unwrap();
+            (idx.budget_state(), props, idx.librarian_pin("p"))
+        };
+        let before = snapshot(&idx);
+        // Second replay: must apply nothing and leave state byte-identical.
+        idx.replay_canonical_journal();
+        let after = snapshot(&idx);
+        assert_eq!(before, after, "second replay changed state");
+        // Proposal is present exactly once (INSERT OR REPLACE by PK, gated by hw).
+        assert!(idx.proposal_exists("p", &sig).unwrap());
+        assert_eq!(after.1, 1, "no duplicate proposal row");
+    }
+
+    /// Compaction ceiling: rewriting the journal from live DB state preserves the
+    /// canonical tail (proven by a post-compaction header-destroy + replay), and the
+    /// rewritten log is bounded to one line per live canonical row.
+    #[test]
+    fn compaction_rewrites_from_live_state_and_still_replays() {
+        let (_dir, path) = temp_db();
+        let sig = proposal_signature(ProposalAction::Archive, Some("n1"), "Stale note");
+        {
+            let idx = SqliteIndex::open(&path).expect("open");
+            idx.set_budget_ceiling(0.05, 1).unwrap();
+            let rid = budget::check_and_reserve(idx.conn(), "m", 0.05, 2).unwrap();
+            budget::reconcile(idx.conn(), rid, 0.05, 3).unwrap();
+            idx.journal_budget();
+            idx.insert_proposal("p", &sample_proposal(), 1).unwrap();
+            idx.set_librarian_pin("p", "digest-c", 4).unwrap();
+            // Many redundant writes bloat the log (5 → many lines)…
+            for i in 0..20 {
+                idx.set_librarian_pin("p", &format!("d{i}"), 5 + i).unwrap();
+            }
+            let before = std::fs::read_to_string(journal_file(&path)).unwrap();
+            assert!(before.lines().count() > 6, "log accumulated redundant lines");
+
+            // …compaction folds them to one line per LIVE canonical row.
+            idx.journal.compact_now_for_test(&idx.conn);
+            let after = std::fs::read_to_string(journal_file(&path)).unwrap();
+            // brain_budget(1) + brain_librarian(seed,1) + brain_librarian_pin(1) +
+            // proposals(1) + brain_semantic_meta(seed,1) = 5 live rows; reject_signatures empty.
+            assert_eq!(after.lines().count(), 5, "compacted to live rows: {after}");
+            idx.checkpoint();
+        }
+        destroy_header(&path);
+        let idx = SqliteIndex::open_with_recovery(&path).expect("recovery open");
+        // The compacted journal still restores the latest canonical state.
+        let (_c, spent) = idx.budget_state();
+        assert!((spent - 0.05).abs() < 1e-9, "spend survived compaction+replay");
+        assert!(idx.proposal_exists("p", &sig).unwrap(), "proposal survived");
+        assert_eq!(idx.librarian_pin("p"), Some("d19".to_string()), "latest pin survived");
     }
 }

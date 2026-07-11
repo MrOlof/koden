@@ -9,6 +9,7 @@
 //! -null fields to `None`), matching Conductr's Zod-acceptance parity
 //! (EXECUTION_PLAN §0.3). [DP-10]
 
+pub mod apply;
 pub mod doctor;
 pub mod proposal;
 
@@ -129,7 +130,9 @@ pub fn parse(raw: &str, fallback_id: &str) -> MemoryNote {
 
 /// Split off a leading `---`-delimited YAML frontmatter block, returning
 /// `(Some(yaml), body)` or `(None, raw)` when there is no frontmatter.
-fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
+/// `pub(crate)` so the apply path (`memory::apply`) can do a targeted frontmatter
+/// edit through the SAME parser the scan uses — one splitter, no drift.
+pub(crate) fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw); // strip BOM
     let after_open = match raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n")) {
         Some(r) => r,

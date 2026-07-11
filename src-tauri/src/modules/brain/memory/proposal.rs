@@ -62,6 +62,40 @@ fn normalize_title(t: &str) -> String {
     t.trim().to_lowercase()
 }
 
+/// Token-set Jaccard threshold for the SEMANTIC near-dupe gate at enqueue (distinct
+/// from the exact `proposal_signature` PK dedup and the `reject_signature` decline
+/// memory — both of which miss re-wordings). Chosen at 0.5 by tuning on the live
+/// gauntlet's own examples: run through the whole+camel+stem tokenizer over
+/// title+detail, two PARAPHRASES of one fact share ~half their content tokens (e.g.
+/// "Stripe webhook verifies signature before parsing" vs "Webhook signature check
+/// precedes body parsing" score ≈0.58), while two genuinely DISTINCT facts share few
+/// (≈0.0–0.2). 0.5 sits in that gap: high enough not to merge distinct facts, low
+/// enough to collapse the re-wordings the title-signature dedup let through. See the
+/// two-directional tests below. (Deliberately conservative — a missed dupe is a noisy
+/// card; a false merge silently drops a real fact, the worse error.)
+pub const NEAR_DUPE_THRESHOLD: f64 = 0.5;
+
+/// The deduped token set a proposal is compared on: its title + detail as one stream.
+/// Callers pass the model's RAW detail (not the reviewer-facing decorated form) so the
+/// identical "scope/confidence" boilerplate never inflates similarity between two
+/// otherwise-distinct proposals — see `reflect::proposal::undecorated_detail`.
+pub fn proposal_dedup_set(title: &str, detail: &str) -> std::collections::HashSet<String> {
+    crate::modules::brain::tokenize::token_set(&format!("{title} {detail}"))
+}
+
+/// True when `candidate` is a semantic near-duplicate of ANY set in `existing`
+/// (token-set Jaccard ≥ `threshold`). Deterministic, no I/O — the pure core of the
+/// enqueue-time gate, unit-tested in both directions.
+pub fn is_near_duplicate(
+    candidate: &std::collections::HashSet<String>,
+    existing: &[std::collections::HashSet<String>],
+    threshold: f64,
+) -> bool {
+    existing
+        .iter()
+        .any(|e| crate::modules::brain::tokenize::jaccard(candidate, e) >= threshold)
+}
+
 /// Persisted reject key — djb2 over `scope|action|normalized-title` (Conductr
 /// `rejectSignature`). `scope` = the target note id (or "project").
 pub fn reject_signature(action: ProposalAction, target_id: Option<&str>, title: &str) -> String {
@@ -103,6 +137,40 @@ mod tests {
         assert_eq!(a, b, "trim + lowercase normalize");
         let d = reject_signature(ProposalAction::Update, Some("n2"), "fix anchor");
         assert_ne!(a, d, "scope changes the signature");
+    }
+
+    #[test]
+    fn near_dupe_gate_collides_paraphrases_but_not_distinct_facts() {
+        // POSITIVE: two re-wordings of ONE fact (the exact class the title-signature
+        // dedup let through on the live gauntlet) must collide.
+        let a = proposal_dedup_set(
+            "Stripe webhook verifies signature before parsing",
+            "The Stripe webhook handler verifies the request signature before parsing the payload body.",
+        );
+        let b = proposal_dedup_set(
+            "Webhook signature check precedes body parsing",
+            "The webhook signature check precedes parsing of the request payload body in the handler.",
+        );
+        assert!(
+            is_near_duplicate(&b, &[a.clone()], NEAR_DUPE_THRESHOLD),
+            "paraphrase must be caught as a near-duplicate"
+        );
+
+        // NEGATIVE: a genuinely different fact must NOT be merged into either.
+        let c = proposal_dedup_set(
+            "Database migrations run automatically on startup",
+            "Prisma schema migrations are applied during application boot via the migrate deploy command.",
+        );
+        assert!(
+            !is_near_duplicate(&c, &[a, b], NEAR_DUPE_THRESHOLD),
+            "a distinct fact must survive the gate"
+        );
+    }
+
+    #[test]
+    fn near_dupe_gate_empty_existing_never_collides() {
+        let cand = proposal_dedup_set("anything", "at all");
+        assert!(!is_near_duplicate(&cand, &[], NEAR_DUPE_THRESHOLD), "nothing to collide with");
     }
 
     #[test]

@@ -68,6 +68,34 @@ pub fn set(conn: &Connection, cfg: &LibrarianConfig, now: i64) -> Result<(), Str
     .map_err(|e| e.to_string())
 }
 
+/// Read the persisted delta-gate pin (the digest hash of the last round a project
+/// reflected on) — the durable half of `worker::LibrarianAuto.digest_hash`. `None`
+/// when the project has no pinned round yet. Fails soft (a pre-table DB or read race
+/// yields `None`, so the delta gate simply runs a round rather than erroring), and an
+/// empty stored hash is treated as absent. [LIB-SPEND-01]
+pub fn pin(conn: &Connection, project_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT digest_hash FROM brain_librarian_pin WHERE project_id=?1",
+        [project_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|h| !h.is_empty())
+}
+
+/// Persist (upsert) the delta-gate pin for a project. Written after every round so
+/// the "Unchanged => $0" short-circuit survives a worker restart — the in-memory pin
+/// lives in a HashMap rebuilt empty on each boot (worker.rs:232). [LIB-SPEND-01]
+pub fn set_pin(conn: &Connection, project_id: &str, digest_hash: &str, now: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO brain_librarian_pin(project_id, digest_hash, updated_at) VALUES(?1,?2,?3)
+         ON CONFLICT(project_id) DO UPDATE SET digest_hash=excluded.digest_hash, updated_at=excluded.updated_at",
+        rusqlite::params![project_id, digest_hash, now],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// The `koden-ai` keyring account for a provider (matches the frontend
 /// `ai/config.ts` `keyringAccount`). Empty for keyless local providers.
 pub fn keyring_account_for(provider: &str) -> &'static str {

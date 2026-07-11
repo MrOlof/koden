@@ -21,7 +21,9 @@ use tauri::AppHandle;
 
 use crate::modules::brain::freshness::hash;
 use crate::modules::brain::memory::doctor;
-use crate::modules::brain::memory::proposal::reject_signature;
+use crate::modules::brain::memory::proposal::{
+    is_near_duplicate, proposal_dedup_set, reject_signature, ProposalAction, NEAR_DUPE_THRESHOLD,
+};
 use crate::modules::brain::store::{self, SqliteIndex};
 
 /// Keyring location of the daemon's Anthropic key (mirrors the frontend
@@ -34,6 +36,14 @@ pub const KEYRING_ACCOUNT: &str = "anthropic-api-key";
 /// the offline sandbox uses a fake client so the id only matters for the real smoke.
 pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
 const MAX_OUTPUT_TOKENS: u32 = 2048;
+/// How many recently-RESOLVED (applied|rejected) proposals feed the near-dupe gate
+/// and the "already proposed" digest section, on top of ALL pending. Bounds both the
+/// comparison cost and the prompt size; 50 covers many reflect rounds of history
+/// (canonical writes are low-frequency) without unbounded growth.
+const RESOLVED_DEDUP_LOOKBACK: usize = 50;
+/// Cap on titles listed in the "already proposed" digest section, so a large inbox
+/// can't blow up the user message (and the token estimate). Pending are listed first.
+const ALREADY_PROPOSED_MAX: usize = 40;
 /// Conservative token estimate for the pre-flight RESERVE: chars/3 over-counts vs
 /// the ~chars/4 rule, so the ceiling errs toward blocking early / over-charging a
 /// crash, never under-reserving (EXECUTION_PLAN appendix "conservative divisor").
@@ -120,7 +130,7 @@ impl ReflectConfig {
 /// Build the [ReflectClient] for the configured provider: the native Anthropic
 /// client, or the OpenAI-compatible client (with the resolved base URL). Shared by
 /// the reflect AND curation call sites so they stay in lockstep.
-pub(crate) fn build_client(cfg: &ReflectConfig, key: Option<String>) -> Box<dyn ReflectClient> {
+pub(crate) fn build_client(cfg: &ReflectConfig, key: Option<String>) -> Box<dyn ReflectClient + Send> {
     if cfg.provider == "anthropic" {
         Box::new(llm::AnthropicClient::new(key.unwrap_or_default()))
     } else {
@@ -161,7 +171,7 @@ pub(crate) fn pre_flight(ceiling_usd: f64, key_present: bool) -> Option<ReflectR
 }
 
 /// One model response: the raw JSON text + reported token usage (for reconcile).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReflectResponse {
     pub json_text: String,
     pub input_tokens: u64,
@@ -193,9 +203,13 @@ pub fn reflect_with_client(
     let system = schema::system_prompt();
     // The corpus digest (notes + structural findings), already secret-redacted —
     // see build_digest. EmptyCorpus when the project has no notes to reflect on.
-    let Some(user) = build_digest(index, project_id, now_date) else {
+    let Some(corpus) = build_digest(index, project_id, now_date) else {
         return ReflectOutcome::noop(ReflectReason::EmptyCorpus);
     };
+    // What we SEND additionally carries the "already proposed" advisory. It is NOT
+    // part of the delta-gate hash (that is `build_digest` alone) — see
+    // append_already_proposed — so enqueuing proposals can't self-re-fire a round.
+    let user = append_already_proposed(index, project_id, corpus);
     let est = estimate_cost(cfg, &system, &user);
 
     // Pre-flight reserve — the durable, atomic ceiling gate (no call if it fails).
@@ -204,15 +218,42 @@ pub fn reflect_with_client(
         Err(reason) => return ReflectOutcome::noop(reason),
     };
 
-    // The one network call. On an error the provider DEMONSTRABLY did not bill
-    // (a 4xx rejection), release the reservation at $0; on anything ambiguous
-    // (network cut, timeout, 5xx) charge the estimate — a partial/billed call may
-    // have happened (charge on uncertainty, §4.1.11).
-    let resp = match client.complete(&cfg.model, &system, &user, cfg.max_output_tokens) {
+    // The one network call, then the shared reconcile → validate → enqueue tail.
+    let result = client.complete(&cfg.model, &system, &user, cfg.max_output_tokens);
+    finish_response(index, cfg, project_id, rid, est, result, now_ms, true)
+}
+
+/// The reconcile → validate → enqueue tail shared by the synchronous
+/// [reflect_with_client] and the offloaded [reflect_finish]. Charges the ledger
+/// from the provider result (or the failure classification), validates the JSON,
+/// and enqueues proposals. ALL of this runs on the single writer thread — the
+/// offload only moves the network call ([ReflectPending::call]) off-thread, never
+/// any index access.
+///
+/// `enqueue=false` is the reconcile-only path for a project UNREGISTERED mid-flight
+/// (RemoveProject landed while the call was running): the reservation is still
+/// reconciled so the ceiling is never stranded, but proposals are NOT written — they
+/// would be orphan rows for a project whose state was just pruned. [LIB-DESIGN-01 miss2]
+#[allow(clippy::too_many_arguments)]
+fn finish_response(
+    index: &SqliteIndex,
+    cfg: &ReflectConfig,
+    project_id: &str,
+    reservation_id: i64,
+    estimate: f64,
+    result: Result<ReflectResponse, String>,
+    now_ms: i64,
+    enqueue: bool,
+) -> ReflectOutcome {
+    // On an error the provider DEMONSTRABLY did not bill (a 4xx rejection), release
+    // the reservation at $0; on anything ambiguous (network cut, timeout, 5xx) charge
+    // the estimate — a partial/billed call may have happened (charge on uncertainty,
+    // §4.1.11).
+    let resp = match result {
         Ok(r) => r,
         Err(e) => {
-            let charge = charge_for_failed_call(est, &e);
-            reconcile_or_log(index, rid, charge, now_ms);
+            let charge = charge_for_failed_call(estimate, &e);
+            reconcile_or_log(index, reservation_id, charge, now_ms);
             return ReflectOutcome { proposals: Vec::new(), spent_usd: charge, reason: ReflectReason::CallFailed(e) };
         }
     };
@@ -221,36 +262,97 @@ pub fn reflect_with_client(
     // deserializes to 0/0 tokens, and Anthropic still bills the input. Floor an
     // implausible 0/0 to the conservative estimate so a success never under-charges.
     let actual = actual_cost(cfg, resp.input_tokens, resp.output_tokens);
-    let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { est } else { actual };
-    reconcile_or_log(index, rid, charge, now_ms);
+    let charge = if resp.input_tokens == 0 && resp.output_tokens == 0 { estimate } else { actual };
+    reconcile_or_log(index, reservation_id, charge, now_ms);
 
     let items = match schema::parse_and_validate(&resp.json_text) {
         Ok(v) => v,
         Err(_) => return ReflectOutcome { proposals: Vec::new(), spent_usd: charge, reason: ReflectReason::InvalidOutput },
     };
 
-    // Map → enqueue into the SAME P1 queue (dedup by signature; skip rejected).
-    // parse_and_validate already hard-rejects > MAX_PROPOSALS; the take is a
-    // defensive belt against a future config raising the cap above the parse limit.
+    // Map → enqueue into the SAME P1 queue. THREE dedup layers, cheapest first:
+    //  1. reject-signature — a previously DECLINED item (exact djb2 on title) never
+    //     resurfaces (unchanged).
+    //  2. semantic near-dupe gate — the title-signature PK missed re-wordings, so a
+    //     token-set Jaccard over title+detail suppresses paraphrases of anything
+    //     already pending, recently resolved, OR enqueued earlier in THIS response
+    //     (3 re-wordings in one reply collapse to 1). Suppressions are counted, not
+    //     enqueued — no journal interaction, no signature written.
+    //  3. insert_proposal's exact-signature PK — the final belt.
+    // parse_and_validate already hard-rejects > MAX_PROPOSALS; the take is a defensive
+    // belt. Skipped entirely on the reconcile-only path (project unregistered).
     let mut enqueued = Vec::new();
-    for item in items.iter().take(cfg.max_proposals) {
-        let p = proposal::to_proposal(project_id, item);
-        let rej = reject_signature(p.action, p.target_id.as_deref(), &p.title);
-        if index.is_rejected(project_id, &rej).unwrap_or(false) {
-            continue; // declined before — don't resurrect it
+    let mut suppressed = 0usize;
+    if enqueue {
+        let mut seen: Vec<std::collections::HashSet<String>> = index
+            .proposal_dedup_texts(project_id, RESOLVED_DEDUP_LOOKBACK)
+            .iter()
+            .map(|(t, d)| proposal_dedup_set(t, proposal::undecorated_detail(d)))
+            .collect();
+        // The set of real note ids for this project, for the D2 actionability gate below.
+        let note_ids: std::collections::HashSet<String> =
+            index.existing_note_ids(project_id).unwrap_or_default().into_iter().collect();
+        for item in items.iter().take(cfg.max_proposals) {
+            let p = proposal::to_proposal(project_id, item);
+            // D2 actionability gate: Archive/Update (reflect's stale/conflict) apply
+            // against a target note. A proposal whose target_id is missing or names no
+            // known note would strand as a reject-only card (Approve → "no target note")
+            // — drop it instead. Create/Supersede carry no target and are unaffected.
+            if matches!(p.action, ProposalAction::Archive | ProposalAction::Update)
+                && p.target_id.as_deref().is_none_or(|t| !note_ids.contains(t))
+            {
+                log::info!(
+                    "brain: reflect dropped an unactionable {} proposal '{}' (target {:?} is not a known note; project {project_id})",
+                    p.action.as_str(),
+                    p.title,
+                    p.target_id
+                );
+                continue;
+            }
+            let rej = reject_signature(p.action, p.target_id.as_deref(), &p.title);
+            if index.is_rejected(project_id, &rej).unwrap_or(false) {
+                continue; // declined before — don't resurrect it
+            }
+            // Compare on the model's RAW rationale (undecorated) so the "scope ·
+            // confidence" boilerplate shared by every reflect proposal never inflates
+            // similarity between two distinct facts.
+            let cand = proposal_dedup_set(&p.title, proposal::undecorated_detail(&p.detail));
+            if is_near_duplicate(&cand, &seen, NEAR_DUPE_THRESHOLD) {
+                log::debug!(
+                    "brain: reflect suppressed a near-duplicate proposal '{}' (project {project_id})",
+                    p.title
+                );
+                suppressed += 1;
+                continue;
+            }
+            if index.insert_proposal(project_id, &p, now_ms).unwrap_or(false) {
+                seen.push(cand);
+                enqueued.push(p);
+            }
         }
-        if index.insert_proposal(project_id, &p, now_ms).unwrap_or(false) {
-            enqueued.push(p);
+        if suppressed > 0 {
+            // Redundancy signal for the live gauntlet — surfaced via the log (NOT a
+            // ReflectOutcome field: an outcome-shape change would break the sim
+            // gauntlet's own ReflectOutcome literals).
+            log::info!(
+                "brain: reflect enqueued {} proposal(s), suppressed {suppressed} near-duplicate(s) (project {project_id})",
+                enqueued.len()
+            );
         }
     }
     ReflectOutcome { proposals: enqueued, spent_usd: charge, reason: ReflectReason::Ok }
 }
 
-/// Build the exact redacted user digest reflect would send for a project (memory
-/// notes + structural doctor findings), or None for an empty corpus. The
-/// belt-and-suspenders secret gate (§7.1) redacts the ENTIRE assembled message
-/// here, immediately before it could reach the cloud. Shared by [reflect_with_client]
-/// and the autonomous delta gate so the gate's hash matches what's actually sent.
+/// The STABLE corpus digest (memory notes + structural doctor findings), redacted,
+/// or None for an empty corpus. This — and ONLY this — is what the autonomous delta
+/// gate hashes: it is a pure function of the note/finding corpus, so it does NOT move
+/// when proposals are enqueued. The message actually SENT to the model appends the
+/// volatile "already proposed" advisory on top (see [append_already_proposed]); if
+/// that advisory were folded in here, every enqueue would change the digest and
+/// self-re-fire a paid round in a loop — the invariant the split protects.
+///
+/// The belt-and-suspenders secret gate (§7.1) redacts the ENTIRE assembled corpus
+/// here, immediately before it could reach the cloud.
 pub(crate) fn build_digest(index: &SqliteIndex, project_id: &str, now_date: Option<&str>) -> Option<String> {
     let notes = store::list_notes_with_conn(index.conn(), Some(project_id)).unwrap_or_default();
     if notes.is_empty() {
@@ -260,6 +362,27 @@ pub(crate) fn build_digest(index: &SqliteIndex, project_id: &str, now_date: Opti
     let indexed = index.indexed_path_set(project_id).unwrap_or_default();
     let findings = doctor::check(&records, &indexed, now_date);
     Some(crate::modules::brain::secrets::redact(&digest::build_user_message(&notes, &findings)).0)
+}
+
+/// Append the bounded "## Already proposed (do not re-propose)" advisory to the corpus
+/// for the SEND ONLY (never the delta-gate hash — see [build_digest]). Lists the
+/// titles of pending + recently-resolved proposals so the model doesn't restate what's
+/// already in the inbox or was just decided. The advisory is redacted through the same
+/// [secrets::redact] path as the corpus (defense in depth on titles). Returns `corpus`
+/// unchanged when there is nothing proposed yet.
+fn append_already_proposed(index: &SqliteIndex, project_id: &str, corpus: String) -> String {
+    let texts = index.proposal_dedup_texts(project_id, RESOLVED_DEDUP_LOOKBACK);
+    if texts.is_empty() {
+        return corpus;
+    }
+    let lines: Vec<String> = texts
+        .iter()
+        .take(ALREADY_PROPOSED_MAX)
+        .map(|(title, _)| format!("- {}", title.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .collect();
+    let section = format!("## Already proposed (do not re-propose)\n\n{}", lines.join("\n"));
+    let redacted = crate::modules::brain::secrets::redact(&section).0;
+    format!("{corpus}\n\n{redacted}")
 }
 
 /// Delta-gated reflect core (testable offline): build the digest, and SKIP the model
@@ -275,10 +398,12 @@ pub fn reflect_auto_with_client(
     now_ms: i64,
     prev_digest_hash: Option<&str>,
 ) -> (ReflectOutcome, Option<String>) {
-    let Some(user) = build_digest(index, project_id, now_date) else {
+    // Gate on the STABLE corpus hash only; reflect_with_client appends the volatile
+    // "already proposed" advisory for the actual send (so enqueues can't self-re-fire).
+    let Some(corpus) = build_digest(index, project_id, now_date) else {
         return (ReflectOutcome::noop(ReflectReason::EmptyCorpus), None);
     };
-    let digest_hash = hash::hash_bytes(user.as_bytes());
+    let digest_hash = hash::hash_bytes(corpus.as_bytes());
     if prev_digest_hash == Some(digest_hash.as_str()) {
         return (ReflectOutcome::noop(ReflectReason::Unchanged), Some(digest_hash));
     }
@@ -321,6 +446,10 @@ pub(crate) fn reconcile_or_log(index: &SqliteIndex, reservation_id: i64, charge_
     if let Err(e) = budget::reconcile(index.conn(), reservation_id, charge_usd, now_ms) {
         log::warn!("brain: reflect budget reconcile failed ({e}); reservation {reservation_id} left for the boot sweep");
     }
+    // Back up the new durable spend total to the canonical-tail journal — reconcile
+    // runs through `conn()` outside the SqliteIndex spend methods, so this is where a
+    // header-destroyed store learns it already spent (and can't re-spend the ceiling).
+    index.journal_budget();
 }
 
 /// Manual-trigger reflect (the real path): always builds + sends if the budget/key
@@ -367,6 +496,184 @@ pub fn reflect_auto(
     }
     let client = build_client(&cfg, key);
     reflect_auto_with_client(index, client.as_ref(), &cfg, project_id, now_date, now_ms, prev_digest_hash)
+}
+
+// ============================================================================
+// Offloaded reflect (LIB-DESIGN-01: worker stall during the provider call).
+//
+// The autonomous round is split across the network boundary so the brain worker
+// thread never blocks on `client.complete()`:
+//   1. [reflect_prepare] runs on the worker — digest read + delta gate + durable
+//      budget reserve (all index access stays on the single writer thread).
+//   2. [ReflectPending::call] runs on a helper thread — the ONLY off-thread work;
+//      it touches no index, only the network.
+//   3. [reflect_finish] runs back on the worker — reconcile + validate + enqueue.
+// The single-writer invariant is fully preserved (every index write is still on
+// the worker); only the network wait leaves the Fs-serving thread free.
+// ============================================================================
+
+/// Metadata captured at prepare time and carried — alongside the raw provider
+/// result — back to the worker to complete the round. Clone + Debug so it can ride
+/// a `BrainEvent`. Its inner budget/config fields are private; the worker only
+/// reads [ReflectFinish::digest_hash] and hands the whole value to [reflect_finish].
+#[derive(Clone, Debug)]
+pub struct ReflectFinish {
+    cfg: ReflectConfig,
+    reservation_id: i64,
+    estimate: f64,
+    /// The digest hash this round reflected on (feeds the autonomous delta gate).
+    pub digest_hash: String,
+}
+
+/// A reflect round whose durable budget reservation is placed but whose provider
+/// call has NOT run yet. Move it to a helper thread and call [ReflectPending::call],
+/// then hand the returned parts to [reflect_finish] on the worker thread.
+pub struct ReflectPending {
+    client: Box<dyn ReflectClient + Send>,
+    model: String,
+    system: String,
+    user: String,
+    max_tokens: u32,
+    finish: ReflectFinish,
+}
+
+impl ReflectPending {
+    /// Run ONLY the provider network call (off the worker thread). Consumes self,
+    /// returning the raw result plus the finish metadata for the worker. Touches no
+    /// index — safe to run on any thread. A PANIC inside the client is folded into
+    /// an Err result so the helper thread always produces a `LibrarianDone` — a
+    /// vanished reply would wedge the project `in_flight` until restart and strand
+    /// the reservation until the boot sweep. The Err path charges on uncertainty,
+    /// same as any ambiguous network failure.
+    pub fn call(self) -> (Result<ReflectResponse, String>, ReflectFinish) {
+        let ReflectPending { client, model, system, user, max_tokens, finish } = self;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.complete(&model, &system, &user, max_tokens)
+        }))
+        .unwrap_or_else(|_| Err("provider client panicked".to_string()));
+        (result, finish)
+    }
+
+    /// The digest hash of the round in flight (for bookkeeping / logging).
+    pub fn digest_hash(&self) -> &str {
+        &self.finish.digest_hash
+    }
+}
+
+/// The outcome of [reflect_prepare] / [reflect_prepare_with_client].
+pub enum ReflectDispatch {
+    /// No provider call is needed — the outcome is already final (EmptyCorpus,
+    /// delta-gate Unchanged, a $0 pre-flight skip, or a reserve failure). Carries
+    /// the digest hash (None only for EmptyCorpus) for the caller's delta gate.
+    Ready(ReflectOutcome, Option<String>),
+    /// A provider call is required; run [ReflectPending::call] off-thread and then
+    /// [reflect_finish] on the worker.
+    Pending(ReflectPending),
+}
+
+/// The offload twin of [reflect_auto_with_client] (testable offline): build the
+/// digest, apply the delta gate, and — when a call is warranted — estimate + place
+/// the durable budget reservation, all WITHOUT the provider call. Returns
+/// [ReflectDispatch::Pending] with the reservation already held when a call must
+/// run; the gating is byte-for-byte the same as [reflect_auto_with_client].
+pub fn reflect_prepare_with_client(
+    index: &SqliteIndex,
+    client: Box<dyn ReflectClient + Send>,
+    cfg: &ReflectConfig,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+    prev_digest_hash: Option<&str>,
+) -> ReflectDispatch {
+    // Hash the STABLE corpus only (the delta gate), then append the volatile "already
+    // proposed" advisory for the SEND — same split as [reflect_with_client], so an
+    // offloaded round that enqueues proposals doesn't self-re-fire either.
+    let Some(corpus) = build_digest(index, project_id, now_date) else {
+        return ReflectDispatch::Ready(ReflectOutcome::noop(ReflectReason::EmptyCorpus), None);
+    };
+    let digest_hash = hash::hash_bytes(corpus.as_bytes());
+    if prev_digest_hash == Some(digest_hash.as_str()) {
+        return ReflectDispatch::Ready(ReflectOutcome::noop(ReflectReason::Unchanged), Some(digest_hash));
+    }
+    let system = schema::system_prompt();
+    let user = append_already_proposed(index, project_id, corpus);
+    let est = estimate_cost(cfg, &system, &user);
+    // Pre-flight reserve on the worker thread — the durable, atomic ceiling gate.
+    let rid = match budget::check_and_reserve(index.conn(), &cfg.model, est, now_ms) {
+        Ok(id) => id,
+        Err(reason) => return ReflectDispatch::Ready(ReflectOutcome::noop(reason), Some(digest_hash)),
+    };
+    ReflectDispatch::Pending(ReflectPending {
+        client,
+        model: cfg.model.clone(),
+        system,
+        user,
+        max_tokens: cfg.max_output_tokens,
+        finish: ReflectFinish { cfg: cfg.clone(), reservation_id: rid, estimate: est, digest_hash },
+    })
+}
+
+/// Autonomous offloaded reflect (the real worker path): resolve config/ceiling/key
+/// exactly like [reflect_auto], then PREPARE (reserve) without making the call. The
+/// worker runs the returned [ReflectPending] on a helper thread and completes it via
+/// [reflect_finish], so incremental indexing is never blocked by the provider call.
+pub fn reflect_prepare(
+    app: &AppHandle,
+    index: &SqliteIndex,
+    project_id: &str,
+    now_date: Option<&str>,
+    now_ms: i64,
+    prev_digest_hash: Option<&str>,
+) -> ReflectDispatch {
+    let cfg = ReflectConfig::from_librarian(&librarian::config(index.conn()));
+    let ceiling_usd = budget::ceiling(index.conn());
+    let account = librarian::keyring_account_for(&cfg.provider);
+    let key = if account.is_empty() {
+        None
+    } else {
+        crate::modules::secrets::read_secret(app, KEYRING_SERVICE, account)
+    };
+    let key_present = key.is_some() || librarian::is_keyless(&cfg.provider);
+    if let Some(reason) = pre_flight(ceiling_usd, key_present) {
+        return ReflectDispatch::Ready(ReflectOutcome::noop(reason), None);
+    }
+    let client = build_client(&cfg, key);
+    reflect_prepare_with_client(index, client, &cfg, project_id, now_date, now_ms, prev_digest_hash)
+}
+
+/// Complete an offloaded round on the worker thread from the provider result:
+/// reconcile the reservation, validate, and enqueue proposals (the same tail as
+/// [reflect_with_client]). Returns the outcome plus the digest hash the round
+/// reflected on, so the caller can pin it for the delta gate.
+pub fn reflect_finish(
+    index: &SqliteIndex,
+    project_id: &str,
+    finish: ReflectFinish,
+    result: Result<ReflectResponse, String>,
+    now_ms: i64,
+) -> (ReflectOutcome, Option<String>) {
+    let ReflectFinish { cfg, reservation_id, estimate, digest_hash } = finish;
+    let outcome = finish_response(index, &cfg, project_id, reservation_id, estimate, result, now_ms, true);
+    (outcome, Some(digest_hash))
+}
+
+/// Complete an offloaded round for a project that was UNREGISTERED mid-flight — a
+/// `BrainEvent::RemoveProject` landed (pruning the project's rows AND its delta-gate
+/// pin) while this round's provider call was still running. Reconciles the budget
+/// reservation from the result so the ceiling is never stranded, but does NOT enqueue
+/// proposals (they would be orphan rows for a pruned project) and returns NO digest
+/// hash — so the worker skips re-persisting the pin `remove_project` deliberately
+/// deleted (which would otherwise resurrect it and wedge a re-added identical corpus
+/// at Unchanged/$0 forever). [LIB-DESIGN-01 miss2 / LIB-SPEND-01 pin-delete invariant]
+pub fn reflect_reconcile_only(
+    index: &SqliteIndex,
+    project_id: &str,
+    finish: ReflectFinish,
+    result: Result<ReflectResponse, String>,
+    now_ms: i64,
+) -> ReflectOutcome {
+    let ReflectFinish { cfg, reservation_id, estimate, digest_hash: _ } = finish;
+    finish_response(index, &cfg, project_id, reservation_id, estimate, result, now_ms, false)
 }
 
 #[cfg(test)]
@@ -417,5 +724,180 @@ mod tests {
         let _a = build_client(&ReflectConfig::default(), Some("k".into()));
         let oc = ReflectConfig { provider: "openai".into(), ..ReflectConfig::default() };
         let _o = build_client(&oc, Some("k".into()));
+    }
+
+    // ---- Proposal-stream quality: near-dupe gate + pending-aware digest ----------
+
+    use crate::modules::brain::memory::scan_project_memory;
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+
+    /// A $0 fake provider that records call count + the LAST user message it received
+    /// and replays a fixed proposals JSON. Never touches a network.
+    struct CapturingFake {
+        calls: Cell<u32>,
+        last_user: RefCell<String>,
+        json: String,
+    }
+    impl ReflectClient for CapturingFake {
+        fn complete(&self, _m: &str, _s: &str, user: &str, _t: u32) -> Result<ReflectResponse, String> {
+            self.calls.set(self.calls.get() + 1);
+            *self.last_user.borrow_mut() = user.to_string();
+            Ok(ReflectResponse { json_text: self.json.clone(), input_tokens: 10, output_tokens: 5 })
+        }
+    }
+    fn fake(json: String) -> CapturingFake {
+        CapturingFake { calls: Cell::new(0), last_user: RefCell::new(String::new()), json }
+    }
+
+    /// Build a `{"proposals":[…]}` reply from `(title, detail)` pairs.
+    fn proposals_json(items: &[(&str, &str)]) -> String {
+        let body = items
+            .iter()
+            .map(|(t, d)| {
+                format!(
+                    r#"{{"kind":"insight","title":{},"detail":{},"scope":"project","confidence":"high"}}"#,
+                    serde_json::to_string(t).unwrap(),
+                    serde_json::to_string(d).unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"proposals":[{body}]}}"#)
+    }
+
+    /// A temp store with one memory note (so the corpus is non-empty) and the budget
+    /// armed. Returns (scratch_dir, index, default cfg).
+    fn temp_index_with_note(label: &str) -> (PathBuf, SqliteIndex, ReflectConfig) {
+        let base = std::env::temp_dir().join(format!("koden-reflect-dedup-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("proj");
+        let note = root.join(".koden-memory").join("n1.md");
+        std::fs::create_dir_all(note.parent().unwrap()).unwrap();
+        std::fs::write(
+            &note,
+            "---\nid: n1\ntype: insight\ntitle: A seed note\nstatus: active\n---\n# A seed note\n\nBody.\n",
+        )
+        .unwrap();
+        let db = base.join("store").join("index.sqlite");
+        let idx = SqliteIndex::open_with_recovery(&db).expect("open store");
+        scan_project_memory(&idx, "p", &root);
+        idx.set_budget_ceiling(1.0, 1).expect("arm budget");
+        (base, idx, ReflectConfig::default())
+    }
+
+    // The paraphrase pair the live gauntlet's title-signature dedup let through, plus a
+    // genuinely distinct fact that must survive.
+    const PARAPHRASE_A: (&str, &str) = (
+        "Stripe webhook verifies signature before parsing",
+        "The Stripe webhook handler verifies the request signature before parsing the payload body.",
+    );
+    const PARAPHRASE_B: (&str, &str) = (
+        "Webhook signature check precedes body parsing",
+        "The webhook signature check precedes parsing of the request payload body in the handler.",
+    );
+    const DISTINCT_C: (&str, &str) = (
+        "Database migrations run automatically on startup",
+        "Prisma schema migrations are applied during application boot via the migrate deploy command.",
+    );
+
+    #[test]
+    fn near_dupe_proposals_are_suppressed_at_enqueue() {
+        let (base, idx, cfg) = temp_index_with_note("suppress");
+        let fk = fake(proposals_json(&[PARAPHRASE_A, PARAPHRASE_B, DISTINCT_C]));
+        let out = reflect_with_client(&idx, &fk, &cfg, "p", Some("2026-07-10"), 1000);
+        assert!(matches!(out.reason, ReflectReason::Ok), "{:?}", out.reason);
+        assert_eq!(out.proposals.len(), 2, "one paraphrase + the distinct fact enqueued (1 suppressed)");
+        // Persisted exactly the two survivors.
+        let pending = idx.proposal_dedup_texts("p", 50);
+        assert_eq!(pending.len(), 2, "only the two survivors are pending: {pending:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cross_round_paraphrase_is_suppressed_against_pending() {
+        // The gauntlet's "accepted fact resurfaced 3 rounds later under a fresh title":
+        // a paraphrase of an ALREADY-PENDING proposal must be suppressed on a later round.
+        let (base, idx, cfg) = temp_index_with_note("crossround");
+        let out1 = reflect_with_client(&idx, &fake(proposals_json(&[PARAPHRASE_A])), &cfg, "p", Some("2026-07-10"), 1000);
+        assert_eq!(out1.proposals.len(), 1, "round 1 enqueues the fact");
+        // A later round proposes the same fact reworded → caught against the pending row.
+        let out2 = reflect_with_client(&idx, &fake(proposals_json(&[PARAPHRASE_B])), &cfg, "p", Some("2026-07-10"), 2000);
+        assert_eq!(out2.proposals.len(), 0, "the reworded resurfacing is suppressed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn enqueue_does_not_change_the_delta_gate_hash() {
+        // The load-bearing invariant of the pending-aware digest split: enqueuing
+        // proposals must NOT move the delta-gate hash, or the next round self-re-fires
+        // a paid call forever.
+        let (base, idx, cfg) = temp_index_with_note("noselffire");
+        let fk = fake(proposals_json(&[("A caching insight", "Cache entries expire after ten minutes to bound staleness.")]));
+        let (out1, h1) = reflect_auto_with_client(&idx, &fk, &cfg, "p", Some("2026-07-10"), 1000, None);
+        assert!(matches!(out1.reason, ReflectReason::Ok), "{:?}", out1.reason);
+        assert_eq!(out1.proposals.len(), 1, "round 1 enqueues");
+        assert_eq!(fk.calls.get(), 1);
+        let h1 = h1.expect("Ok pins a hash");
+        // Same corpus, now with a pending proposal: must short-circuit to Unchanged/$0.
+        let (out2, h2) = reflect_auto_with_client(&idx, &fk, &cfg, "p", Some("2026-07-10"), 2000, Some(&h1));
+        assert!(matches!(out2.reason, ReflectReason::Unchanged), "{:?}", out2.reason);
+        assert_eq!(out2.spent_usd, 0.0, "Unchanged is $0");
+        assert_eq!(fk.calls.get(), 1, "no second paid call after an enqueue");
+        assert_eq!(h2.as_deref(), Some(h1.as_str()), "gate hash stable across the enqueue");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sent_message_lists_already_proposed_titles() {
+        let (base, idx, cfg) = temp_index_with_note("advisory");
+        // Round 1 enqueues a distinctly-titled proposal.
+        let title = "Retry queue drains oldest first";
+        let out1 = reflect_with_client(
+            &idx,
+            &fake(proposals_json(&[(title, "The retry queue is FIFO so the oldest failed job runs first.")])),
+            &cfg, "p", Some("2026-07-10"), 1000,
+        );
+        assert_eq!(out1.proposals.len(), 1);
+        // Round 2 sends: the user message must now carry the advisory naming round 1's
+        // title (so the model is told not to restate it).
+        let fk2 = fake(proposals_json(&[]));
+        let _ = reflect_with_client(&idx, &fk2, &cfg, "p", Some("2026-07-10"), 2000);
+        let sent = fk2.last_user.borrow().clone();
+        assert!(sent.contains("## Already proposed (do not re-propose)"), "advisory present: {sent}");
+        assert!(sent.contains(title), "advisory names the pending title: {sent}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unactionable_targets_dropped_and_valid_target_enqueues_then_applies() {
+        // The D2 seam fix, end to end. The seed note's id is `n1`.
+        let (base, idx, cfg) = temp_index_with_note("target_validation");
+        let root = base.join("proj");
+        // stale w/ valid target n1 (actionable), stale w/ unknown target, conflict w/
+        // NO target, and a plain insight (create, no target needed).
+        let json = r#"{"proposals":[
+          {"kind":"stale","title":"Archive n1","detail":"the seed note is stale now","scope":"project","confidence":"high","target":"n1"},
+          {"kind":"stale","title":"Archive ghost","detail":"a note that does not exist","scope":"project","confidence":"high","target":"ghost"},
+          {"kind":"conflict","title":"Conflict without a target","detail":"names no note at all","scope":"project","confidence":"high"},
+          {"kind":"insight","title":"A brand new insight","detail":"Something genuinely worth keeping around later.","scope":"project","confidence":"high"}
+        ]}"#;
+        let out = reflect_with_client(&idx, &fake(json.to_string()), &cfg, "p", Some("2026-07-10"), 1000);
+        assert!(matches!(out.reason, ReflectReason::Ok), "{:?}", out.reason);
+        let titles: Vec<&str> = out.proposals.iter().map(|p| p.title.as_str()).collect();
+        assert!(titles.contains(&"Archive n1"), "valid-target stale enqueues: {titles:?}");
+        assert!(titles.contains(&"A brand new insight"), "insight (create) enqueues: {titles:?}");
+        assert!(!titles.contains(&"Archive ghost"), "unknown-target archive dropped");
+        assert!(!titles.contains(&"Conflict without a target"), "target-less update dropped");
+        assert_eq!(out.proposals.len(), 2, "only the two actionable proposals: {titles:?}");
+
+        // Direction 2: the enqueued valid-target stale is now actually APPLYABLE (D2) —
+        // approving it materializes the archive against the real note.
+        let stale = out.proposals.iter().find(|p| p.title == "Archive n1").unwrap();
+        assert_eq!(stale.target_id.as_deref(), Some("n1"), "target carried onto the proposal");
+        idx.apply_proposal("p", &root, &stale.signature, "2026-07-10").unwrap();
+        let raw = std::fs::read_to_string(root.join(".koden-memory").join("n1.md")).unwrap();
+        assert!(raw.contains("status: archived"), "approve archived the target note: {raw}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

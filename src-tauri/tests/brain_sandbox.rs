@@ -987,9 +987,12 @@ fn index_with_note(work: &Path, store: &Path) -> (std::path::PathBuf, SqliteInde
     (db, idx)
 }
 
+// The stale item names its target note id (`auth`, the note `index_with_note` writes):
+// reflect maps stale→Archive, which applies against a real note, so a target-less
+// stale is now dropped at enqueue as unactionable (D2 seam fix).
 const TWO_PROPOSALS: &str = r#"{"proposals":[
   {"kind":"insight","title":"Consolidate auth notes","detail":"two notes overlap","scope":"project","confidence":"high","evidence":["a.rs"]},
-  {"kind":"stale","title":"Archive legacy decision","detail":"superseded","scope":"project","confidence":"medium"}
+  {"kind":"stale","title":"Archive legacy decision","detail":"superseded","scope":"project","confidence":"medium","target":"auth"}
 ]}"#;
 
 /// Gate 1: ceiling 0 (default) → Disabled, spends nothing, ZERO requests.

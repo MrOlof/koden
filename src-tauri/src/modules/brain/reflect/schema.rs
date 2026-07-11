@@ -27,12 +27,18 @@ pub fn system_prompt() -> String {
 Given a digest of memory notes and a summary of health findings, produce a SMALL \
 set of high-confidence proposals (cap: {MAX_PROPOSALS}). Only surface well-supported \
 patterns or issues \u{2014} NO speculation, no low-evidence claims. Prefer fewer, \
-higher-confidence items over many low-quality ones. Respond ONLY with a single JSON \
+higher-confidence items over many low-quality ones. Do NOT restate anything already \
+captured in the digest or listed under \"Already proposed\" \u{2014} propose only NEW, \
+materially different items; a re-wording of an existing note or pending proposal is \
+noise, not a proposal. Respond ONLY with a single JSON \
 object \u{2014} no prose, no code fences. The object MUST match exactly: \
 {{\"proposals\":[{{\"kind\":\"insight\"|\"should_remember\"|\"stale\"|\"conflict\",\
 \"title\":\"<short title>\",\"detail\":\"<one-paragraph rationale>\",\
-\"scope\":\"global\"|\"project\",\"confidence\":\"low\"|\"medium\"|\"high\"}}]}} \
-\u{2014} no other keys, and an empty proposals array when nothing is well-supported."
+\"scope\":\"global\"|\"project\",\"confidence\":\"low\"|\"medium\"|\"high\",\
+\"target\":\"<note id>\"}}]}} \u{2014} add no keys beyond these. For kind \"stale\" or \
+\"conflict\", \"target\" MUST be the id of the affected note, copied from the (id: \u{2026}) \
+shown on each digest note line; omit \"target\" for \"insight\"/\"should_remember\". Use an \
+empty proposals array when nothing is well-supported."
     )
 }
 
@@ -85,6 +91,11 @@ pub struct ProposalItem {
     pub risk: Option<Level>,
     #[serde(default, rename = "evidenceQuality")]
     pub evidence_quality: Option<Level>,
+    /// Target note id the proposal acts on. The prompt REQUIRES it for stale/conflict
+    /// kinds (reflect maps those to Archive/Update, which apply against a real note).
+    /// serde default None; empty/whitespace is normalized to None in `to_proposal`.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 /// The top-level object (`LLM_PROPOSALS_SCHEMA`, `reflect-llm.ts:58-60`).
@@ -123,6 +134,21 @@ mod tests {
         assert!(p.contains(&format!("(cap: {MAX_PROPOSALS})")), "cap interpolated: {p}");
         assert!(p.contains('\u{2014}'), "em-dash U+2014 preserved");
         assert!(p.contains("single JSON object"));
+    }
+
+    #[test]
+    fn system_prompt_states_target_for_stale_conflict() {
+        let p = system_prompt();
+        assert!(p.contains("\"target\""), "target key in schema statement: {p}");
+        assert!(p.contains("stale") && p.contains("conflict"), "names the target-requiring kinds");
+    }
+
+    #[test]
+    fn parses_optional_target_present_and_absent() {
+        let with = r#"{"proposals":[{"kind":"stale","title":"t","detail":"d","scope":"project","confidence":"high","target":"n7"}]}"#;
+        assert_eq!(parse_and_validate(with).unwrap()[0].target.as_deref(), Some("n7"));
+        let without = r#"{"proposals":[{"kind":"insight","title":"t","detail":"d","scope":"project","confidence":"high"}]}"#;
+        assert_eq!(parse_and_validate(without).unwrap()[0].target, None, "target defaults to None");
     }
 
     #[test]
