@@ -34,6 +34,10 @@ const TOOL_TITLES: Record<string, string> = {
   suggest_command: "Suggesting a command",
   get_terminal_output: "Reading the terminal",
   open_preview: "Opening a preview",
+  // Terminal targeting
+  workspace_list_terminals: "Listing terminals",
+  terminal_read: "Reading a terminal",
+  terminal_send: "Typing into a terminal",
   // Agents
   run_subagent: "Spawning a subagent",
   spawn_coding_agent: "Spawning a coding agent",
@@ -78,6 +82,12 @@ const TOOL_STATUS_LABELS: Record<string, LabelFn> = {
   run_subagent: (i) => `Spawning ${String(i.type ?? "subagent")} subagent`,
   workspace_open_tab: (i) => `Opening a ${String(i.kind ?? "workspace")} tab`,
   workspace_split_pane: (i) => `Adding a ${String(i.kind ?? "new")} pane`,
+  terminal_read: (i) =>
+    `Reading terminal ${ellipsize(String(i.target ?? ""), 30)}`,
+  terminal_send: (i) =>
+    i.submit === true
+      ? `Sending to ${ellipsize(String(i.target ?? ""), 30)}`
+      : `Typing into ${ellipsize(String(i.target ?? ""), 30)}`,
 };
 
 /** Friendly static title for a tool. Never returns the raw name. */

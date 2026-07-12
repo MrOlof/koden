@@ -1,17 +1,28 @@
 import { useManagedAgentsStore } from "@/modules/agents/store/managedAgentsStore";
-import type { Tab } from "@/modules/tabs";
+import { useOrchestrationStore } from "@/modules/orchestration/store/orchestrationStore";
+import { useSpaces } from "@/modules/spaces";
+import { labelFor, type Tab } from "@/modules/tabs";
 import {
   findLeafCwd,
+  leafHasForegroundProcess,
   type TerminalPaneHandle,
+  terminalLeaves,
+  usePaneTitleStore,
   whenSessionReady,
   writeToSession,
 } from "@/modules/terminal";
 import { invoke } from "@tauri-apps/api/core";
 import { type RefObject, useEffect, useRef } from "react";
 import type { Live } from "../store/chatStore";
+import type { TerminalTargetInfo } from "../tools/context";
 import { redactSensitive } from "./redact";
 
 type TuiWaitResult = "ready" | "gone" | "timeout";
+
+// Enter must land as its own chunk: Claude-style TUIs treat a same-chunk
+// trailing CR as a literal newline (see tools/agent.ts SUBMIT_DELAY_MS);
+// shells don't care about the split, so one primitive serves both.
+const SEND_ENTER_DELAY_MS = 120;
 
 async function waitForClaudeTuiReady(
   readBuf: () => string | null,
@@ -167,6 +178,59 @@ export function useAiLiveBridge(params: Params) {
         const buf = terminalRefs.current.get(leafId)?.getBuffer(300);
         return buf ? redactSensitive(buf) : null;
       },
+      // Terminal targeting lane (ADR-017 addendum). Enumerates ALL spaces —
+      // the layout snapshot deliberately filters to the active space, a
+      // name resolver must not.
+      listTerminalTargets: () => {
+        const { activeId, tabs } = ref.current;
+        const spaces = useSpaces.getState().spaces;
+        const paneTitles = usePaneTitleStore.getState().titles;
+        const managed = useManagedAgentsStore.getState().agents;
+        const orchByLeaf = new Map<number, { name: string; status: string }>();
+        for (const a of Object.values(
+          useOrchestrationStore.getState().agents,
+        )) {
+          if (a.leafId !== null)
+            orchByLeaf.set(a.leafId, { name: a.name, status: a.status });
+        }
+        const out: TerminalTargetInfo[] = [];
+        for (const t of tabs) {
+          if (t.kind !== "terminal") continue;
+          const spaceName =
+            spaces.find((s) => s.id === t.spaceId)?.name ?? t.spaceId;
+          const tabTitle = labelFor(t);
+          for (const leaf of terminalLeaves(t.paneTree)) {
+            const paneTitle = paneTitles[leaf.id]?.label?.trim();
+            const m = managed[leaf.id];
+            out.push({
+              paneId: leaf.id,
+              tabId: t.id,
+              space: spaceName,
+              title: paneTitle || tabTitle,
+              tabTitle,
+              cwd: leaf.cwd ?? t.cwd ?? null,
+              agent:
+                orchByLeaf.get(leaf.id) ??
+                (m ? { name: "claude", status: m.phase } : null),
+              active: t.id === activeId && leaf.id === t.activeLeafId,
+              tabActive: leaf.id === t.activeLeafId,
+              private: t.private === true,
+              cold: t.cold === true,
+            });
+          }
+        }
+        return out;
+      },
+      // Leaf-addressed write, deliberately WITHOUT focus/tab/space activation —
+      // a background send must never hijack what the user is typing.
+      sendToTerminal: (leafId: number, data: string, submit: boolean) => {
+        if (!writeToSession(leafId, data)) return false;
+        if (submit)
+          setTimeout(() => writeToSession(leafId, "\r"), SEND_ENTER_DELAY_MS);
+        return true;
+      },
+      terminalHasForegroundProcess: (leafId: number) =>
+        leafHasForegroundProcess(leafId),
       // Latest-render closures via ref, like the getters above.
       openWorkspaceTab: (kind, opts) =>
         ref.current.openWorkspaceTab(kind, opts),

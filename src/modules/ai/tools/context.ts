@@ -28,6 +28,32 @@ export type LayoutFocusResult =
   | { focused: true; tabId: number; paneId: number }
   | { error: string };
 
+/**
+ * One terminal pane as the targeting tools see it — every space, every tab
+ * (the layout snapshot covers only the active space; this list never filters).
+ */
+export type TerminalTargetInfo = {
+  paneId: number;
+  tabId: number;
+  /** Space NAME (falls back to the space id when unnamed). */
+  space: string;
+  /** Display title: the pane's own title when set, else the tab's label. */
+  title: string;
+  /** Owning tab's label (custom name, else cwd basename) — a fallback match tier. */
+  tabTitle: string;
+  cwd: string | null;
+  /** Agent registered on this pane (orchestration agent, or a managed 'claude'). */
+  agent: { name: string; status: string } | null;
+  /** This pane is the focused pane of the ACTIVE tab. */
+  active: boolean;
+  /** This pane is its own tab's focused leaf (tab-name matches collapse here). */
+  tabActive: boolean;
+  /** Privacy-mode tab: buffer reads and sends are refused. */
+  private: boolean;
+  /** Restored but never activated — no live PTY until the user opens it. */
+  cold: boolean;
+};
+
 /** Raw layout snapshot from the app; the layout tool shapes it for the model. */
 export type LayoutSnapshot = {
   activeTabId: number | null;
@@ -82,6 +108,18 @@ export type ToolContext = {
   focusWorkspacePane: (paneId: number) => LayoutFocusResult;
   /** Raw layout state of the active space. */
   getWorkspaceLayout: () => LayoutSnapshot;
+  // Terminal targeting (ADR-017 addendum): list/read free, type free,
+  // submit approval-gated unless the user armed hands-free mode.
+  /** Every terminal pane across ALL spaces. */
+  listTerminalTargets: () => TerminalTargetInfo[];
+  /** Redacted scrollback tail of any leaf. Privacy is checked by the caller against the target list. */
+  readTerminalBuffer: (leafId: number) => string | null;
+  /** Raw pty write; submit=true sends Enter as a separate delayed chunk. Never moves focus. */
+  sendToTerminal: (leafId: number, data: string, submit: boolean) => boolean;
+  /** Shell-vs-TUI discriminator: true when a foreground app owns the pty. */
+  terminalHasForegroundProcess: (leafId: number) => Promise<boolean>;
+  /** Hands-free pref: armed = terminal_send submits skip the approval card. */
+  isHandsFreeArmed: () => boolean;
 };
 
 export function resolvePath(rawPath: string, cwd: string | null): string {

@@ -30,6 +30,7 @@ import {
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   setCustomInstructions,
+  setHandsFreeMode,
   setMemoryNotifications,
 } from "@/modules/settings/store";
 import { useEffect, useRef, useState } from "react";
@@ -55,8 +56,52 @@ export function AgentsSection() {
 
       <BrainLibrarianBlock />
 
+      <HandsFreeBlock />
+
       <MemoryNotificationsBlock />
     </div>
+  );
+}
+
+// ADR-017 addendum: hands-free terminal control. One switch + an honest
+// warning (the MemoryNotificationsBlock idiom). The same pref backs the
+// mic-adjacent switch in the Librarian window header; cross-window via the
+// preferences store.
+function HandsFreeBlock() {
+  const on = usePreferencesStore((s) => s.handsFreeMode);
+
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <Label>Hands-free terminal control</Label>
+        {on ? (
+          <span className={`font-mono text-[10px] ${WARN_CLS}`}>● armed</span>
+        ) : (
+          <span className="font-mono text-[10px] text-muted-foreground">
+            ○ off
+          </span>
+        )}
+      </div>
+      <label className="flex cursor-pointer items-center gap-2 text-[11.5px]">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => void setHandsFreeMode(e.target.checked)}
+          className="accent-[color:var(--primary)]"
+        />
+        <span className="text-foreground/90">
+          Let the Librarian submit to terminals without per-send approval
+        </span>
+      </label>
+      <span className={`text-[10.5px] ${on ? WARN_CLS : "text-muted-foreground"}`}>
+        Armed, terminal_send runs shell commands and messages agents the moment
+        the model calls it — no approval card. Every send still lands in the
+        chat transcript and raises a toast; shell commands still pass the
+        safety filter; panes running unrecognized apps are refused. Typing
+        without Enter never needs approval either way. Stays armed until you
+        switch it off — meant for voice-driving sessions, not as a default.
+      </span>
+    </section>
   );
 }
 

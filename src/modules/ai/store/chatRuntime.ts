@@ -42,6 +42,17 @@ function makeChat(sessionId: string): Chat<UIMessage> {
     focusWorkspacePane: (paneId) =>
       useChatStore.getState().live.focusWorkspacePane(paneId),
     getWorkspaceLayout: () => useChatStore.getState().live.getWorkspaceLayout(),
+    listTerminalTargets: () =>
+      useChatStore.getState().live.listTerminalTargets(),
+    readTerminalBuffer: (leafId) =>
+      useChatStore.getState().live.readLeafBuffer(leafId),
+    sendToTerminal: (leafId, data, submit) =>
+      useChatStore.getState().live.sendToTerminal(leafId, data, submit),
+    terminalHasForegroundProcess: (leafId) =>
+      useChatStore.getState().live.terminalHasForegroundProcess(leafId),
+    // Read per call (needsApproval + execute), so mid-session toggles of the
+    // hands-free pref apply to the very next terminal_send.
+    isHandsFreeArmed: () => usePreferencesStore.getState().handsFreeMode,
   };
 
   const transport = createContextAwareTransport({

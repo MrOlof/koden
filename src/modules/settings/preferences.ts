@@ -45,6 +45,16 @@ export function readBgFastPath(): {
   }
 }
 
+/**
+ * Hands-free terminal-control arm state (ADR-017 addendum). Reactive read for
+ * UI surfaces (the Librarian header switch next to the mic, settings). Flip it
+ * with `setHandsFreeMode` from settings/store — user-armed only; the model and
+ * its tools can only READ it.
+ */
+export function useHandsFreeMode(): boolean {
+  return usePreferencesStore((s) => s.handsFreeMode);
+}
+
 export const usePreferencesStore = create<State>((set) => ({
   ...DEFAULT_PREFERENCES,
   hydrated: false,

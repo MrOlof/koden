@@ -7,6 +7,7 @@ import { buildSearchTools } from "./search";
 import { buildShellTools } from "./shell";
 import { buildSubagentTools } from "./subagent";
 import { buildTerminalTools } from "./terminal";
+import { buildTerminalTargetTools } from "./terminals";
 import { buildTodoTools } from "./todo";
 import { buildWorkspaceTools } from "./workspace";
 
@@ -32,6 +33,12 @@ export { resolvePath, type ToolContext } from "./context";
  *    approval: every action is immediately visible, reversible with one
  *    click, and non-destructive. Create/arrange only — no close/delete
  *    tools by design (ADR-017 addendum).
+ *  - Terminal targeting (`workspace_list_terminals`, `terminal_read`,
+ *    `terminal_send`) is tiered: list/read auto-execute (redacted, Privacy
+ *    tabs refused); `terminal_send` with submit:false types without Enter and
+ *    auto-executes; submit:true carries a DYNAMIC `needsApproval` — gated by
+ *    the approval card unless the user armed the hands-free preference
+ *    (ADR-017 addendum).
  *
  * The model sees absolute paths only after they are resolved against the
  * active terminal's cwd (provided via `getCwd`); it should not invent paths
@@ -47,6 +54,7 @@ export function buildTools(ctx: import("./context").ToolContext) {
     ...buildShellTools(ctx),
     ...buildSubagentTools(ctx),
     ...buildTerminalTools(ctx),
+    ...buildTerminalTargetTools(ctx),
     ...buildTodoTools(ctx),
     ...buildManagedAgentTools(ctx),
     ...buildWorkspaceTools(ctx),

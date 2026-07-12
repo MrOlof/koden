@@ -35,6 +35,7 @@ import type {
   LayoutSplitResult,
   LayoutSplitSide,
   LayoutTabKind,
+  TerminalTargetInfo,
 } from "../tools/context";
 import { useTodosStore } from "./todoStore";
 
@@ -63,6 +64,11 @@ export type Live = {
   ) => LayoutSplitResult;
   focusWorkspacePane: (paneId: number) => LayoutFocusResult;
   getWorkspaceLayout: () => LayoutSnapshot;
+  // Terminal targeting lane (list/read/type free; submit approval-or-hands-free,
+  // ADR-017 addendum). Sends are leaf-addressed and never move focus.
+  listTerminalTargets: () => TerminalTargetInfo[];
+  sendToTerminal: (leafId: number, data: string, submit: boolean) => boolean;
+  terminalHasForegroundProcess: (leafId: number) => Promise<boolean>;
 };
 
 export type AgentRunStatus =
@@ -187,6 +193,9 @@ const NOOP_LIVE: Live = {
   splitWorkspacePane: () => ({ error: "workspace not ready" }),
   focusWorkspacePane: () => ({ error: "workspace not ready" }),
   getWorkspaceLayout: () => ({ activeTabId: null, tabs: [], paneTitles: {} }),
+  listTerminalTargets: () => [],
+  sendToTerminal: () => false,
+  terminalHasForegroundProcess: async () => false,
 };
 
 const CHATS_LRU_CAP = 8;
