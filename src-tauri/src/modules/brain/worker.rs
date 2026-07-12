@@ -901,16 +901,31 @@ pub(crate) fn resolve_or_register_project(
     if let Some(p) = registry.resolve(cwd) {
         return Some((p, false));
     }
+    // Canonicalize BEFORE the candidate walk: a junction/symlink or `..`
+    // spelling inside the workspace can point anywhere, and `register`
+    // stores the canonical TARGET — judging the raw spelling would let a
+    // lexically-under-root cwd register a root outside the consent boundary,
+    // and a lexical retry on the raw spelling would then miss what was just
+    // registered (a silent "ghost" registration with no Rescan/log/toast).
+    let canon_cwd = std::fs::canonicalize(cwd)
+        .map(|p| crate::modules::fs::to_canon(&p))
+        .unwrap_or_else(|_| cwd.to_string());
+    if canon_cwd != cwd {
+        if let Some(p) = registry.resolve(&canon_cwd) {
+            return Some((p, false));
+        }
+    }
     let root = registry.workspace_root()?;
     let candidate =
-        first_use_candidate(std::path::Path::new(&root), std::path::Path::new(cwd))?;
+        first_use_candidate(std::path::Path::new(&root), std::path::Path::new(&canon_cwd))?;
     if !is_sane_root(&candidate) {
         return None;
     }
     // Discovered (not explicit) registration: honors removal tombstones, so a
-    // session inside a project the user removed does NOT re-register it.
-    registry.add_root_discovered(&candidate)?;
-    registry.resolve(cwd).map(|p| (p, true))
+    // session inside a project the user removed does NOT re-register it. Use
+    // the returned Project directly — never re-resolve a spelling that might
+    // not match the canonical registered root.
+    registry.add_root_discovered(&candidate).map(|p| (p, true))
 }
 
 /// Root sanity gate, shared by the boot seed and `brain_add_project`: never index
@@ -1682,7 +1697,9 @@ fn files_activity_payload(root: &std::path::Path, changed: &[std::path::PathBuf]
     let mut rels: Vec<String> = changed
         .iter()
         .filter(|p| {
-            !walk::is_reserved_artifact(p) && !secrets::is_denylisted_path(&to_canon(p))
+            !walk::is_reserved_artifact(p)
+                && !secrets::is_denylisted_path(&to_canon(p))
+                && !is_transient_write(p)
         })
         .map(|p| rel_path(root, p))
         .filter(|r| !r.is_empty())
@@ -1692,6 +1709,18 @@ fn files_activity_payload(root: &std::path::Path, changed: &[std::path::PathBuf]
     rels.dedup();
     rels.truncate(FILES_ACTIVITY_MAX_PATHS);
     serde_json::to_string(&rels).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Editor/atomic-write droppings observed live in the trail (`x.md.tmp.<pid>.<hash>`
+/// from atomic writers, `~`/`.#` editor locks): they vanish on rename, so listing
+/// them as "touched files" is pure noise in the injected gist and rotates its key
+/// for a path no session can ever read.
+fn is_transient_write(p: &std::path::Path) -> bool {
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.contains(".tmp.")
+        || name.ends_with(".tmp")
+        || name.ends_with('~')
+        || name.starts_with(".#")
 }
 
 /// Session boundary rows (ADR-020): `started` → a `start` row, `exited` → an
@@ -2236,6 +2265,25 @@ mod tests {
             "own artifact excluded: {payload}"
         );
         assert!(!payload.contains(".env"), "denylisted excluded: {payload}");
+    }
+
+    /// Observed live: atomic writers leave `x.md.tmp.<pid>.<hash>` droppings that
+    /// the watcher batches alongside the real rename target — the trail must
+    /// list the file, never its transient spelling.
+    #[test]
+    fn files_activity_payload_excludes_transient_writes() {
+        let root = std::path::Path::new("C:/proj");
+        let changed = vec![
+            std::path::PathBuf::from("C:/proj/docs/ADR-021.md"),
+            std::path::PathBuf::from("C:/proj/docs/ADR-021.md.tmp.41168.983e1e3a"),
+            std::path::PathBuf::from("C:/proj/notes/draft.md~"),
+            std::path::PathBuf::from("C:/proj/notes/.#lock.md"),
+        ];
+        let payload = files_activity_payload(root, &changed);
+        assert!(payload.contains("ADR-021.md"), "real file kept: {payload}");
+        assert!(!payload.contains(".tmp."), "atomic temp excluded: {payload}");
+        assert!(!payload.contains("~"), "editor backup excluded: {payload}");
+        assert!(!payload.contains(".#"), "editor lock excluded: {payload}");
     }
 
     #[test]
