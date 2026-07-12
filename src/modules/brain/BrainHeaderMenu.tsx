@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  BookOpen01Icon,
   HierarchySquare01Icon,
   RocketIcon,
   Search01Icon,
@@ -38,6 +39,8 @@ function stateLabel(report: BrainStatusReport | null): string {
 type Props = {
   onOpenBrain: () => void;
   onOpenBrainMap: () => void;
+  /** Open the Library, the Librarian's read-only wiki. */
+  onOpenLibrary: () => void;
   onOpenSettings: () => void;
 };
 
@@ -50,6 +53,7 @@ type Props = {
 export function BrainHeaderMenu({
   onOpenBrain,
   onOpenBrainMap,
+  onOpenLibrary,
   onOpenSettings,
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -128,6 +132,10 @@ export function BrainHeaderMenu({
             strokeWidth={1.75}
           />
           Brain Map
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={onOpenLibrary} className="gap-2">
+          <HugeiconsIcon icon={BookOpen01Icon} size={15} strokeWidth={1.75} />
+          Library
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onOpenSettings} className="gap-2">
           <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />

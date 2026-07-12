@@ -7,6 +7,7 @@ import {
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { countTerminalLeaves, leafIds } from "@/modules/terminal";
 import {
+  BookOpen01Icon,
   Cancel01Icon,
   CheckListIcon,
   CommandLineIcon,
@@ -62,6 +63,7 @@ export type CommandPaletteActionContext = {
   openNewTasks: () => void;
   openDirector: () => void;
   openBrain: () => void;
+  openLibrary: () => void;
   openAgentTopology: () => void;
   openMessageFlow: () => void;
   openGitGraph: () => void;
@@ -273,6 +275,14 @@ export function createCommandItems(
       keywords: ["brain", "index", "search", "knowledge", "librarian", "code"],
       icon: Search01Icon,
       run: ctx.openBrain,
+    },
+    {
+      id: "library.open",
+      title: "Open Library",
+      group: "Agents",
+      keywords: ["library", "wiki", "shelves", "memory", "notes", "librarian"],
+      icon: BookOpen01Icon,
+      run: ctx.openLibrary,
     },
     {
       id: "orchestration.topology",

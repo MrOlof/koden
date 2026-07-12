@@ -295,6 +295,7 @@ export default function App() {
     newNotesTab,
     newBoardTab,
     newTasksTab,
+    openLibraryTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,
@@ -916,6 +917,10 @@ export default function App() {
     () => openOrchestrationTab("brain-map"),
     [openOrchestrationTab],
   );
+
+  const openLibrary = useCallback(() => {
+    openLibraryTab();
+  }, [openLibraryTab]);
 
   // ADR-020: land on the Brain pane's MEMORY view (Librarian activity toast /
   // bell "View" target) — request the view, then open/activate the tab.
@@ -1939,6 +1944,7 @@ export default function App() {
             openNewTasks: () => newTasksTab(),
             openDirector,
             openBrain,
+            openLibrary,
             openAgentTopology: () => openOrchestrationTab("agent-topology"),
             openMessageFlow: () => openOrchestrationTab("message-flow"),
             openGitGraph: openGitGraphFromContext,
@@ -1991,6 +1997,7 @@ export default function App() {
       newTasksTab,
       openDirector,
       openBrain,
+      openLibrary,
       openOrchestrationTab,
       toggleLayoutMode,
     ],
@@ -2108,6 +2115,7 @@ export default function App() {
               onOpenBrain={openBrain}
               onOpenBrainMemory={openBrainMemory}
               onOpenBrainMap={openBrainMap}
+              onOpenLibrary={openLibrary}
               onActivateAgent={onActivateAgent}
               onActivateLocalAgent={onActivateLocalAgent}
               onOpenSettings={() => void openSettingsWindow()}

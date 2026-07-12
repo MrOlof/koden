@@ -145,6 +145,13 @@ export type TasksTab = TabBase & {
   listId: string;
 };
 
+/** The Library: read-only wiki of the Librarian's memory. One per space. */
+export type LibraryTab = TabBase & {
+  id: number;
+  kind: "library";
+  title: string;
+};
+
 /** Singleton workspace views (one per space). "brain" is the Koden Brain pane;
  *  "brain-map" is its interactive knowledge-graph view. */
 export type OrchestrationView =
@@ -172,6 +179,7 @@ export type Tab =
   | NotesTab
   | BoardTab
   | TasksTab
+  | LibraryTab
   | OrchestrationTab;
 
 const ORCHESTRATION_TITLES: Record<OrchestrationView, string> = {
@@ -766,6 +774,34 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return id;
   }, []);
 
+  // The Library is one-per-space, like the orchestration views.
+  const openLibraryTab = useCallback(() => {
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find(
+        (t) =>
+          t.kind === "library" && t.spaceId === activeSpaceIdRef.current,
+      );
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [
+        ...curr,
+        {
+          id,
+          kind: "library",
+          spaceId: activeSpaceIdRef.current,
+          title: "Library",
+        } satisfies LibraryTab,
+      ];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   // Orchestration views are one-per-space: focus an existing one if present.
   const openOrchestrationTab = useCallback((view: OrchestrationView) => {
     let targetId: number | null = null;
@@ -1065,7 +1101,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         if (
           x.kind === "agent-topology" ||
           x.kind === "message-flow" ||
-          x.kind === "director"
+          x.kind === "director" ||
+          x.kind === "library"
         ) {
           return x;
         }
@@ -1398,6 +1435,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     newNotesTab,
     newBoardTab,
     newTasksTab,
+    openLibraryTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,

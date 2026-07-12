@@ -164,6 +164,7 @@ describe("hydrateTabs", () => {
       { id: 3, kind: "director", spaceId: "s1", title: "Director" },
       { id: 4, kind: "agent-topology", spaceId: "s1", title: "Agent Topology" },
       { id: 5, kind: "message-flow", spaceId: "s1", title: "Message Flow" },
+      { id: 6, kind: "library", spaceId: "s1", title: "Library" },
     ];
     const serialized = serializeTabs(tabs);
     expect(serialized.map((t) => t.kind)).toEqual([
@@ -172,6 +173,7 @@ describe("hydrateTabs", () => {
       "director",
       "agent-topology",
       "message-flow",
+      "library",
     ]);
 
     const restored = hydrateTabs(serialized, "s2", counter());
@@ -183,5 +185,6 @@ describe("hydrateTabs", () => {
     expect(notes?.kind === "notes" && notes.title).toBe("Ideas");
     expect(board?.kind === "board" && board.boardId).toBe("board-y");
     expect(restored.map((t) => t.title)).toContain("Director");
+    expect(restored.map((t) => t.title)).toContain("Library");
   });
 });

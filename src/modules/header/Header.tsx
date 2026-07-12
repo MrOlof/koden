@@ -68,6 +68,8 @@ type Props = {
   onOpenBrainMemory: () => void;
   /** Open the Koden Brain Map (knowledge-graph view). */
   onOpenBrainMap: () => void;
+  /** Open the Library, the Librarian's read-only wiki. */
+  onOpenLibrary: () => void;
   onActivateAgent: (tabId: number, leafId: number) => void;
   onActivateLocalAgent: () => void;
   onOpenSettings: () => void;
@@ -107,6 +109,7 @@ export function Header({
   onOpenBrain,
   onOpenBrainMemory,
   onOpenBrainMap,
+  onOpenLibrary,
   onActivateAgent,
   onActivateLocalAgent,
   onOpenSettings,
@@ -182,6 +185,7 @@ export function Header({
           <BrainHeaderMenu
             onOpenBrain={onOpenBrain}
             onOpenBrainMap={onOpenBrainMap}
+            onOpenLibrary={onOpenLibrary}
             onOpenSettings={onOpenSettings}
           />
         )}
@@ -248,6 +252,7 @@ export function Header({
           <BrainHeaderMenu
             onOpenBrain={onOpenBrain}
             onOpenBrainMap={onOpenBrainMap}
+            onOpenLibrary={onOpenLibrary}
             onOpenSettings={onOpenSettings}
           />
           {settingsButton}

@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { BrainTabIcon } from "@/modules/brain";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
+  BookOpen01Icon,
   Cancel01Icon,
   CheckListIcon,
   Clock01Icon,
@@ -598,6 +599,16 @@ export function TabIcon({ tab }: { tab: Tab }) {
   }
   if (tab.kind === "brain") {
     return <BrainTabIcon />;
+  }
+  if (tab.kind === "library") {
+    return (
+      <HugeiconsIcon
+        icon={BookOpen01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
   }
   if (tab.kind === "brain-map") {
     return (

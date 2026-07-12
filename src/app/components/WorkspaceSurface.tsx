@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import { BrainMapPane, BrainPane } from "@/modules/brain";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
 import { GitHistoryStack } from "@/modules/git-history";
+import { LibraryPane } from "@/modules/library";
 import { MarkdownStack } from "@/modules/markdown";
 import {
   AgentTopologyView,
@@ -93,6 +94,7 @@ export function WorkspaceSurface({
   const isDirectorTab = kind === "director";
   const isBrainTab = kind === "brain";
   const isBrainMapTab = kind === "brain-map";
+  const isLibraryTab = kind === "library";
 
   return (
     <div className="relative h-full min-h-0">
@@ -274,6 +276,15 @@ export function WorkspaceSurface({
         aria-hidden={!isBrainMapTab}
       >
         {isBrainMapTab ? <BrainMapPane /> : null}
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isLibraryTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isLibraryTab}
+      >
+        {isLibraryTab ? <LibraryPane /> : null}
       </div>
     </div>
   );

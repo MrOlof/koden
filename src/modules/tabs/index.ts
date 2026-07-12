@@ -20,6 +20,7 @@ export {
   type GitCommitFileDiffTab,
   type NotesTab,
   type BoardTab,
+  type LibraryTab,
   type OrchestrationTab,
   type OrchestrationView,
   type AiDiffStatus,

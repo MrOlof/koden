@@ -6,6 +6,7 @@ import {
 import type {
   BoardTab,
   EditorTab,
+  LibraryTab,
   MarkdownTab,
   NotesTab,
   OrchestrationTab,
@@ -57,6 +58,7 @@ export type SerializedTab =
   | { kind: "notes"; docId: string; title: string }
   | { kind: "board"; boardId: string; title: string }
   | { kind: "tasks"; listId: string; title: string }
+  | { kind: "library" }
   | { kind: OrchestrationView; title: string };
 
 function basename(path: string): string {
@@ -108,6 +110,7 @@ export function isSerializableTab(tab: Tab): boolean {
     case "notes":
     case "board":
     case "tasks":
+    case "library":
     case "agent-topology":
     case "message-flow":
     case "director":
@@ -143,6 +146,8 @@ function serializeTab(
       return { kind: "board", boardId: tab.boardId, title: tab.title };
     case "tasks":
       return { kind: "tasks", listId: tab.listId, title: tab.title };
+    case "library":
+      return { kind: "library" };
     case "agent-topology":
     case "message-flow":
     case "director":
@@ -302,6 +307,14 @@ function hydrateTab(
         title: s.title,
         listId: s.listId,
       } satisfies TasksTab;
+    case "library":
+      return {
+        id: allocId(),
+        kind: "library",
+        spaceId,
+        cold: true,
+        title: "Library",
+      } satisfies LibraryTab;
     case "agent-topology":
     case "message-flow":
     case "director":
