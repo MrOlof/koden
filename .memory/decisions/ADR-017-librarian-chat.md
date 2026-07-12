@@ -54,3 +54,16 @@ about your projects; it answers grounded in the brain index and memory notes.
    cleanup pass.
 4. Brain tools could be exposed to chat subagents later (registry + runSubagent)
    if the Librarian ever needs to delegate.
+
+## Addendum (2026-07-12, Kosta-approved)
+
+The read-only constraint is scoped to MEMORY, not to everything the chat can
+touch: Brain memory stays read-only from chat (unchanged, still enforced), but
+the workspace docs (Tasks / Notes / Board panes) now get approval-gated writes.
+`ai/tools/workspace.ts` adds reads `workspace_tasks` / `workspace_notes` /
+`workspace_boards` (auto-execute) and writes `workspace_task_add` /
+`workspace_task_set_done` / `workspace_note_append` (append-only notes, no
+delete tools), each write paused by `needsApproval` behind the same in-chat
+approval card as `write_file` / `bash_run`. Writes go through the docs store
+APIs only (primary + staggered-backup persistence and crash-guard flush), never
+raw file IO, and are main-chat-only (not exposed to subagents).

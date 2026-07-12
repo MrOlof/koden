@@ -7,6 +7,7 @@ import { buildShellTools } from "./shell";
 import { buildSubagentTools } from "./subagent";
 import { buildTerminalTools } from "./terminal";
 import { buildTodoTools } from "./todo";
+import { buildWorkspaceTools } from "./workspace";
 
 export { resolvePath, type ToolContext } from "./context";
 
@@ -18,9 +19,10 @@ export { resolvePath, type ToolContext } from "./context";
  *    auto-execute, but go through the security guard which refuses obvious
  *    secret paths (.env*, .ssh/, credentials, etc.).
  *  - Mutating tools (`write_file`, `edit`, `multi_edit`, `create_directory`,
- *    `run_command`) require explicit user approval — the AI SDK pauses on
- *    tool-call and surfaces a `tool-approval-request` part that the UI
- *    renders as a confirmation card.
+ *    `run_command`, `workspace_task_add`, `workspace_task_set_done`,
+ *    `workspace_note_append`) require explicit user approval — the AI SDK
+ *    pauses on tool-call and surfaces a `tool-approval-request` part that
+ *    the UI renders as a confirmation card.
  *  - `edit` / `multi_edit` additionally enforce a read-before-edit invariant
  *    (the model must have called read_file on the path earlier in the
  *    session).
@@ -40,6 +42,7 @@ export function buildTools(ctx: import("./context").ToolContext) {
     ...buildTerminalTools(ctx),
     ...buildTodoTools(ctx),
     ...buildManagedAgentTools(ctx),
+    ...buildWorkspaceTools(ctx),
   } as const;
 }
 

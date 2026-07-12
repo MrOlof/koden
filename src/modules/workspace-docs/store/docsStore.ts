@@ -359,7 +359,11 @@ function ingest(
   }
 }
 
-let hydrating = false;
+// Shared in-flight promise (not a boolean): a second caller during boot
+// hydration must WAIT for the real data, not return against an empty store —
+// the Librarian's workspace_* tools hydrate on demand and would otherwise
+// report "no tasks" while the boot load is still in flight.
+let hydratePromise: Promise<{ recovered: boolean }> | null = null;
 /**
  * Loads notes/boards/tasks from disk. If the primary file is corrupt (a torn
  * `fs::write` from a power cut throws on parse), falls back to the staggered
@@ -367,11 +371,16 @@ let hydrating = false;
  * (fresh install or user deleted everything) and never overwritten by a stale
  * backup. Returns `{ recovered }` so the caller can surface a recovery notice.
  */
-export async function hydrateDocs(): Promise<{ recovered: boolean }> {
-  if (hydrating || useDocsStore.getState().hydrated) {
-    return { recovered: false };
+export function hydrateDocs(): Promise<{ recovered: boolean }> {
+  if (useDocsStore.getState().hydrated) {
+    return Promise.resolve({ recovered: false });
   }
-  hydrating = true;
+  if (hydratePromise) return hydratePromise;
+  hydratePromise = hydrateDocsInner();
+  return hydratePromise;
+}
+
+async function hydrateDocsInner(): Promise<{ recovered: boolean }> {
   let recovered = false;
   try {
     let entries: [string, unknown][] = [];
