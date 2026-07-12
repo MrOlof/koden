@@ -1,13 +1,13 @@
-import { type RefObject, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useManagedAgentsStore } from "@/modules/agents/store/managedAgentsStore";
+import type { Tab } from "@/modules/tabs";
 import {
   findLeafCwd,
   type TerminalPaneHandle,
   whenSessionReady,
   writeToSession,
 } from "@/modules/terminal";
-import type { Tab } from "@/modules/tabs";
+import { invoke } from "@tauri-apps/api/core";
+import { type RefObject, useEffect, useRef } from "react";
 import type { Live } from "../store/chatStore";
 import { redactSensitive } from "./redact";
 
@@ -40,6 +40,11 @@ type Params = {
     title: string,
   ) => { tabId: number; leafId: number };
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
+  // Layout lane (create/arrange only — no close callbacks by design, ADR-017).
+  openWorkspaceTab: Live["openWorkspaceTab"];
+  splitWorkspacePane: Live["splitWorkspacePane"];
+  focusWorkspacePane: Live["focusWorkspacePane"];
+  getWorkspaceLayout: Live["getWorkspaceLayout"];
 };
 
 /**
@@ -162,6 +167,13 @@ export function useAiLiveBridge(params: Params) {
         const buf = terminalRefs.current.get(leafId)?.getBuffer(300);
         return buf ? redactSensitive(buf) : null;
       },
+      // Latest-render closures via ref, like the getters above.
+      openWorkspaceTab: (kind, opts) =>
+        ref.current.openWorkspaceTab(kind, opts),
+      splitWorkspacePane: (kind, side, title) =>
+        ref.current.splitWorkspacePane(kind, side, title),
+      focusWorkspacePane: (paneId) => ref.current.focusWorkspacePane(paneId),
+      getWorkspaceLayout: () => ref.current.getWorkspaceLayout(),
     });
   }, [setLive, terminalRefs]);
 }

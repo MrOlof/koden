@@ -27,6 +27,16 @@ import {
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
+import { checkReadable } from "@/modules/ai/lib/security";
+import type {
+  LayoutFocusResult,
+  LayoutOpenTabResult,
+  LayoutSnapshot,
+  LayoutSplitKind,
+  LayoutSplitResult,
+  LayoutSplitSide,
+  LayoutTabKind,
+} from "@/modules/ai/tools/context";
 import {
   BrainActivityBridge,
   brainBuildGist,
@@ -49,11 +59,11 @@ import {
 import { OnboardingWizard } from "@/modules/onboarding/OnboardingWizard";
 import {
   AGENT_ROLES,
-  acceptDirectorCommand,
   type Agent,
   AgentBusBridge,
   AgentDock,
   type AgentRole,
+  acceptDirectorCommand,
   DirectorBusBridge,
   type DirectorCommand,
   getAgentCommandWithArgs,
@@ -1247,6 +1257,179 @@ export default function App() {
     ],
   );
 
+  // Librarian layout lane (ADR-017 addendum): the chat builds workspace
+  // layouts through these four callbacks. Create/arrange only — no close or
+  // delete callbacks are threaded on purpose, so the chat can add to a layout
+  // but never tear one down.
+  const aiOpenWorkspaceTab = useCallback(
+    (
+      kind: LayoutTabKind,
+      opts?: { title?: string; path?: string },
+    ): LayoutOpenTabResult => {
+      const title = opts?.title?.trim() || undefined;
+      // An id already present pre-call means a singleton was focused, not opened.
+      const before = tabsRef.current;
+      const actionFor = (id: number): "opened" | "focused" =>
+        before.some((t) => t.id === id) ? "focused" : "opened";
+      switch (kind) {
+        case "terminal": {
+          const id = newTab(inheritedCwdForNewTab());
+          if (title) updateTab(id, { customTitle: title });
+          return { tabId: id, action: "opened", title: title ?? "shell" };
+        }
+        case "notes":
+          return {
+            tabId: newNotesTab(undefined, title),
+            action: "opened",
+            title: title ?? "Notes",
+          };
+        case "board":
+          return {
+            tabId: newBoardTab(undefined, title),
+            action: "opened",
+            title: title ?? "Board",
+          };
+        case "tasks":
+          return {
+            tabId: newTasksTab(undefined, title),
+            action: "opened",
+            title: title ?? "Tasks",
+          };
+        case "library": {
+          const id = openLibraryTab();
+          if (id === null) return { error: "could not open the Library" };
+          return { tabId: id, action: actionFor(id), title: "Library" };
+        }
+        case "brain": {
+          const id = openOrchestrationTab("brain");
+          if (id === null) return { error: "could not open the Brain" };
+          return { tabId: id, action: actionFor(id), title: "Brain" };
+        }
+        case "editor": {
+          const path = opts?.path?.trim();
+          if (!path) return { error: "kind 'editor' needs a path" };
+          // Same gate as read_file: display-only or not, the model does not
+          // get to pop secrets (.env, key files) open on the user's screen.
+          const safety = checkReadable(path);
+          if (!safety.ok) return { error: safety.reason };
+          const id = openFileTab(path, true);
+          if (id === null) return { error: `could not open '${path}'` };
+          return { tabId: id, action: actionFor(id), title: path };
+        }
+      }
+    },
+    [
+      newTab,
+      inheritedCwdForNewTab,
+      updateTab,
+      newNotesTab,
+      newBoardTab,
+      newTasksTab,
+      openLibraryTab,
+      openOrchestrationTab,
+      openFileTab,
+    ],
+  );
+
+  // Mirrors handlePaneSplit, but targets the active leaf of the active tab and
+  // reports why a split can't happen instead of silently returning.
+  const aiSplitWorkspacePane = useCallback(
+    (
+      kind: LayoutSplitKind,
+      side: LayoutSplitSide,
+      title?: string,
+    ): LayoutSplitResult => {
+      const t = tabsRef.current.find((x) => x.id === activeId);
+      if (!t) return { error: "no active tab" };
+      if (t.kind !== "terminal")
+        return {
+          error: `the active tab is a '${t.kind}' tab and can't hold pane splits — open a terminal tab first (workspace_open_tab kind 'terminal')`,
+        };
+      if (t.blocks)
+        return {
+          error: "the active tab is a blocks terminal and can't be split",
+        };
+      const { dir, before } = sideToSplit(side);
+      const label = title?.trim();
+      if (kind === "note" || kind === "tasks") {
+        const added =
+          kind === "note"
+            ? addNotePane(t.id, dir, before)
+            : addTasksPane(t.id, dir, before);
+        if (!added)
+          return { error: "split failed: this tab is at its pane limit" };
+        usePaneTitleStore
+          .getState()
+          .setPaneTitle(
+            added.leafId,
+            label || (kind === "note" ? "Notes" : "Tasks"),
+            false,
+            paneColorFor(kind),
+          );
+        return { tabId: t.id, paneId: added.leafId };
+      }
+      const newLeafId = splitActivePane(t.id, dir, before);
+      if (newLeafId === null)
+        return { error: "split failed: this tab is at its pane limit" };
+      const color = paneColorFor("terminal");
+      if (label)
+        usePaneTitleStore
+          .getState()
+          .setPaneTitle(newLeafId, label, false, color);
+      else if (color)
+        usePaneTitleStore.getState().setPaneTitle(newLeafId, "", false, color);
+      return { tabId: t.id, paneId: newLeafId };
+    },
+    [activeId, addNotePane, addTasksPane, splitActivePane, paneColorFor],
+  );
+
+  const aiFocusWorkspacePane = useCallback(
+    (paneId: number): LayoutFocusResult => {
+      const t = tabsRef.current.find(
+        (x): x is TerminalTab =>
+          x.kind === "terminal" && hasLeaf(x.paneTree, paneId),
+      );
+      if (!t)
+        return {
+          error: `no pane ${paneId} — call workspace_layout_state for current pane ids`,
+        };
+      if (t.id !== activeId) {
+        setActiveId(t.id);
+        // Cross-space jump parity with jumpToTab: without switching the
+        // space, activeId can land on a tab whose header isn't in the
+        // visible tab bar (stale pane id after the user changed spaces).
+        useSpaces.getState().setActive(t.spaceId);
+      }
+      focusPane(t.id, paneId);
+      return { focused: true, tabId: t.id, paneId };
+    },
+    [activeId, setActiveId, focusPane],
+  );
+
+  const aiWorkspaceLayout = useCallback((): LayoutSnapshot => {
+    const space = activeSpaceId ?? DEFAULT_SPACE_ID;
+    const titles = usePaneTitleStore.getState().titles;
+    const paneTitles: Record<number, string> = {};
+    for (const [id, t] of Object.entries(titles)) {
+      if (t.label) paneTitles[Number(id)] = t.label;
+    }
+    return {
+      activeTabId: activeId,
+      tabs: tabsRef.current
+        .filter((t) => t.spaceId === space)
+        .map((t) => ({
+          tabId: t.id,
+          kind: t.kind,
+          title: t.title,
+          active: t.id === activeId,
+          ...(t.kind === "terminal"
+            ? { paneTree: t.paneTree, activeLeafId: t.activeLeafId }
+            : {}),
+        })),
+      paneTitles,
+    };
+  }, [activeId, activeSpaceId]);
+
   const handleCloseTabOrPane = useCallback(() => {
     const t = tabsRef.current.find((x) => x.id === activeId);
     if (t?.kind === "terminal" && leafIds(t.paneTree).length > 1) {
@@ -2081,6 +2264,10 @@ export default function App() {
     openPreviewTab,
     newAgentTab,
     terminalRefs,
+    openWorkspaceTab: aiOpenWorkspaceTab,
+    splitWorkspacePane: aiSplitWorkspacePane,
+    focusWorkspacePane: aiFocusWorkspacePane,
+    getWorkspaceLayout: aiWorkspaceLayout,
   });
 
   const shell = (

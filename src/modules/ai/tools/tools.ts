@@ -2,6 +2,7 @@ import { buildManagedAgentTools } from "./agent";
 import { buildBrainTools } from "./brain";
 import { buildEditTools } from "./edit";
 import { buildFsTools } from "./fs";
+import { buildLayoutTools } from "./layout";
 import { buildSearchTools } from "./search";
 import { buildShellTools } from "./shell";
 import { buildSubagentTools } from "./subagent";
@@ -26,6 +27,11 @@ export { resolvePath, type ToolContext } from "./context";
  *  - `edit` / `multi_edit` additionally enforce a read-before-edit invariant
  *    (the model must have called read_file on the path earlier in the
  *    session).
+ *  - Layout tools (`workspace_open_tab`, `workspace_split_pane`,
+ *    `workspace_focus_pane`, `workspace_layout_state`) auto-execute without
+ *    approval: every action is immediately visible, reversible with one
+ *    click, and non-destructive. Create/arrange only — no close/delete
+ *    tools by design (ADR-017 addendum).
  *
  * The model sees absolute paths only after they are resolved against the
  * active terminal's cwd (provided via `getCwd`); it should not invent paths
@@ -36,6 +42,7 @@ export function buildTools(ctx: import("./context").ToolContext) {
     ...buildBrainTools(ctx),
     ...buildFsTools(ctx),
     ...buildEditTools(ctx),
+    ...buildLayoutTools(ctx),
     ...buildSearchTools(ctx),
     ...buildShellTools(ctx),
     ...buildSubagentTools(ctx),

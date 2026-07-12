@@ -48,6 +48,11 @@ const TOOL_TITLES: Record<string, string> = {
   workspace_task_add: "Adding a task",
   workspace_task_set_done: "Checking off a task",
   workspace_note_append: "Appending to a note",
+  // Layout
+  workspace_open_tab: "Opening a tab",
+  workspace_split_pane: "Splitting the pane",
+  workspace_focus_pane: "Focusing a pane",
+  workspace_layout_state: "Reading the layout",
 };
 
 // Input-aware labels for the live status pill — folds the interesting bit
@@ -71,6 +76,8 @@ const TOOL_STATUS_LABELS: Record<string, LabelFn> = {
   todo_write: (i) =>
     `Updating plan (${Array.isArray(i.todos) ? i.todos.length : 0} items)`,
   run_subagent: (i) => `Spawning ${String(i.type ?? "subagent")} subagent`,
+  workspace_open_tab: (i) => `Opening a ${String(i.kind ?? "workspace")} tab`,
+  workspace_split_pane: (i) => `Adding a ${String(i.kind ?? "new")} pane`,
 };
 
 /** Friendly static title for a tool. Never returns the raw name. */
