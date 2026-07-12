@@ -28,6 +28,12 @@ struct Persisted {
     workspace_root: Option<String>,
     #[serde(default)]
     projects: Vec<Project>,
+    /// Tombstones for explicitly removed projects (stable ids). Consulted by the
+    /// AUTO registration paths (boot re-discovery / first-use / the workspace
+    /// child scan) so a removed workspace child is not silently resurrected at
+    /// the next launch; cleared when the user re-adds explicitly (ADR-021).
+    #[serde(default)]
+    removed: Vec<String>,
 }
 
 #[derive(Default)]
@@ -35,6 +41,9 @@ pub struct KodenBrainRegistry {
     projects: RwLock<Vec<Project>>,
     /// The user's workspace parent (each child project is registered separately).
     workspace_root: RwLock<Option<String>>,
+    /// Removed-project tombstones (stable ids) — see [Persisted::removed].
+    /// BTreeSet so persistence order is deterministic.
+    removed: RwLock<std::collections::BTreeSet<ProjectId>>,
 }
 
 impl KodenBrainRegistry {
@@ -42,14 +51,35 @@ impl KodenBrainRegistry {
         self.projects.read().map(|p| p.clone()).unwrap_or_default()
     }
 
-    /// Register a project root (idempotent by stable id). Returns the project.
+    /// Register a project root EXPLICITLY (the user asked: `brain_add_project`).
+    /// Idempotent by stable id; clears any removal tombstone — an explicit
+    /// re-add is the documented opt-back-in after a remove.
     pub fn add_root(&self, root: &Path) -> Option<Project> {
+        self.register(root, true)
+    }
+
+    /// Register a project root DISCOVERED by an automatic path (boot
+    /// re-discovery, first-use registration, the workspace child scan). Honors
+    /// removal tombstones: a project the user explicitly removed returns `None`
+    /// and stays unregistered until an explicit [KodenBrainRegistry::add_root].
+    pub fn add_root_discovered(&self, root: &Path) -> Option<Project> {
+        self.register(root, false)
+    }
+
+    fn register(&self, root: &Path, explicit: bool) -> Option<Project> {
         let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let root_str = normalize(&canon);
         if root_str.is_empty() {
             return None;
         }
         let id = project_id_for(&root_str);
+        if explicit {
+            if let Ok(mut r) = self.removed.write() {
+                r.remove(&id);
+            }
+        } else if self.is_removed(&id) {
+            return None; // user removed it — auto paths must not resurrect
+        }
         let name = canon
             .file_name()
             .and_then(|s| s.to_str())
@@ -65,17 +95,35 @@ impl KodenBrainRegistry {
         Some(p)
     }
 
-    /// Remove a project by id. Returns the removed project (so a failed downstream
-    /// enqueue can [KodenBrainRegistry::restore] it), or `None` if not registered.
+    /// Whether `id` carries a removal tombstone (explicitly removed, not
+    /// explicitly re-added since).
+    pub fn is_removed(&self, id: &str) -> bool {
+        self.removed.read().map(|r| r.contains(id)).unwrap_or(false)
+    }
+
+    /// Remove a project by id and tombstone it so the automatic registration
+    /// paths (boot re-discovery / first-use) don't resurrect it next launch.
+    /// Returns the removed project (so a failed downstream enqueue can
+    /// [KodenBrainRegistry::restore] it), or `None` if not registered.
     pub fn remove(&self, id: &str) -> Option<Project> {
-        let mut guard = self.projects.write().ok()?;
-        let idx = guard.iter().position(|p| p.id == id)?;
-        Some(guard.remove(idx))
+        let removed = {
+            let mut guard = self.projects.write().ok()?;
+            let idx = guard.iter().position(|p| p.id == id)?;
+            guard.remove(idx)
+        };
+        if let Ok(mut r) = self.removed.write() {
+            r.insert(removed.id.clone());
+        }
+        Some(removed)
     }
 
     /// Put back a project taken out by [KodenBrainRegistry::remove] — the rollback
-    /// path when the prune couldn't be enqueued. Idempotent by id.
+    /// path when the prune couldn't be enqueued. Clears the tombstone the remove
+    /// planted (the removal never happened). Idempotent by id.
     pub fn restore(&self, project: Project) {
+        if let Ok(mut r) = self.removed.write() {
+            r.remove(&project.id);
+        }
         if let Ok(mut guard) = self.projects.write() {
             if !guard.iter().any(|p| p.id == project.id) {
                 guard.push(project);
@@ -101,6 +149,11 @@ impl KodenBrainRegistry {
             version: 1,
             workspace_root: self.workspace_root(),
             projects: self.projects(),
+            removed: self
+                .removed
+                .read()
+                .map(|r| r.iter().cloned().collect())
+                .unwrap_or_default(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&snap) {
             if let Some(dir) = path.parent() {
@@ -124,6 +177,9 @@ impl KodenBrainRegistry {
         }
         if let Ok(mut w) = self.workspace_root.write() {
             *w = p.workspace_root;
+        }
+        if let Ok(mut r) = self.removed.write() {
+            *r = p.removed.into_iter().collect();
         }
         true
     }
@@ -253,10 +309,55 @@ mod tests {
         assert_eq!(removed.id, p.id);
         assert!(reg.projects().is_empty());
         assert!(reg.remove(&p.id).is_none(), "second remove is a no-op");
-        // Rollback path: restore puts the exact project back (idempotent by id).
+        // Rollback path: restore puts the exact project back (idempotent by id)
+        // AND clears the tombstone (the removal never happened).
         reg.restore(removed.clone());
         reg.restore(removed);
         assert_eq!(reg.projects().len(), 1);
         assert_eq!(reg.projects()[0].id, p.id);
+        assert!(!reg.is_removed(&p.id), "restore must clear the tombstone");
+    }
+
+    /// A confirmed remove must survive the automatic registration paths: the
+    /// discovered variant (boot re-discovery / first-use / child scan) skips a
+    /// tombstoned root, while an EXPLICIT add_root clears the tombstone — the
+    /// documented opt-back-in.
+    #[test]
+    fn removed_project_is_not_resurrected_by_discovery_but_explicit_add_clears() {
+        let reg = KodenBrainRegistry::default();
+        let dir = tempfile::tempdir().unwrap();
+        let p = reg.add_root(dir.path()).unwrap();
+        reg.remove(&p.id).expect("removed");
+        assert!(reg.is_removed(&p.id));
+        // Auto path: tombstone wins.
+        assert!(reg.add_root_discovered(dir.path()).is_none(), "discovery must not resurrect");
+        assert!(reg.projects().is_empty());
+        // Explicit path: tombstone cleared, project back, discovery works again.
+        let re = reg.add_root(dir.path()).expect("explicit re-add");
+        assert_eq!(re.id, p.id);
+        assert!(!reg.is_removed(&p.id));
+        assert_eq!(reg.projects().len(), 1);
+    }
+
+    /// The tombstone must survive a restart: save_to → load_from round-trips the
+    /// removed set, so boot re-discovery on the NEXT launch still skips it.
+    #[test]
+    fn removed_tombstones_persist_across_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("workspace.json");
+        let proj_dir = tempfile::tempdir().unwrap();
+
+        let reg = KodenBrainRegistry::default();
+        reg.set_workspace_root(Some("/ws".to_string()));
+        let p = reg.add_root(proj_dir.path()).unwrap();
+        reg.remove(&p.id).expect("removed");
+        reg.save_to(&cfg);
+
+        // Fresh registry = next launch. Load, then re-run "boot re-discovery".
+        let reg2 = KodenBrainRegistry::default();
+        assert!(reg2.load_from(&cfg));
+        assert!(reg2.is_removed(&p.id), "tombstone survives the restart");
+        assert!(reg2.add_root_discovered(proj_dir.path()).is_none());
+        assert!(reg2.projects().is_empty());
     }
 }

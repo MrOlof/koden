@@ -40,6 +40,8 @@ pub fn brain_list_projects(state: State<BrainState>) -> Vec<Project> {
 
 /// Register a new project root (the wizard / "add folder" flow) and trigger a
 /// reconcile so it gets indexed + watched. Returns the registered project.
+/// The EXPLICIT path: it clears any removal tombstone, so re-adding a
+/// previously removed project opts it back in to auto re-discovery.
 /// Async: the `is_dir`/canonicalize stats can stall on a dead network drive.
 #[tauri::command]
 pub async fn brain_add_project(state: State<'_, BrainState>, path: String) -> Result<Project, String> {
@@ -68,8 +70,10 @@ pub async fn brain_add_project(state: State<'_, BrainState>, path: String) -> Re
 }
 
 /// Unregister a project and prune all its indexed state. Does NOT delete user files
-/// (brain-local only). Removed from the registry immediately; the index prune + a
-/// watcher re-arm happen on the worker.
+/// (brain-local only). Removed from the registry immediately (and TOMBSTONED in
+/// `workspace.json`, so boot re-discovery / first-use registration cannot
+/// resurrect it — `brain_add_project` is the explicit opt-back-in); the index
+/// prune + a watcher re-arm happen on the worker.
 #[tauri::command]
 pub fn brain_remove_project(state: State<BrainState>, project: String) -> Result<(), String> {
     // Registry first (the worker's RemoveProject handler re-arms the watcher and

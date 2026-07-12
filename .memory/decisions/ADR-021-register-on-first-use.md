@@ -115,6 +115,18 @@ count when > 0 and persists `workspace.json` only then.
   toast, one rescan). `add_root` is idempotent by stable id regardless.
 - **Sanity gate** — the candidate passes the same `is_sane_root` gate as
   `brain_add_project` (no drive roots, no bare home dir).
+- **Removal tombstones** — `brain_remove_project` tombstones the stable id in
+  `workspace.json` (`removed: [...]`). Every AUTO registration path — boot
+  re-discovery, first-use (signal/turn), and the `brain_set_workspace` child
+  scan — goes through `registry.add_root_discovered`, which skips tombstoned
+  ids, so a removed project whose dir still qualifies on disk (the normal
+  case) is NOT silently re-registered at the next launch or next session in
+  that dir. The explicit `brain_add_project` path (`registry.add_root`) clears
+  the tombstone — re-adding is the documented opt-back-in. The command's
+  rollback (`registry.restore` after a failed prune enqueue) clears the
+  tombstone too, since that removal never happened. Without this, removal was
+  session-scoped for workspace children: boot 5b resurrected it invisibly
+  (INFO log only, no toast), undoing the user's confirmed action.
 
 ## Consequences
 

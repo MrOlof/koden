@@ -233,7 +233,9 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     // while Koden was closed is registered BEFORE the watcher arms and the warm
     // walk runs, so it gets watched + indexed + doctored + its first artifact
     // emission through the normal boot flow below. Idempotent — the same shared
-    // loop `brain_set_workspace` runs; already-registered children no-op.
+    // loop `brain_set_workspace` runs; already-registered children no-op and
+    // explicitly REMOVED children stay removed (persisted registry tombstones —
+    // an auto scan never undoes the user's confirmed remove).
     if let Some(state) = app.try_state::<BrainState>() {
         if let Some(root) = state.registry.workspace_root() {
             let (_, added) =
@@ -769,10 +771,13 @@ fn seed_registry(app: &AppHandle, launch_dir: Option<&str>) {
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_dir())
         .or_else(|| std::env::current_dir().ok().filter(|p| has_project_marker(p)));
+    // Discovered (not explicit) registration: the launch-dir seed also runs when
+    // the config loaded but every project was removed — honoring the tombstone
+    // keeps a removed launch-dir project removed across that boot too.
     match root {
-        Some(p) if is_sane_root(&p) => match state.registry.add_root(&p) {
+        Some(p) if is_sane_root(&p) => match state.registry.add_root_discovered(&p) {
             Some(proj) => log::info!("brain: seeded project '{}' ({})", proj.name, proj.root),
-            None => log::warn!("brain: failed to seed project for {}", p.display()),
+            None => log::warn!("brain: did not seed project for {} (removed or unregisterable)", p.display()),
         },
         _ => log::info!("brain: no seed project (awaiting wizard / brain_rescan)"),
     }
@@ -818,7 +823,10 @@ pub fn discover_workspace_projects(root: &std::path::Path) -> Vec<std::path::Pat
 /// Register every qualifying immediate child of `root` as its OWN project — the
 /// `brain_set_workspace` loop, shared with boot re-discovery (ADR-021; extracted
 /// so the two paths cannot drift). Idempotent by stable id: an already-registered
-/// child is returned but not re-added. Returns `(registered children, newly added)`.
+/// child is returned but not re-added. An explicitly REMOVED child (tombstoned in
+/// `workspace.json`) is skipped entirely — an automatic scan must not undo the
+/// user's confirmed remove; `brain_add_project` is the opt-back-in. Returns
+/// `(registered children, newly added)`.
 pub fn register_workspace_children(
     registry: &KodenBrainRegistry,
     root: &std::path::Path,
@@ -828,7 +836,7 @@ pub fn register_workspace_children(
     let mut children = Vec::new();
     let mut added = 0usize;
     for child in discover_workspace_projects(root) {
-        if let Some(p) = registry.add_root(&child) {
+        if let Some(p) = registry.add_root_discovered(&child) {
             if !known.contains(&p.id) {
                 added += 1;
             }
@@ -879,7 +887,9 @@ pub fn first_use_candidate(
 /// root, register it, and RETRY the resolution — the triggering signal/turn is
 /// never lost. Returns the project plus whether THIS call registered it.
 /// `None`: cwd resolves nowhere and no candidate exists (no workspace root, cwd
-/// outside it or the root itself, no qualifying ancestor, insane root).
+/// outside it or the root itself, no qualifying ancestor, insane root, or the
+/// candidate carries a removal tombstone — explicitly removed projects never
+/// auto-return).
 /// Guards: the root itself never qualifies (strict-prefix walk); a candidate
 /// inside an EXISTING project is impossible (that prefix would have resolved);
 /// debounce is structural — the single worker thread is the only caller, and
@@ -897,7 +907,9 @@ pub(crate) fn resolve_or_register_project(
     if !is_sane_root(&candidate) {
         return None;
     }
-    registry.add_root(&candidate)?;
+    // Discovered (not explicit) registration: honors removal tombstones, so a
+    // session inside a project the user removed does NOT re-register it.
+    registry.add_root_discovered(&candidate)?;
     registry.resolve(cwd).map(|p| (p, true))
 }
 
@@ -2933,5 +2945,48 @@ mod tests {
         assert_eq!(added2, 0, "double boot registers nothing new");
         assert_eq!(children2.len(), 2);
         assert_eq!(reg.projects().len(), 2);
+    }
+
+    /// A user's confirmed remove must survive the auto paths: boot re-discovery
+    /// (the shared child scan) and first-use registration both skip a tombstoned
+    /// project even though its dir still qualifies on disk; the explicit
+    /// `brain_add_project` path (`add_root`) is the opt-back-in.
+    #[test]
+    fn removed_project_survives_boot_rediscovery_and_first_use() {
+        let work = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(work.path()).unwrap();
+        let proj = root.join("proj");
+        let src = proj.join("src");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+
+        let reg = KodenBrainRegistry::default();
+        reg.set_workspace_root(Some(to_canon(&root).trim_end_matches('/').to_string()));
+        let (_, added) = register_workspace_children(&reg, &root);
+        assert_eq!(added, 1);
+        let id = reg.projects()[0].id.clone();
+
+        // The user removes it (brain_remove_project → registry.remove).
+        reg.remove(&id).expect("removed");
+
+        // Boot re-discovery (next launch, .git still on disk): stays removed.
+        let (children, added) = register_workspace_children(&reg, &root);
+        assert_eq!(added, 0, "boot re-discovery must not resurrect a removed project");
+        assert!(children.is_empty());
+        assert!(reg.projects().is_empty());
+
+        // First-use registration (agent signal/turn in that dir): stays removed.
+        let cwd = src.to_string_lossy().to_string();
+        assert!(
+            resolve_or_register_project(&reg, &cwd).is_none(),
+            "first-use must not resurrect a removed project"
+        );
+        assert!(reg.projects().is_empty());
+
+        // Explicit re-add opts back in; discovery works normally again.
+        reg.add_root(&proj).expect("explicit re-add");
+        assert_eq!(reg.projects().len(), 1);
+        let (_, newly) = resolve_or_register_project(&reg, &cwd).expect("resolves again");
+        assert!(!newly);
     }
 }

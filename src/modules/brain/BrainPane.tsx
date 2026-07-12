@@ -251,7 +251,7 @@ export function BrainPane() {
     if (!targetId) return;
     const p = projects.find((x) => x.id === targetId);
     const ok = window.confirm(
-      `Remove "${p?.name ?? targetId}" from the brain? This only unindexes it — your files are not touched.`,
+      `Remove "${p?.name ?? targetId}" from the brain? This only unindexes it — your files are not touched. It stays removed until you add it back.`,
     );
     if (!ok) return;
     try {
