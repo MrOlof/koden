@@ -1365,6 +1365,11 @@ impl SqliteIndex {
         // identical corpus short-circuits to Unchanged/$0 and never regenerates the
         // proposals this removal just pruned (and the orphan row leaks). [LIB-SPEND-01]
         tx.execute("DELETE FROM brain_librarian_pin WHERE project_id=?1", [project_id])?;
+        // And the ADR-020 session trail: Tick retention only iterates REGISTERED
+        // projects, so an orphaned trail would never be cap- or TTL-pruned, and a
+        // deterministic project id means re-registering the same root resurrects
+        // the stale (redacted prompt text + paths) trail into the gist.
+        tx.execute("DELETE FROM brain_activity WHERE project_id=?1", [project_id])?;
         tx.commit()?;
         // Journal the canonical deletes so a rebuild doesn't resurrect a removed
         // project's proposals / reject history / pin. Derived tables are not journaled.
@@ -2968,6 +2973,23 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
             .collect();
         assert_eq!(aside.len(), 1, "corrupt original moved aside, not deleted");
+    }
+
+    /// ADR-020 removal hygiene: `remove_project` must drop the session activity
+    /// trail too. Tick retention only prunes REGISTERED projects, and project ids
+    /// are deterministic from the root path, so a surviving trail would both leak
+    /// (redacted) prompt text/paths indefinitely AND resurrect into the gist on
+    /// re-register. Other projects' rows must be untouched.
+    #[test]
+    fn remove_project_drops_the_activity_trail_scoped_to_the_project() {
+        let (_dir, path) = temp_db();
+        let idx = SqliteIndex::open(&path).unwrap();
+        idx.record_activity("p", Some(7), "turn", "user asked about auth", 1_000).unwrap();
+        idx.record_activity("p", Some(7), "start", "", 1_001).unwrap();
+        idx.record_activity("q", None, "turn", "other project trail", 1_002).unwrap();
+        idx.remove_project("p").unwrap();
+        assert!(idx.recent_activity("p", 50).unwrap().is_empty(), "removed project's trail gone");
+        assert_eq!(idx.recent_activity("q", 50).unwrap().len(), 1, "other project untouched");
     }
 
     /// ADR-010 cluster 4: the corrupt-rebuild path must best-effort carry the

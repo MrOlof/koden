@@ -51,6 +51,11 @@ notifications.
   (`prune_activity`; MAX_TURNS / RESUME_TTL_DAYS precedents). A prune that
   drops rows refreshes that project's gist artifact so it never quotes rows
   the store no longer holds.
+- Removal hygiene (fixup): `remove_project` deletes the trail with the rest of
+  the project-scoped tables. Tick retention only iterates registered projects,
+  so an orphaned trail would never be cap- or TTL-pruned, and since project
+  ids are deterministic from the root path, re-registering the same root would
+  resurrect the stale trail into the gist's "Recent activity" section.
 
 ### Ingest legs
 
