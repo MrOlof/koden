@@ -46,6 +46,9 @@ use rusqlite::{params_from_iter, Connection, OptionalExtension};
 /// consequence — `spent_total_usd` — is itself journaled via `brain_budget`. So a
 /// fresh-DB replay starts with an EMPTY ledger (no dangling 'reserved' rows, hence
 /// the boot sweep can't double-charge), while spend enforcement is fully restored.
+/// MINUS `brain_activity` too (ADR-020): the session trail is high-frequency and
+/// loss-tolerant — journaling it would churn this 8MB-capped low-frequency sidecar
+/// for rows whose loss costs context, never correctness.
 /// This list is BOTH the compaction source set AND the replay table whitelist — a
 /// line naming any other table is rejected, so a generic SQL builder can never touch
 /// a non-canonical (or bogus) table. Keep it in lockstep with the append call sites.

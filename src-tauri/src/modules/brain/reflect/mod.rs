@@ -46,6 +46,10 @@ const RESOLVED_DEDUP_LOOKBACK: usize = 50;
 /// Cap on titles listed in the "already proposed" digest section, so a large inbox
 /// can't blow up the user message (and the token estimate). Pending are listed first.
 const ALREADY_PROPOSED_MAX: usize = 40;
+/// ADR-020: newest activity rows appended to the SENT message (never the hash —
+/// the append_already_proposed split) + the per-line turn-snippet char cap.
+const ACTIVITY_SEND_MAX: usize = 12;
+const ACTIVITY_SNIPPET_CHARS: usize = 120;
 /// Conservative token estimate for the pre-flight RESERVE: chars/3 over-counts vs
 /// the ~chars/4 rule, so the ceiling errs toward blocking early / over-charging a
 /// crash, never under-reserving (EXECUTION_PLAN appendix "conservative divisor").
@@ -208,10 +212,12 @@ pub fn reflect_with_client(
     let Some(corpus) = build_digest(index, project_id, now_date) else {
         return ReflectOutcome::noop(ReflectReason::EmptyCorpus);
     };
-    // What we SEND additionally carries the "already proposed" advisory. It is NOT
-    // part of the delta-gate hash (that is `build_digest` alone) — see
-    // append_already_proposed — so enqueuing proposals can't self-re-fire a round.
-    let user = append_already_proposed(index, project_id, corpus);
+    // What we SEND additionally carries the "already proposed" advisory + the
+    // recent-activity context (ADR-020). NEITHER is part of the delta-gate hash
+    // (that is `build_digest` alone) — see append_already_proposed /
+    // append_recent_activity — so enqueuing proposals can't self-re-fire a round
+    // and turn ingest never buys a paid round by itself.
+    let user = append_recent_activity(index, project_id, append_already_proposed(index, project_id, corpus));
     let est = estimate_cost(cfg, &system, &user);
 
     // Pre-flight reserve — the durable, atomic ceiling gate (no call if it fails).
@@ -383,6 +389,54 @@ fn append_already_proposed(index: &SqliteIndex, project_id: &str, corpus: String
         .map(|(title, _)| format!("- {}", title.split_whitespace().collect::<Vec<_>>().join(" ")))
         .collect();
     let section = format!("## Already proposed (do not re-propose)\n\n{}", lines.join("\n"));
+    let redacted = crate::modules::brain::secrets::redact(&section).0;
+    format!("{corpus}\n\n{redacted}")
+}
+
+/// ADR-020: append the recent session-activity trail to the SENT message ONLY —
+/// the identical split as [append_already_proposed] (never folded into
+/// [build_digest], whose hash is the delta gate; a hashed trail would make every
+/// stored turn buy a paid round). Rows were redacted at ingest; the assembled
+/// section passes [secrets::redact] again (defense in depth, same as the
+/// advisory). Returns `corpus` unchanged when the trail is empty.
+fn append_recent_activity(index: &SqliteIndex, project_id: &str, corpus: String) -> String {
+    let rows = index.recent_activity(project_id, ACTIVITY_SEND_MAX).unwrap_or_default();
+    if rows.is_empty() {
+        return corpus;
+    }
+    let snip = |s: &str| -> String {
+        let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.chars().count() <= ACTIVITY_SNIPPET_CHARS {
+            one_line
+        } else {
+            let cut: String = one_line.chars().take(ACTIVITY_SNIPPET_CHARS).collect();
+            format!("{}…", cut.trim_end())
+        }
+    };
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|r| match r.kind.as_str() {
+            "turn" => format!("- turn: {}", snip(&r.payload_redacted)),
+            "files" => {
+                let files: Vec<String> =
+                    serde_json::from_str(&r.payload_redacted).unwrap_or_default();
+                let extra = files.len().saturating_sub(6);
+                let head = files.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+                if extra > 0 {
+                    format!("- files touched: {head} (+{extra})")
+                } else {
+                    format!("- files touched: {head}")
+                }
+            }
+            "start" => format!("- session started: {}", snip(&r.payload_redacted)),
+            "end" => format!("- session ended: {}", snip(&r.payload_redacted)),
+            other => format!("- {other}"),
+        })
+        .collect();
+    let section = format!(
+        "## Recent session activity (context only — not memory, do not re-propose)\n\n{}",
+        lines.join("\n")
+    );
     let redacted = crate::modules::brain::secrets::redact(&section).0;
     format!("{corpus}\n\n{redacted}")
 }
@@ -613,8 +667,9 @@ pub fn reflect_prepare_with_client(
     prev_digest_hash: Option<&str>,
 ) -> ReflectDispatch {
     // Hash the STABLE corpus only (the delta gate), then append the volatile "already
-    // proposed" advisory for the SEND — same split as [reflect_with_client], so an
-    // offloaded round that enqueues proposals doesn't self-re-fire either.
+    // proposed" advisory + recent-activity context (ADR-020) for the SEND — same split
+    // as [reflect_with_client], so an offloaded round that enqueues proposals doesn't
+    // self-re-fire either.
     let Some(corpus) = build_digest(index, project_id, now_date) else {
         return ReflectDispatch::Ready(ReflectOutcome::noop(ReflectReason::EmptyCorpus), None);
     };
@@ -623,7 +678,7 @@ pub fn reflect_prepare_with_client(
         return ReflectDispatch::Ready(ReflectOutcome::noop(ReflectReason::Unchanged), Some(digest_hash));
     }
     let system = schema::system_prompt();
-    let user = append_already_proposed(index, project_id, corpus);
+    let user = append_recent_activity(index, project_id, append_already_proposed(index, project_id, corpus));
     let est = estimate_cost(cfg, &system, &user);
     // Pre-flight reserve on the worker thread — the durable, atomic ceiling gate.
     let rid = match budget::check_and_reserve(index.conn(), &cfg.model, est, now_ms) {
@@ -872,6 +927,55 @@ mod tests {
         assert_eq!(out2.spent_usd, 0.0, "Unchanged is $0");
         assert_eq!(fk.calls.get(), 1, "no second paid call after an enqueue");
         assert_eq!(h2.as_deref(), Some(h1.as_str()), "gate hash stable across the enqueue");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// ADR-020 delta-gate purity (the invariant the send-only split protects):
+    /// ingesting 50 turn rows must leave `build_digest` BYTE-IDENTICAL — an
+    /// unchanged corpus short-circuits to Unchanged/$0 even under heavy session
+    /// activity — while the SENT message carries the trail via the split.
+    #[test]
+    fn turn_ingest_never_moves_the_delta_gate_hash_but_rides_the_send() {
+        let (base, idx, cfg) = temp_index_with_note("activity_split");
+        let before = build_digest(&idx, "p", Some("2026-07-12")).expect("corpus");
+
+        // Round 1 establishes the pin.
+        let fk = fake(proposals_json(&[]));
+        let (out1, h1) = reflect_auto_with_client(&idx, &fk, &cfg, "p", Some("2026-07-12"), 1000, None);
+        assert!(matches!(out1.reason, ReflectReason::Ok), "{:?}", out1.reason);
+        let h1 = h1.expect("pinned");
+
+        // 50 turns + a files row + session boundaries land in the trail.
+        for i in 0..50i64 {
+            idx.record_activity("p", Some(3), "turn", &format!("investigate flaky test {i}"), 2_000 + i)
+                .unwrap();
+        }
+        idx.record_activity("p", None, "files", r#"["src/auth.rs"]"#, 2_100).unwrap();
+        idx.record_activity("p", Some(3), "start", "claude", 2_200).unwrap();
+
+        // The STABLE digest — and with it the delta-gate hash — is untouched.
+        assert_eq!(
+            build_digest(&idx, "p", Some("2026-07-12")).as_deref(),
+            Some(before.as_str()),
+            "activity ingest must never move the corpus digest"
+        );
+        let (out2, h2) = reflect_auto_with_client(&idx, &fk, &cfg, "p", Some("2026-07-12"), 3000, Some(&h1));
+        assert!(matches!(out2.reason, ReflectReason::Unchanged), "{:?}", out2.reason);
+        assert_eq!(out2.spent_usd, 0.0, "no paid round bought by turns");
+        assert_eq!(h2.as_deref(), Some(h1.as_str()), "gate hash stable across 52 activity rows");
+        assert_eq!(fk.calls.get(), 1, "the provider was NOT called again");
+
+        // A round that DOES send (fresh pin) carries the trail in the message —
+        // the send-only half of the split.
+        let fk2 = fake(proposals_json(&[]));
+        let _ = reflect_with_client(&idx, &fk2, &cfg, "p", Some("2026-07-12"), 4000);
+        let sent = fk2.last_user.borrow().clone();
+        assert!(
+            sent.contains("## Recent session activity"),
+            "trail section missing from the sent message: {sent}"
+        );
+        assert!(sent.contains("investigate flaky test 49"), "newest turn rides along: {sent}");
+        assert!(sent.contains("src/auth.rs"), "files trail rides along: {sent}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

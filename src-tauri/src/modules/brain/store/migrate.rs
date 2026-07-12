@@ -26,6 +26,10 @@ pub(crate) const CANONICAL_TABLES: &[&str] = &[
     "brain_librarian",
     "brain_librarian_pin",
     "brain_semantic_meta",
+    // ADR-020: observed session history (turns/files/boundaries) — not re-derivable
+    // from a disk walk, so preserved + best-effort salvaged; deliberately NOT in
+    // journal::JOURNALED_TABLES (high-frequency + loss-tolerant).
+    "brain_activity",
 ];
 
 /// Columns added to CANONICAL tables AFTER their first ship (ADR-018) —

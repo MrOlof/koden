@@ -45,6 +45,12 @@ pub enum BrainEvent {
         project: ProjectId,
         changed: Vec<PathBuf>,
     },
+    /// A submitted user prompt (ADR-020), forwarded by the frontend AgentBusBridge
+    /// from the UserPromptSubmit hook bus line via `brain_record_turn`. The worker
+    /// pre-filters (empty / slash-command-only), truncates, REDACTS at ingest, and
+    /// resolves pty → cwd → project exactly like [`BrainEvent::Agent`] before the
+    /// single writer stores it as a `turn` activity row.
+    Turn { pty_id: u32, prompt: String },
     /// Periodic self-tick: flush WAL, reconcile ledger (P4), retry degraded store.
     Tick,
     /// Webview/command-initiated reindex (e.g. a wizard "rescan", or `None` =

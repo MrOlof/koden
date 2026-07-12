@@ -90,6 +90,16 @@
 ///     `brain_librarian.inject_gist` — the same additive-canonical idiom. Gist
 ///     BYTES are unchanged (the hook artifact is a new serialization AROUND the
 ///     existing gist), so no key rotation is warranted.
+///
+/// v15 + ADR-020 (NO bump): session activity layer added the `brain_activity`
+///     table — the `brain_librarian_pin` new-table idiom (CREATE TABLE IF NOT
+///     EXISTS in this base DDL, CANONICAL/preserved, absent from the upgrade
+///     DROP batch). Activity is observed session history, NOT re-derivable from
+///     a disk walk, hence canonical; it is deliberately NOT journaled (high-
+///     frequency, loss-tolerant — see journal::JOURNALED_TABLES). The gist key
+///     FORMULA gains an activity-set component (gist/mod.rs), which rotates
+///     every key once on first post-upgrade launch — same one-time
+///     agent-prompt-cache miss as a version bump, without dropping any table.
 pub const SCHEMA_VERSION: i64 = 15;
 
 /// Idempotent base DDL (safe to run on every open).
@@ -272,6 +282,24 @@ CREATE TABLE IF NOT EXISTS brain_librarian_pin (
     digest_hash TEXT NOT NULL,
     updated_at  INTEGER NOT NULL DEFAULT 0
 );
+
+-- Session activity trail (ADR-020). CANONICAL/preserved (observed session
+-- history — turns, files-touched, session boundaries — is NOT re-derivable from
+-- a disk walk) but deliberately NOT journaled: it is the one high-frequency
+-- canonical table, loss-tolerant by design (a lost trail costs context, never
+-- correctness), and journaling it would churn the 8MB-capped sidecar. Additive
+-- via IF NOT EXISTS (the brain_librarian_pin idiom) — no SCHEMA_VERSION bump.
+-- `payload_redacted` passed secrets::redact AT INGEST (worker-side), before any
+-- storage — prompt text never lands raw. Pruned on Tick (per-project cap + TTL).
+CREATE TABLE IF NOT EXISTS brain_activity (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id      TEXT NOT NULL,
+    ts_ms           INTEGER NOT NULL,
+    session_pty     INTEGER,          -- pty id when the row is session-scoped
+    kind            TEXT NOT NULL CHECK (kind IN ('turn','files','start','end')),
+    payload_redacted TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS brain_activity_project_ts ON brain_activity(project_id, ts_ms);
 
 -- Semantic embedderId header (P5). CANONICAL/preserved singleton. Empty in v1 (no
 -- embedder compiled); set when the `semantic` feature is enabled so a later build

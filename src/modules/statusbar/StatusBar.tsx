@@ -10,6 +10,7 @@ import { AiStatusBarControls } from "@/modules/ai/components/AiStatusBarControls
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { IncognitoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { BrainActivitySegment } from "./BrainActivitySegment";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 
@@ -70,6 +71,8 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        {/* ADR-020: ambient Librarian segment — always on, never a popup. */}
+        <BrainActivitySegment />
         {pauseActive ? (
           <span
             title={

@@ -28,7 +28,10 @@ import {
   libRates,
 } from "@/modules/brain/lib/librarian";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { setCustomInstructions } from "@/modules/settings/store";
+import {
+  setCustomInstructions,
+  setMemoryNotifications,
+} from "@/modules/settings/store";
 import { useEffect, useRef, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 
@@ -51,7 +54,37 @@ export function AgentsSection() {
       <LibrarianInstructionsBlock value={customInstructions} />
 
       <BrainLibrarianBlock />
+
+      <MemoryNotificationsBlock />
     </div>
+  );
+}
+
+// ADR-020: ambient memory-activity notifications (toast + bell) for the
+// Librarian's coalesced applies/reflects/reverts. One switch + one muted line
+// (the MemoryInjectionBlock idiom); cross-window via the preferences store.
+function MemoryNotificationsBlock() {
+  const on = usePreferencesStore((s) => s.memoryNotifications);
+
+  return (
+    <section className="flex flex-col gap-2">
+      <Label>Memory activity notifications</Label>
+      <label className="flex cursor-pointer items-center gap-2 text-[11.5px]">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => void setMemoryNotifications(e.target.checked)}
+          className="accent-[color:var(--primary)]"
+        />
+        <span className="text-foreground/90">
+          Notify when the Librarian updates project memory
+        </span>
+      </label>
+      <span className="text-[10.5px] text-muted-foreground">
+        One terse toast + a bell entry per batch — never per change. The status
+        bar's ambient brain dot stays on either way.
+      </span>
+    </section>
   );
 }
 

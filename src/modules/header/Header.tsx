@@ -63,6 +63,9 @@ type Props = {
   onOpenCommandPalette: () => void;
   /** Open the Koden Brain (search / memory / librarian). */
   onOpenBrain: () => void;
+  /** Open the Koden Brain landing on the MEMORY view (ADR-020) — target of the
+   *  bell's Librarian memory-activity entries. */
+  onOpenBrainMemory: () => void;
   /** Open the Koden Brain Map (knowledge-graph view). */
   onOpenBrainMap: () => void;
   onActivateAgent: (tabId: number, leafId: number) => void;
@@ -102,6 +105,7 @@ export function Header({
   onToggleSidebar,
   onOpenCommandPalette,
   onOpenBrain,
+  onOpenBrainMemory,
   onOpenBrainMap,
   onActivateAgent,
   onActivateLocalAgent,
@@ -171,6 +175,7 @@ export function Header({
           <NotificationBell
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
+            onOpenBrain={onOpenBrainMemory}
           />
         )}
         {!IS_MAC && (
@@ -238,6 +243,7 @@ export function Header({
           <NotificationBell
             onActivate={onActivateAgent}
             onActivateLocal={onActivateLocalAgent}
+            onOpenBrain={onOpenBrainMemory}
           />
           <BrainHeaderMenu
             onOpenBrain={onOpenBrain}

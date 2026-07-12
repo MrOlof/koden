@@ -123,6 +123,8 @@ export type Preferences = {
   lastWslDistro: string | null;
   zoomLevel: number;
   agentNotifications: boolean;
+  /** Librarian memory-activity toasts + bell entries (ADR-020). Default ON. */
+  memoryNotifications: boolean;
   /** Default for per-tab auto-retry when a Claude terminal hits a rate limit. */
   autoRetryEnabled: boolean;
   /** Proactively poll the 5h usage window and warn/pause before the limit. */
@@ -190,6 +192,7 @@ const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
+const KEY_MEMORY_NOTIFICATIONS = "memoryNotifications";
 const KEY_AUTO_RETRY_ENABLED = "autoRetryEnabled";
 const KEY_USAGE_GUARD_ENABLED = "usageGuardEnabled";
 const KEY_USAGE_GUARD_WARN_PCT = "usageGuardWarnPct";
@@ -271,6 +274,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   lastWslDistro: null,
   zoomLevel: 1.0,
   agentNotifications: true,
+  memoryNotifications: true,
   autoRetryEnabled: false,
   usageGuardEnabled: false,
   usageGuardWarnPct: 85,
@@ -445,6 +449,9 @@ export async function loadPreferences(): Promise<Preferences> {
     agentNotifications:
       get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
       DEFAULT_PREFERENCES.agentNotifications,
+    memoryNotifications:
+      get<boolean>(KEY_MEMORY_NOTIFICATIONS) ??
+      DEFAULT_PREFERENCES.memoryNotifications,
     autoRetryEnabled:
       get<boolean>(KEY_AUTO_RETRY_ENABLED) ??
       DEFAULT_PREFERENCES.autoRetryEnabled,
@@ -763,6 +770,10 @@ export async function setEditorAutoSaveDelay(value: number): Promise<void> {
 
 export async function setAgentNotifications(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_NOTIFICATIONS, value);
+}
+
+export async function setMemoryNotifications(value: boolean): Promise<void> {
+  await writePref(KEY_MEMORY_NOTIFICATIONS, value);
 }
 
 export async function setAutoRetryEnabled(value: boolean): Promise<void> {

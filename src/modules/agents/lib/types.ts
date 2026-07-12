@@ -1,6 +1,8 @@
 export type AgentStatus = "working" | "waiting";
 
-export type AgentSource = "terminal" | "local";
+/** "brain" = the Librarian's memory activity (ADR-020) — bell rows route to
+ *  the Brain pane's memory view instead of a terminal / the chat panel. */
+export type AgentSource = "terminal" | "local" | "brain";
 
 export type AgentSignalKind =
   | "started"
@@ -58,7 +60,8 @@ export type AgentNotification = {
   read: boolean;
 };
 
-export type NotificationKind = "attention" | "finished" | "error";
+/** "memory" = a coalesced Librarian memory-activity entry (ADR-020). */
+export type NotificationKind = "attention" | "finished" | "error" | "memory";
 
 export type LocalAgentState = {
   agent: string;

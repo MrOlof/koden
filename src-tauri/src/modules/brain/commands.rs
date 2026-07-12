@@ -789,6 +789,16 @@ pub fn brain_recovered_panes(state: State<BrainState>) -> Vec<crate::modules::br
     state.recovered.read().map(|r| r.clone()).unwrap_or_default()
 }
 
+/// Record one submitted user prompt against its pty session (ADR-020 session
+/// activity). Fired by the frontend AgentBusBridge beside its turn-store fan-out;
+/// enqueue-only (sync, microseconds — the pure in-memory command class). The
+/// worker filters, truncates, REDACTS at ingest, resolves pty → project, and
+/// writes the activity row on the single writer thread.
+#[tauri::command]
+pub fn brain_record_turn(state: State<BrainState>, pty_id: u32, prompt: String) -> Result<(), String> {
+    enqueue(&state, BrainEvent::Turn { pty_id, prompt })
+}
+
 /// Run a blocking read-only store call on the blocking pool (mirrors
 /// `git::commands::blocking`). The async command is already off the Tauri main
 /// thread; this keeps a `busy_timeout`-bound SQLite read from starving the async

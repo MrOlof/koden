@@ -1,4 +1,5 @@
 import { native } from "@/modules/ai/lib/native";
+import { brainRecordTurn } from "@/modules/brain";
 import { useTabStatusStore } from "@/modules/tabs";
 import { addTurnForLeaf, leafIdForPty } from "@/modules/terminal";
 import { useEffect, useRef } from "react";
@@ -73,10 +74,14 @@ export function AgentBusBridge({ busPath }: { busPath: string | null }) {
       state.current = next;
 
       // User turns: route to the pane's turn store so the Inputs list shows
-      // every turn (the reliable path; scanTurns scraping is the fallback).
+      // every turn (the reliable path; scanTurns scraping is the fallback) AND
+      // to the Brain worker (ADR-020 session activity — filtered, truncated and
+      // REDACTED at the Rust ingest seam before storage). Fire-and-forget: a
+      // not-yet-started worker just drops the turn.
       for (const t of events.turns) {
         const leafId = leafIdForPty(t.pty);
         if (leafId !== null) addTurnForLeaf(leafId, t.prompt);
+        brainRecordTurn(t.pty, t.prompt).catch(() => {});
       }
 
       const orch = useOrchestrationStore.getState();

@@ -470,6 +470,54 @@ impl SqliteIndex {
         Ok(())
     }
 
+    /// Append one session-activity row (ADR-020). `payload_redacted` MUST already
+    /// have passed `secrets::redact` at the worker ingest seam — this method is
+    /// storage only, on the single writer. NOT journaled (see journal.rs).
+    pub fn record_activity(
+        &self,
+        project_id: &str,
+        session_pty: Option<i64>,
+        kind: &str,
+        payload_redacted: &str,
+        now_ms: i64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO brain_activity (project_id, ts_ms, session_pty, kind, payload_redacted)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![project_id, now_ms, session_pty, kind, payload_redacted],
+        )?;
+        Ok(())
+    }
+
+    /// Newest-first activity rows for one project (writer-side read — the reflect
+    /// send-only advisory runs on the worker thread over this connection).
+    pub fn recent_activity(&self, project_id: &str, limit: usize) -> rusqlite::Result<Vec<ActivityRow>> {
+        recent_activity_with_conn(&self.conn, project_id, limit)
+    }
+
+    /// Prune one project's activity to `max_rows` newest rows AND a `ttl_ms`
+    /// horizon (ADR-020 retention; MAX_TURNS/RESUME_TTL_DAYS precedents). Returns
+    /// the number of rows dropped. Writer-side, driven by the worker Tick.
+    pub fn prune_activity(
+        &self,
+        project_id: &str,
+        max_rows: usize,
+        ttl_ms: i64,
+        now_ms: i64,
+    ) -> rusqlite::Result<usize> {
+        let mut n = self.conn.execute(
+            "DELETE FROM brain_activity WHERE project_id=?1 AND ts_ms < ?2",
+            rusqlite::params![project_id, now_ms.saturating_sub(ttl_ms)],
+        )?;
+        n += self.conn.execute(
+            "DELETE FROM brain_activity WHERE project_id=?1 AND seq NOT IN (
+                 SELECT seq FROM brain_activity WHERE project_id=?1
+                 ORDER BY seq DESC LIMIT ?2)",
+            rusqlite::params![project_id, max_rows as i64],
+        )?;
+        Ok(n)
+    }
+
     /// Search with EXPLICIT ranking weights — the offline CALIBRATION seam, used
     /// only by the relevance benchmark to sweep weights over the labeled corpus.
     /// NOT for the production search path: it runs over the WRITER connection, so it
@@ -2822,6 +2870,40 @@ pub fn gist_notes_with_conn(
             superseded_by: r.get(6)?,
             anchors,
         })
+    })?;
+    let mut v = Vec::new();
+    for x in it {
+        v.push(x?);
+    }
+    Ok(v)
+}
+
+/// One session-activity row (ADR-020). `payload_redacted` was redacted at ingest;
+/// `files` rows carry a JSON array of rel paths, `start`/`end` rows the agent name,
+/// `turn` rows the (truncated) prompt text.
+#[derive(Clone, Debug)]
+pub struct ActivityRow {
+    pub ts_ms: i64,
+    pub kind: String,
+    pub payload_redacted: String,
+}
+
+/// Newest-first activity rows over a caller-supplied connection — shared by the
+/// gist (pinned read-only snapshot: key and body observe the SAME rows) and the
+/// worker's writer-side reads. `ORDER BY ts_ms DESC, seq DESC` is deterministic
+/// given the row set (the gist byte-identity gate). Fail-open at the caller: a
+/// store predating the table errors here and renders as "no activity".
+pub fn recent_activity_with_conn(
+    conn: &Connection,
+    project_id: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<ActivityRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT ts_ms, kind, payload_redacted FROM brain_activity
+         WHERE project_id=?1 ORDER BY ts_ms DESC, seq DESC LIMIT ?2",
+    )?;
+    let it = stmt.query_map((project_id, limit as i64), |r| {
+        Ok(ActivityRow { ts_ms: r.get(0)?, kind: r.get(1)?, payload_redacted: r.get(2)? })
     })?;
     let mut v = Vec::new();
     for x in it {

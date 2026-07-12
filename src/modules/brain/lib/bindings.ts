@@ -300,6 +300,24 @@ export function brainRecoveredPanes(): Promise<RecoveredPane[]> {
   return invoke<RecoveredPane[]>("brain_recovered_panes", {});
 }
 
+/** Record one submitted user prompt against its pty (ADR-020 session activity).
+ *  Fire-and-forget from AgentBusBridge; the worker filters, truncates, REDACTS
+ *  at ingest and resolves pty → project on the single writer thread. */
+export function brainRecordTurn(ptyId: number, prompt: string): Promise<void> {
+  return invoke<void>("brain_record_turn", { ptyId, prompt });
+}
+
+/** One coalesced Librarian activity event (ADR-020) — the `koden:brain-activity`
+ *  Tauri event payload. Field names mirror the Rust serde struct (snake_case).
+ *  One event per apply-sweep batch / reflect round / revert, never per-proposal. */
+export type BrainActivityEvent = {
+  project: string;
+  project_name: string;
+  kind: "applied" | "reflected" | "reverted";
+  count: number;
+  spent_usd: number | null;
+};
+
 /** A node in the Brain Map knowledge graph. Field names mirror the Rust serde
  *  struct (`project_id` snake_case). */
 export type GraphNode = {

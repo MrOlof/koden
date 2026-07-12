@@ -20,7 +20,7 @@ pub use temporal::{
 pub use sqlite::{
     budget_state_readonly, code_impact_readonly, file_count_readonly, file_count_with_conn,
     file_touch_with_conn, get_symbol_readonly, gist_notes_with_conn, librarian_config_readonly,
-    librarian_ledger_readonly,
+    librarian_ledger_readonly, recent_activity_with_conn, ActivityRow,
     list_memory_changes_readonly, list_notes_readonly, list_notes_with_conn,
     list_proposals_readonly, open_readonly_snapshot, pending_proposals_readonly,
     prepare_file, PreparedFile,

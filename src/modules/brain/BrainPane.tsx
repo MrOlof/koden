@@ -34,6 +34,7 @@ import {
   reconcileChanges,
   reconcileProposals,
 } from "./lib/proposalPoll";
+import { subscribeBrainView } from "./lib/viewRequest";
 
 const MIN_QUERY_LEN = 2;
 const DEBOUNCE_MS = 300;
@@ -112,6 +113,10 @@ export function BrainPane() {
   const pendingReverts = useRef<Set<string>>(new Set());
 
   const active = query.trim().length > 0;
+
+  // ADR-020: honor view requests from the Librarian's activity toast / bell
+  // ("View" lands on the Memory view) — live while mounted, pending on mount.
+  useEffect(() => subscribeBrainView((m) => setMode(m)), []);
 
   useEffect(() => {
     let alive = true;

@@ -41,6 +41,13 @@ use crate::modules::brain::store::schema::SCHEMA_VERSION;
 const MAX_FILES: usize = 12;
 const MAX_SYMS_PER_FILE: usize = 6;
 const MAX_NOTES: usize = 8;
+/// ADR-020 "Recent activity" bounds: day buckets rendered / agents per day /
+/// files per day / rows read (covers the whole per-project retention cap, so
+/// the derived set only moves when the STORED set does — not on a read window).
+const ACTIVITY_MAX_DAYS: usize = 3;
+const ACTIVITY_MAX_AGENTS: usize = 3;
+const ACTIVITY_MAX_FILES: usize = 6;
+const ACTIVITY_READ_ROWS: usize = 500;
 /// chars-per-token heuristic ([DP-21]) — no exact cross-vendor tokenizer.
 const CHARS_PER_TOKEN: usize = 4;
 /// Char bound for the intent excerpt in the known-unknowns line (ADR-011).
@@ -126,9 +133,19 @@ fn build_gist_on_conn(
         .unwrap_or_default();
     let overdue = overdue_note_ids(&notes, today_utc_ms());
     let overdue_digest = overdue.join("\u{1}");
+    // ADR-020 "Recent activity": derived off the SAME pinned snapshot and folded
+    // into the key as a SET digest (the overdue-digest pattern) — day-bucketed,
+    // count-free lines, so a turn that adds nothing new to a day's (agent, file)
+    // sets renders identical bytes under an identical key; only a genuine set
+    // change (new day / new agent / new file entry) rotates the key, exactly once.
+    let activity = conn
+        .and_then(|c| store::recent_activity_with_conn(c, project_id, ACTIVITY_READ_ROWS).ok())
+        .unwrap_or_default();
+    let activity_lines = activity_day_lines(&activity);
+    let activity_digest = activity_lines.join("\u{1}");
     let key = blake3::hash(
         format!(
-            "{fp}\u{0}{temporal}\u{0}{overdue_digest}\u{0}{intent}\u{0}{budget_tokens}\u{0}{SCHEMA_VERSION}"
+            "{fp}\u{0}{temporal}\u{0}{overdue_digest}\u{0}{activity_digest}\u{0}{intent}\u{0}{budget_tokens}\u{0}{SCHEMA_VERSION}"
         )
         .as_bytes(),
     )
@@ -228,7 +245,92 @@ fn build_gist_on_conn(
         }
     }
 
+    // Recent activity (ADR-020): the session trail, day-bucketed. Rendered LAST
+    // (trimmed first under a tight budget) and pushed as ONE block so a cut can't
+    // strand a dangling header. Derives only from key-covered state (the
+    // activity-set digest above), so one key always renders the same bytes.
+    if !activity_lines.is_empty() {
+        push_line(
+            &mut out,
+            max_chars,
+            &format!("## Recent activity\n{}", activity_lines.join("\n")),
+        );
+    }
+
     Gist { bytes: out, fingerprint: key, sources }
+}
+
+/// Day-bucketed, COUNT-FREE lines from newest-first activity rows (ADR-020).
+/// Per UTC day (derived from each row's stored `ts_ms` — no wall clock): the
+/// sorted set of agents seen on session boundaries and the sorted set of files
+/// touched, both capped. Deterministic given the row set; a turn on an
+/// already-covered day changes NOTHING here (the gist-key stability contract),
+/// while a new day / agent / file entry moves exactly one line.
+fn activity_day_lines(rows: &[store::ActivityRow]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    // Rows arrive newest-first; BTreeMap orders days ascending — take the LAST
+    // (= most recent) ACTIVITY_MAX_DAYS buckets, rendered newest first.
+    let mut days: std::collections::BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> =
+        std::collections::BTreeMap::new();
+    for r in rows {
+        let day = epoch_ms_to_utc_date(r.ts_ms);
+        let bucket = days.entry(day).or_default();
+        match r.kind.as_str() {
+            "start" | "end" => {
+                let agent = r.payload_redacted.trim();
+                if !agent.is_empty() {
+                    bucket.0.insert(agent.to_string());
+                }
+            }
+            "files" => {
+                let files: Vec<String> =
+                    serde_json::from_str(&r.payload_redacted).unwrap_or_default();
+                for f in files {
+                    if !f.trim().is_empty() {
+                        bucket.1.insert(f);
+                    }
+                }
+            }
+            _ => {} // turn — day presence only
+        }
+    }
+    days.iter()
+        .rev()
+        .take(ACTIVITY_MAX_DAYS)
+        .map(|(day, (agents, files))| {
+            let mut parts: Vec<String> = vec![format!("- {day}")];
+            if !agents.is_empty() {
+                parts.push(
+                    agents.iter().take(ACTIVITY_MAX_AGENTS).cloned().collect::<Vec<_>>().join(", "),
+                );
+            }
+            if !files.is_empty() {
+                parts.push(
+                    files.iter().take(ACTIVITY_MAX_FILES).cloned().collect::<Vec<_>>().join(", "),
+                );
+            }
+            if parts.len() == 1 {
+                parts.push("session activity".to_string());
+            }
+            parts.join(" · ")
+        })
+        .collect()
+}
+
+/// UTC calendar date of an epoch-ms instant (pure — the worker's `utc_date_ymd`
+/// algorithm over a stored timestamp; NOT a wall-clock read).
+fn epoch_ms_to_utc_date(epoch_ms: i64) -> String {
+    let days = epoch_ms.div_euclid(DAY_MS);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Per-claim freshness label for one memory note (ADR-011): `current` /
@@ -410,7 +512,11 @@ fn push_line(out: &mut String, max_chars: usize, line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{intent_excerpt, iso_date_to_epoch_ms, overdue_note_ids, DAY_MS};
+    use super::{
+        activity_day_lines, build_gist, intent_excerpt, iso_date_to_epoch_ms, overdue_note_ids,
+        DAY_MS,
+    };
+    use crate::modules::brain::store::{ActivityRow, SqliteIndex};
 
     /// The label comparison hinges on this pure date math — pin its anchor points
     /// (epoch, day step, leap-day step, datetime tolerance, garbage → None).
@@ -478,6 +584,81 @@ mod tests {
         assert!(e.chars().count() <= super::EXCERPT_CHARS + 1, "bounded: {}", e.len());
         assert!(e.ends_with('…'));
         assert_eq!(intent_excerpt(&long), e, "deterministic");
+    }
+
+    /// ADR-020: the day-line derivation is a COUNT-FREE set fold — turns only
+    /// mark day presence, agents/files render as sorted capped sets, buckets are
+    /// newest-first and capped, and the output is deterministic (it feeds the
+    /// cache-key digest).
+    #[test]
+    fn activity_day_lines_are_set_folded_and_deterministic() {
+        let day1 = iso_date_to_epoch_ms("2026-07-01").unwrap();
+        let day2 = iso_date_to_epoch_ms("2026-07-02").unwrap();
+        let row = |ts: i64, kind: &str, payload: &str| ActivityRow {
+            ts_ms: ts,
+            kind: kind.into(),
+            payload_redacted: payload.into(),
+        };
+        let rows = vec![
+            // newest-first, as the store returns them
+            row(day2 + 500, "files", r#"["src/b.rs","src/a.rs"]"#),
+            row(day2 + 400, "turn", "fix the login bug"),
+            row(day2 + 300, "start", "claude"),
+            row(day1 + 100, "turn", "older day presence only"),
+        ];
+        let lines = activity_day_lines(&rows);
+        assert_eq!(
+            lines,
+            vec![
+                "- 2026-07-02 · claude · src/a.rs, src/b.rs".to_string(),
+                "- 2026-07-01 · session activity".to_string(),
+            ]
+        );
+        // Turns are count-free: 50 more same-day turns change NOTHING.
+        let mut noisy = rows.clone();
+        for i in 0..50 {
+            noisy.insert(0, row(day2 + 600 + i, "turn", &format!("turn {i}")));
+        }
+        assert_eq!(activity_day_lines(&noisy), lines, "turns must not move the set");
+        assert_eq!(activity_day_lines(&rows), lines, "deterministic");
+    }
+
+    /// ADR-020 gist-key stability (the load-bearing cache contract): with a day
+    /// bucket established, ingesting 50 more turns renders BYTE-IDENTICAL gist
+    /// bytes under the SAME key; a NEW file-set entry rotates the key exactly
+    /// once (a repeat of the same set does not rotate it again).
+    #[test]
+    fn gist_key_stable_over_turns_and_rotates_once_on_new_file_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("i.sqlite");
+        let idx = SqliteIndex::open(&db).unwrap();
+        idx.index_file("p", "src/login.rs", "pub fn login() {}", "h1", 17).unwrap();
+        let ts = iso_date_to_epoch_ms("2026-07-02").unwrap();
+
+        // Establish the day bucket, then snapshot.
+        idx.record_activity("p", Some(1), "turn", "first turn", ts + 1).unwrap();
+        let g1 = build_gist(&db, "p", "proj", "login", 800);
+        assert!(g1.bytes.contains("## Recent activity"), "section renders: {}", g1.bytes);
+        assert!(g1.bytes.contains("2026-07-02"), "day bucket named: {}", g1.bytes);
+
+        // 50 more turns on the covered day: same bytes, same key.
+        for i in 0..50 {
+            idx.record_activity("p", Some(1), "turn", &format!("turn {i}"), ts + 2 + i).unwrap();
+        }
+        let g2 = build_gist(&db, "p", "proj", "login", 800);
+        assert_eq!(g2.bytes, g1.bytes, "turns that change no rendered content keep the bytes");
+        assert_eq!(g2.fingerprint, g1.fingerprint, "…and must NOT rotate the key");
+
+        // A NEW file-set entry rotates the key once…
+        idx.record_activity("p", None, "files", r#"["src/login.rs"]"#, ts + 100).unwrap();
+        let g3 = build_gist(&db, "p", "proj", "login", 800);
+        assert_ne!(g3.fingerprint, g2.fingerprint, "a new set entry rotates the key");
+        assert!(g3.bytes.contains("src/login.rs"), "{}", g3.bytes);
+        // …and an identical repeat of that entry does not rotate it again.
+        idx.record_activity("p", None, "files", r#"["src/login.rs"]"#, ts + 200).unwrap();
+        let g4 = build_gist(&db, "p", "proj", "login", 800);
+        assert_eq!(g4.fingerprint, g3.fingerprint, "set semantics: repeats don't rotate");
+        assert_eq!(g4.bytes, g3.bytes);
     }
 
     /// Regression (gauntlet S9 `secret-intent-echoed-to-gist`): a secret-shaped

@@ -27,6 +27,9 @@ import { useAgentStore } from "../store/agentStore";
 type Props = {
   onActivate: (tabId: number, leafId: number) => void;
   onActivateLocal: () => void;
+  /** Open the Brain pane's memory view — target of `source: "brain"` entries
+   *  (the Librarian's coalesced memory activity, ADR-020). */
+  onOpenBrain?: () => void;
 };
 
 function relativeTime(ts: number): string {
@@ -78,6 +81,7 @@ const NOTIF_LABEL: Record<AgentNotification["kind"], string> = {
   attention: "needs input",
   finished: "finished",
   error: "failed",
+  memory: "memory updated",
 };
 
 function NotificationRow({
@@ -121,7 +125,11 @@ function NotificationRow({
   );
 }
 
-export function NotificationBell({ onActivate, onActivateLocal }: Props) {
+export function NotificationBell({
+  onActivate,
+  onActivateLocal,
+  onOpenBrain,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [hooksReady, setHooksReady] = useState<boolean | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -179,7 +187,10 @@ export function NotificationBell({ onActivate, onActivateLocal }: Props) {
   };
 
   const activateNotification = (n: AgentNotification) => {
-    if (n.source === "local") activateLocal();
+    if (n.source === "brain") {
+      onOpenBrain?.();
+      setOpen(false);
+    } else if (n.source === "local") activateLocal();
     else activate(n.tabId, n.leafId);
   };
 

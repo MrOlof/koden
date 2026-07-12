@@ -27,7 +27,12 @@ import {
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
-import { brainBuildGist, resolveProjectForCwd } from "@/modules/brain";
+import {
+  BrainActivityBridge,
+  brainBuildGist,
+  requestBrainView,
+  resolveProjectForCwd,
+} from "@/modules/brain";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import {
   type EditorPaneHandle,
@@ -911,6 +916,13 @@ export default function App() {
     () => openOrchestrationTab("brain-map"),
     [openOrchestrationTab],
   );
+
+  // ADR-020: land on the Brain pane's MEMORY view (Librarian activity toast /
+  // bell "View" target) — request the view, then open/activate the tab.
+  const openBrainMemory = useCallback(() => {
+    requestBrainView("memory");
+    openBrain();
+  }, [openBrain]);
 
   // Director "run in terminal": open an agent terminal tab and link the
   // orchestration record to it so the dock/topology can activate it.
@@ -2094,6 +2106,7 @@ export default function App() {
               onToggleSidebar={toggleSidebar}
               onOpenCommandPalette={() => openCommandPalette("commands")}
               onOpenBrain={openBrain}
+              onOpenBrainMemory={openBrainMemory}
               onOpenBrainMap={openBrainMap}
               onActivateAgent={onActivateAgent}
               onActivateLocalAgent={onActivateLocalAgent}
@@ -2327,6 +2340,7 @@ export default function App() {
           <OrchestrationActivityBridge />
           <OrchestrationAttentionBridge />
           <AgentBusBridge busPath={busPath} />
+          <BrainActivityBridge onOpenBrainMemory={openBrainMemory} />
           <DirectorBusBridge
             busPath={directorLive ? busPath : null}
             onCommand={handleDirectorCommand}

@@ -6,7 +6,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::modules::brain::events::{AgentSignalPayload, BrainEvent};
 use crate::modules::brain::freshness::{hash, walk, watch};
@@ -43,6 +43,23 @@ pub const LIBRARIAN_MAX_CONSEC_FAILURES: u32 = 3;
 const LIBRARIAN_BACKOFF_MAX_SHIFT: u32 = 4;
 /// Binary sniff window — a NUL byte in the first 8 KiB means "not text".
 const BINARY_SNIFF_BYTES: usize = 8192;
+
+// --- ADR-020 session activity layer -----------------------------------------
+/// Coalesced Librarian activity event to the frontend (toast + bell + status
+/// bar) — one per apply-sweep batch / reflect round / revert, never per-proposal.
+const ACTIVITY_EVENT: &str = "koden:brain-activity";
+/// Per-project activity retention: newest rows kept (turnStore MAX_TURNS
+/// precedent) + a day horizon (RESUME_TTL_DAYS precedent). Pruned on Tick.
+pub const ACTIVITY_MAX_ROWS: usize = 500;
+pub const ACTIVITY_TTL_DAYS: i64 = 14;
+/// Coarse files-touched rows are debounced per project — the watcher already
+/// coalesces bursts, this bounds a long edit session to ~1 row/min.
+const FILES_ACTIVITY_DEBOUNCE_MS: i64 = 60_000;
+/// Stored prompt text cap (chars) — mirrors the turn-store trim+cap idiom
+/// (turnStore.ts caps at 400 for display; the trail keeps more for the digest).
+const TURN_MAX_CHARS: usize = 1500;
+/// Rel paths kept on one coarse `files` activity row.
+const FILES_ACTIVITY_MAX_PATHS: usize = 20;
 
 /// Spawn the worker. Mirrors `usage::poll::spawn_poller`. `launch_dir` is the
 /// authorized launch directory (the dir the user opened); the brain seeds its
@@ -239,18 +256,42 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     // Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
     // restart, which is fine — dirty flags only matter while the app is open).
     let mut lib_state: std::collections::HashMap<String, LibrarianAuto> = std::collections::HashMap::new();
+    // ADR-020: per-project debounce stamp for coarse files-touched activity rows
+    // (worker-thread-local like lib_state; a restart just re-arms the first row).
+    let mut files_activity_last: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     // 7. Steady-state event loop. Single writer; ingest paths only send events.
     for ev in rx {
         match ev {
             BrainEvent::Agent { pty_id, kind, agent } => {
-                let project = handle_agent(&app, pty_id, &kind, agent);
+                let project = handle_agent(&app, &index, pty_id, &kind, agent);
                 // An AI session exiting is a natural "settle now" boundary: if that
                 // project already has pending changes, let the Librarian tidy right
                 // after, without waiting out the idle-settle.
                 if kind == "exited" {
-                    if let Some(st) = project.and_then(|p| lib_state.get_mut(&p)) {
-                        st.boundary = true;
+                    if let Some(p) = &project {
+                        if let Some(st) = lib_state.get_mut(p) {
+                            st.boundary = true;
+                        }
+                        enqueue_exit_reconcile(&tx, p);
+                    }
+                }
+            }
+            BrainEvent::Turn { pty_id, prompt } => {
+                // ADR-020 turn ingest: pre-filter → truncate → REDACT (the ingest
+                // gate — prompt text never lands raw), then resolve pty → project
+                // and store on this single writer. Unresolvable/filtered turns drop.
+                if let Some(cleaned) = clean_turn_text(&prompt) {
+                    if let Some(project) = resolve_pty_project(&app, pty_id) {
+                        if let Err(e) = index.record_activity(
+                            &project,
+                            Some(pty_id as i64),
+                            "turn",
+                            &cleaned,
+                            now_epoch_ms(),
+                        ) {
+                            log::debug!("brain: turn activity write failed ({e})");
+                        }
                     }
                 }
             }
@@ -330,6 +371,10 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             BrainEvent::Tick => {
                 index.checkpoint();
                 run_librarian_rounds(&app, &index, &mut lib_state, &tx);
+                // ADR-020 retention: cap + TTL the activity trail per project. When
+                // a prune actually dropped rows the activity SET changed (gist-
+                // material) — refresh that artifact so it never quotes pruned rows.
+                prune_activity_all(&app, &index);
                 // ADR-019 day-boundary refresh: the overdue-note set is
                 // day-granular, so labels can flip at UTC midnight with no memory
                 // event to piggyback on. Once per day; the per-project byte
@@ -362,6 +407,18 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         fold_offloaded_outcome(st, expected, &outcome.reason, digest_hash);
                         persist_lib_pin(&index, &project, st, now_ms);
                         log_round_outcome(&project, &outcome, st);
+                        // ADR-020: ONE coalesced event per completed paid round
+                        // (Unchanged/$0 skips and failures stay silent — ambient,
+                        // not alarming; failures already log loudly).
+                        if matches!(outcome.reason, reflect::ReflectReason::Ok) {
+                            emit_brain_activity(
+                                &app,
+                                &project,
+                                "reflected",
+                                outcome.proposals.len(),
+                                Some(outcome.spent_usd),
+                            );
+                        }
                     }
                     None => {
                         // Unregistered mid-flight: reconcile the budget reservation
@@ -474,6 +531,8 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     }
                     // ADR-019: the undo changed memory — refresh the artifact.
                     emit_gist_artifact(&app, &index, &project);
+                    // ADR-020: one event per revert (a human-visible memory change).
+                    emit_brain_activity(&app, &project, "reverted", 1, None);
                 }
                 if let Some(tx) = reply {
                     let _ = tx.send(result);
@@ -596,6 +655,16 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         outcome.proposals.len(),
                         outcome.spent_usd
                     );
+                    // ADR-020: one coalesced event per completed manual round.
+                    if matches!(outcome.reason, reflect::ReflectReason::Ok) {
+                        emit_brain_activity(
+                            &app,
+                            &pid,
+                            "reflected",
+                            outcome.proposals.len(),
+                            Some(outcome.spent_usd),
+                        );
+                    }
                     // ADR-018: autonomous mode applies what this manual round
                     // enqueued; the sweep re-pins so it doesn't self-re-fire.
                     if let Some(h) = auto_apply_sweep(&app, &index, &pid, now_ms) {
@@ -619,6 +688,24 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         // first sighting of this project this boot, so a code-only edge
                         // (digest-neutral) after a restart won't re-pay. [LIB-SPEND-01]
                         note_content_change(lib_entry(&mut lib_state, &index, &project), now_epoch_ms());
+                    }
+                    // ADR-020: fan REAL indexed changes into one coarse files-touched
+                    // activity row, debounced per project (last-touch coarseness —
+                    // project-global attribution, not per-session). Redacted at
+                    // ingest like every activity payload.
+                    if stats.indexed > 0 {
+                        let now_ms = now_epoch_ms();
+                        let last = files_activity_last.get(&project).copied().unwrap_or(0);
+                        if now_ms.saturating_sub(last) >= FILES_ACTIVITY_DEBOUNCE_MS {
+                            files_activity_last.insert(project.clone(), now_ms);
+                            let payload =
+                                files_activity_payload(std::path::Path::new(&root), &changed);
+                            if let Err(e) =
+                                index.record_activity(&project, None, "files", &payload, now_ms)
+                            {
+                                log::debug!("brain: files activity write failed ({e})");
+                            }
+                        }
                     }
                     // ADR-019: a note-FILE change is gist-material — refresh the
                     // artifact after `index_changed`'s note re-scan. Deliberately
@@ -1363,7 +1450,8 @@ fn auto_apply_sweep(
     now_ms: i64,
 ) -> Option<String> {
     let root = project_root(app, project_id)?;
-    if auto_apply_pending(index, project_id, std::path::Path::new(&root), now_ms) == 0 {
+    let applied = auto_apply_pending(index, project_id, std::path::Path::new(&root), now_ms);
+    if applied == 0 {
         return None;
     }
     let today = utc_date_ymd(now_ms);
@@ -1372,7 +1460,176 @@ fn auto_apply_sweep(
     // after LibrarianDone / Doctor / Curate / Reflect / boot) — refresh the
     // per-project gist hook artifact so live sessions see them next turn.
     emit_gist_artifact(app, index, project_id);
+    // ADR-020: ONE coalesced event for the whole batch, never per-proposal.
+    emit_brain_activity(app, project_id, "applied", applied, None);
     pin
+}
+
+// --- ADR-020 session activity + ambient notifications ------------------------
+
+/// Coalesced Librarian activity payload for the `koden:brain-activity` Tauri
+/// event. Field names are the frontend contract (snake_case, like every brain DTO).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BrainActivityEvent {
+    pub project: String,
+    pub project_name: String,
+    pub kind: String, // "applied" | "reflected" | "reverted"
+    pub count: usize,
+    pub spent_usd: Option<f64>,
+}
+
+/// The coalescing seam (testable without an AppHandle): ONE payload per
+/// apply-sweep batch / reflect round / revert. `None` suppresses no-op batches —
+/// applied/reverted require `count > 0`; a completed reflect round is activity
+/// even at 0 proposals (it spent a paid call the user asked to see).
+pub(crate) fn build_activity_event(
+    project: &str,
+    project_name: &str,
+    kind: &str,
+    count: usize,
+    spent_usd: Option<f64>,
+) -> Option<BrainActivityEvent> {
+    if count == 0 && kind != "reflected" {
+        return None;
+    }
+    Some(BrainActivityEvent {
+        project: project.to_string(),
+        project_name: project_name.to_string(),
+        kind: kind.to_string(),
+        count,
+        spent_usd,
+    })
+}
+
+/// Emit one coalesced activity event to the frontend (fail-open: no registry
+/// entry / no window just drops it — ambient chrome, never load-bearing).
+fn emit_brain_activity(
+    app: &AppHandle,
+    project_id: &str,
+    kind: &str,
+    count: usize,
+    spent_usd: Option<f64>,
+) {
+    let Some(name) = app
+        .try_state::<BrainState>()
+        .and_then(|s| s.registry.projects().into_iter().find(|p| p.id == project_id))
+        .map(|p| p.name)
+    else {
+        return;
+    };
+    if let Some(ev) = build_activity_event(project_id, &name, kind, count, spent_usd) {
+        if let Err(e) = app.emit(ACTIVITY_EVENT, ev) {
+            log::debug!("brain: activity event emit failed ({e})");
+        }
+    }
+}
+
+/// Turn-text ingest filter (pure, testable): trim → drop empty / too-short /
+/// slash-command-only turns (the `addBusTurn` trim+cap idiom, turnStore.ts) →
+/// truncate to [TURN_MAX_CHARS] on a char boundary → REDACT. Returns the
+/// store-ready payload, or `None` for a turn not worth a row.
+pub(crate) fn clean_turn_text(prompt: &str) -> Option<String> {
+    let t = prompt.trim();
+    if t.chars().count() < 2 {
+        return None; // empty or a bare keystroke ("y") — noise
+    }
+    // Slash-command-only turns ("/clear", "/model opus") are UI plumbing, not
+    // session intent. A multi-line prompt that merely STARTS with '/' is kept.
+    if t.starts_with('/') && !t.contains('\n') {
+        return None;
+    }
+    let cut: String = t.chars().take(TURN_MAX_CHARS).collect();
+    // Redaction AT INGEST (the ADR-020 gate): prompt text never lands raw.
+    // Redact the truncated text — the stored row IS the cut, so the detector
+    // must run over exactly what is stored (a token straddling the cut is
+    // stored as a partial, unrecognizable fragment either way; redacting first
+    // over the full text and then cutting could split a REDACTED marker instead).
+    Some(secrets::redact(&cut).0)
+}
+
+/// Coarse files-touched payload: project-relative changed paths, deduped +
+/// sorted + capped, JSON-array-encoded (paths may contain any separator), each
+/// passed through the same ingest redaction gate for uniformity.
+fn files_activity_payload(root: &std::path::Path, changed: &[std::path::PathBuf]) -> String {
+    let mut rels: Vec<String> = changed
+        .iter()
+        .map(|p| rel_path(root, p))
+        .filter(|r| !r.is_empty())
+        .map(|r| secrets::redact(&r).0)
+        .collect();
+    rels.sort();
+    rels.dedup();
+    rels.truncate(FILES_ACTIVITY_MAX_PATHS);
+    serde_json::to_string(&rels).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Session boundary rows (ADR-020): `started` → a `start` row, `exited` → an
+/// `end` row; other lifecycle kinds (working/attention/finished) are status
+/// noise, not boundaries. Payload = the agent name (redacted for uniformity).
+pub(crate) fn record_session_boundary(
+    index: &SqliteIndex,
+    project_id: &str,
+    kind: &str,
+    agent: Option<&str>,
+    pty_id: u32,
+    now_ms: i64,
+) {
+    let row_kind = match kind {
+        "started" => "start",
+        "exited" => "end",
+        _ => return,
+    };
+    let payload = secrets::redact(agent.unwrap_or("")).0;
+    if let Err(e) =
+        index.record_activity(project_id, Some(pty_id as i64), row_kind, &payload, now_ms)
+    {
+        log::debug!("brain: session boundary activity write failed ({e})");
+    }
+}
+
+/// ADR-020 hands-off freshness: an AI session exiting queues a TARGETED
+/// reconcile of its project — the session may have written files no watcher
+/// event has landed for yet (editor buffers, git operations). The Rescan arm
+/// re-indexes and then refreshes the gist artifact (ADR-019 helpers), so the
+/// next turn in any other live session sees the results with no manual rescan.
+pub(crate) fn enqueue_exit_reconcile(tx: &mpsc::Sender<BrainEvent>, project_id: &str) {
+    let _ = tx.send(BrainEvent::Rescan { project: Some(project_id.to_string()) });
+}
+
+/// Resolve pty → cwd → project for a non-lifecycle ingest (the Turn leg):
+/// the exact `handle_agent` chain — live pty cwd first, then the cwd remembered
+/// on the LiveSession (so a turn racing the pty teardown still resolves).
+fn resolve_pty_project(app: &AppHandle, pty_id: u32) -> Option<String> {
+    let brain = app.try_state::<BrainState>()?;
+    let remembered = brain
+        .sessions
+        .read()
+        .ok()
+        .and_then(|s| s.get(&pty_id).and_then(|x| x.cwd.clone()));
+    let cwd = app
+        .try_state::<PtyState>()
+        .and_then(|pty| pty.session_cwd(pty_id))
+        .or(remembered)?;
+    brain.registry.resolve(&cwd).map(|p| p.id)
+}
+
+/// Tick-driven retention over every registered project. A prune that dropped
+/// rows changed the activity set (a gist input) — refresh that artifact so it
+/// never quotes rows the store no longer holds.
+fn prune_activity_all(app: &AppHandle, index: &SqliteIndex) {
+    let Some(state) = app.try_state::<BrainState>() else { return };
+    let now_ms = now_epoch_ms();
+    let ttl_ms = ACTIVITY_TTL_DAYS * 86_400_000;
+    for p in state.registry.projects() {
+        match index.prune_activity(&p.id, ACTIVITY_MAX_ROWS, ttl_ms, now_ms) {
+            Ok(0) => {}
+            Ok(n) => {
+                log::debug!("brain: pruned {n} activity row(s) for '{}'", p.name);
+                emit_gist_artifact(app, index, &p.id);
+            }
+            Err(e) => log::debug!("brain: activity prune for '{}' failed ({e})", p.name),
+        }
+    }
 }
 
 /// The store path the worker registered in [BrainState] (set early in
@@ -1724,8 +1981,16 @@ fn resume_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
 /// (registry longest-prefix) for EVERY kind. cwd is remembered on the session so an
 /// `exited` signal can still derive its key after the pty session map has dropped.
 /// Returns the resolved project id (if any) so the caller can mark a Librarian
-/// boundary on an `exited` signal.
-fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>) -> Option<String> {
+/// boundary on an `exited` signal. ADR-020: `started`/`exited` also land as
+/// crash-safe `start`/`end` rows in the activity trail (single writer — this runs
+/// on the worker thread).
+fn handle_agent(
+    app: &AppHandle,
+    index: &SqliteIndex,
+    pty_id: u32,
+    kind: &str,
+    agent: Option<String>,
+) -> Option<String> {
     let brain = app.try_state::<BrainState>()?;
     // The agent name + cwd arrive only on the 'started' signal (agent_detect sets
     // agent=None on working/attention/finished/exited), so remember both on the
@@ -1759,6 +2024,12 @@ fn handle_agent(app: &AppHandle, pty_id: u32, kind: &str, agent: Option<String>)
         if let Err(e) = resume::record_event(&rdir, &key, &rec) {
             log::debug!("brain: resume journal write failed ({e})");
         }
+    }
+
+    // ADR-020: session boundaries land in the activity trail (incremental,
+    // crash-safe — an app crash leaves the `start` row as the trail's evidence).
+    if let Some(p) = &resolved {
+        record_session_boundary(index, p, kind, effective_agent.as_deref(), pty_id, now_epoch_ms());
     }
 
     match kind {
@@ -2213,6 +2484,106 @@ mod tests {
         let elapsed = t0.elapsed();
         println!("bench_first_index_2k: indexed {} files in {elapsed:?}", stats.indexed);
         assert_eq!(stats.indexed, 2000);
+    }
+
+    /// ADR-020 ingest gate: trivial turns drop (empty / one-char / slash-command-
+    /// only), long prompts truncate on a char boundary, and secret-shaped content
+    /// is REDACTED at ingest — the stored payload never carries the raw token.
+    #[test]
+    fn clean_turn_text_filters_truncates_and_redacts() {
+        // Drops: empty, whitespace, single keystroke, slash-command-only.
+        for junk in ["", "   ", "y", "/clear", "/model opus", "  /compact  "] {
+            assert_eq!(clean_turn_text(junk), None, "must drop {junk:?}");
+        }
+        // Kept: a real prompt; a multi-line prompt that merely starts with '/'.
+        assert_eq!(clean_turn_text("fix the login bug").as_deref(), Some("fix the login bug"));
+        assert!(clean_turn_text("/path/to/file is broken\nfix it").is_some());
+        // Truncation: bounded at TURN_MAX_CHARS chars (multi-byte safe).
+        let long = "é".repeat(TURN_MAX_CHARS + 100);
+        let cut = clean_turn_text(&long).unwrap();
+        assert_eq!(cut.chars().count(), TURN_MAX_CHARS);
+        // Redaction property: an API-key-shaped token and a PEM header never
+        // reach the stored payload.
+        let probe = "sk-ProbeEcho991Zx8Kt5Rm7Vb4Np2Cj6L";
+        let stored = clean_turn_text(&format!("use {probe} for the call")).unwrap();
+        assert!(!stored.contains(probe), "API key leaked into activity: {stored}");
+        assert!(stored.contains("REDACTED"), "redaction marker missing: {stored}");
+        let pem = "here is the key\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7\n-----END RSA PRIVATE KEY-----";
+        let stored = clean_turn_text(pem).unwrap();
+        assert!(!stored.contains("MIIEowIBAAKCAQEA7"), "PEM body leaked: {stored}");
+        // Deterministic (the reflect send path re-renders it).
+        assert_eq!(clean_turn_text(pem), clean_turn_text(pem));
+    }
+
+    /// ADR-020 coalescing seam: one payload per batch with the batch COUNT —
+    /// never per-proposal. No-op applied/reverted batches are suppressed; a
+    /// completed reflect round is activity even at 0 proposals (it spent a call).
+    #[test]
+    fn build_activity_event_coalesces_batches() {
+        let ev = build_activity_event("p", "Proj", "applied", 3, None)
+            .expect("a 3-apply sweep emits exactly one event");
+        assert_eq!((ev.kind.as_str(), ev.count), ("applied", 3));
+        assert_eq!(ev.project_name, "Proj");
+        assert!(ev.spent_usd.is_none());
+        assert!(build_activity_event("p", "Proj", "applied", 0, None).is_none(), "no-op sweep is silent");
+        assert!(build_activity_event("p", "Proj", "reverted", 0, None).is_none());
+        let r = build_activity_event("p", "Proj", "reflected", 0, Some(0.0021)).expect("paid round");
+        assert_eq!(r.count, 0);
+        assert_eq!(r.spent_usd, Some(0.0021));
+    }
+
+    /// ADR-020 boundary rows: `started`/`exited` land as start/end activity rows
+    /// (status-only kinds don't), and an exit enqueues a TARGETED rescan of the
+    /// session's project.
+    #[test]
+    fn session_boundaries_write_rows_and_exit_enqueues_targeted_rescan() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        record_session_boundary(&index, "p", "started", Some("claude"), 7, 1_000);
+        record_session_boundary(&index, "p", "working", Some("claude"), 7, 2_000); // status noise
+        record_session_boundary(&index, "p", "exited", Some("claude"), 7, 3_000);
+        let rows = index.recent_activity("p", 10).unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["end", "start"], "newest first; working never lands");
+        assert!(rows.iter().all(|r| r.payload_redacted == "claude"));
+
+        let (tx, rx) = mpsc::channel::<BrainEvent>();
+        enqueue_exit_reconcile(&tx, "p");
+        match rx.try_recv().expect("one event enqueued") {
+            BrainEvent::Rescan { project } => assert_eq!(project.as_deref(), Some("p")),
+            other => panic!("expected a targeted Rescan, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one event per exit");
+    }
+
+    /// ADR-020 retention: the per-project cap drops oldest rows, the TTL drops
+    /// aged rows, and other projects' rows are untouched.
+    #[test]
+    fn prune_activity_caps_and_ttls_per_project() {
+        let store = tempfile::tempdir().unwrap();
+        let index = SqliteIndex::open(&store.path().join("i.sqlite")).unwrap();
+        for i in 0..10i64 {
+            index.record_activity("p", None, "turn", &format!("t{i}"), 1_000 + i).unwrap();
+        }
+        index.record_activity("q", None, "turn", "other-project", 1_000).unwrap();
+        // Cap: keep the newest 4 of p's 10.
+        let dropped = index.prune_activity("p", 4, i64::MAX, 2_000).unwrap();
+        assert_eq!(dropped, 6);
+        let rows = index.recent_activity("p", 50).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.payload_redacted.as_str()).collect::<Vec<_>>(),
+            vec!["t9", "t8", "t7", "t6"],
+            "oldest dropped, newest kept"
+        );
+        // TTL: everything older than (now - ttl) goes; t9 (ts 1009) survives a
+        // cutoff of 1009, the rest don't.
+        let dropped = index.prune_activity("p", 500, 991, 2_000).unwrap();
+        assert_eq!(dropped, 3);
+        let rows = index.recent_activity("p", 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].payload_redacted, "t9");
+        // The sibling project is untouched by p's prunes.
+        assert_eq!(index.recent_activity("q", 50).unwrap().len(), 1);
     }
 
     /// ADR-010: a PARTIAL walk (scan cap hit / unreadable subtree) must never feed

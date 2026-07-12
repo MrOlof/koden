@@ -234,6 +234,7 @@ pub fn run() {
             brain::commands::brain_librarian_status,
             brain::commands::brain_librarian_activity,
             brain::commands::brain_recovered_panes,
+            brain::commands::brain_record_turn,
             brain::commands::brain_curate,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
