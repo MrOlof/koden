@@ -1550,9 +1550,18 @@ pub(crate) fn clean_turn_text(prompt: &str) -> Option<String> {
 /// Coarse files-touched payload: project-relative changed paths, deduped +
 /// sorted + capped, JSON-array-encoded (paths may contain any separator), each
 /// passed through the same ingest redaction gate for uniformity.
+/// Filtered by the same reserved-artifact + denylist gates as the watcher's
+/// single-file path (see the Fs arm): the batch that carried a real edit often
+/// also carries the brain's own `.koden-gist.json` refresh (an apply writes
+/// notes, then the artifact — the watcher coalesces both), and recording our
+/// own derived artifact as "activity" would put a self-referential line in the
+/// injected gist and rotate its key for nothing.
 fn files_activity_payload(root: &std::path::Path, changed: &[std::path::PathBuf]) -> String {
     let mut rels: Vec<String> = changed
         .iter()
+        .filter(|p| {
+            !walk::is_reserved_artifact(p) && !secrets::is_denylisted_path(&to_canon(p))
+        })
         .map(|p| rel_path(root, p))
         .filter(|r| !r.is_empty())
         .map(|r| secrets::redact(&r).0)
@@ -2051,6 +2060,27 @@ fn handle_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-020 fixup: the files-touched trail records REAL workspace changes
+    /// only — the brain's own derived artifact and denylisted paths ride the
+    /// same coalesced watcher batch as genuine edits (an apply writes notes,
+    /// then refreshes the artifact) and must never appear as "activity".
+    #[test]
+    fn files_activity_payload_excludes_reserved_artifacts_and_denylisted_paths() {
+        let root = std::path::Path::new("C:/proj");
+        let changed = vec![
+            std::path::PathBuf::from("C:/proj/src/main.rs"),
+            std::path::PathBuf::from("C:/proj/.koden-memory/.koden-gist.json"),
+            std::path::PathBuf::from("C:/proj/.env"),
+        ];
+        let payload = files_activity_payload(root, &changed);
+        assert!(payload.contains("main.rs"), "real edit kept: {payload}");
+        assert!(
+            !payload.contains("koden-gist"),
+            "own artifact excluded: {payload}"
+        );
+        assert!(!payload.contains(".env"), "denylisted excluded: {payload}");
+    }
 
     #[test]
     fn due_for_round_fires_on_idle_or_boundary_past_min_gap() {
