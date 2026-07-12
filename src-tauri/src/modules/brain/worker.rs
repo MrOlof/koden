@@ -14,7 +14,7 @@ use crate::modules::brain::curate;
 use crate::modules::brain::gist;
 use crate::modules::brain::memory;
 use crate::modules::brain::reflect;
-use crate::modules::brain::registry::Project;
+use crate::modules::brain::registry::{KodenBrainRegistry, Project};
 use crate::modules::brain::resume;
 use crate::modules::brain::secrets;
 use crate::modules::brain::store::SqliteIndex;
@@ -229,6 +229,22 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
         seed_registry(&app, launch_dir.as_deref());
     }
 
+    // 5b. Boot re-discovery (ADR-021): a project cloned/created in the workspace
+    // while Koden was closed is registered BEFORE the watcher arms and the warm
+    // walk runs, so it gets watched + indexed + doctored + its first artifact
+    // emission through the normal boot flow below. Idempotent — the same shared
+    // loop `brain_set_workspace` runs; already-registered children no-op.
+    if let Some(state) = app.try_state::<BrainState>() {
+        if let Some(root) = state.registry.workspace_root() {
+            let (_, added) =
+                register_workspace_children(&state.registry, std::path::Path::new(&root));
+            if added > 0 {
+                log::info!("brain: boot re-discovery registered {added} new workspace project(s)");
+                state.registry.save_to(&cfg_path);
+            }
+        }
+    }
+
     // 6. Arm the recursive watcher over each seeded project root (P1 freshness)
     // BEFORE the warm walk: an edit made while the initial index runs fires an
     // event that buffers in the worker channel and replays through the normal
@@ -264,7 +280,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     for ev in rx {
         match ev {
             BrainEvent::Agent { pty_id, kind, agent } => {
-                let project = handle_agent(&app, &index, pty_id, &kind, agent);
+                let project = handle_agent(&app, &index, &tx, pty_id, &kind, agent);
                 // An AI session exiting is a natural "settle now" boundary: if that
                 // project already has pending changes, let the Librarian tidy right
                 // after, without waiting out the idle-settle.
@@ -282,7 +298,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                 // gate — prompt text never lands raw), then resolve pty → project
                 // and store on this single writer. Unresolvable/filtered turns drop.
                 if let Some(cleaned) = clean_turn_text(&prompt) {
-                    if let Some(project) = resolve_pty_project(&app, pty_id) {
+                    if let Some(project) = resolve_pty_project(&app, &tx, pty_id) {
                         if let Err(e) = index.record_activity(
                             &project,
                             Some(pty_id as i64),
@@ -775,6 +791,14 @@ fn is_ignored_dir(p: &std::path::Path) -> bool {
     )
 }
 
+/// The single-dir form of the workspace child-marker test (ADR-021): a real
+/// project is a non-ignored directory that is a git repo or carries a manifest.
+/// Shared by [discover_workspace_projects] and the first-use candidate walk —
+/// one rule, no drift copy.
+pub fn qualifies_as_project(p: &std::path::Path) -> bool {
+    p.is_dir() && !is_ignored_dir(p) && has_project_marker(p)
+}
+
 /// Immediate child directories of `root` that look like real projects (have a
 /// project marker). The workspace-root setup registers each as its OWN project, so a
 /// parent of 20 repos becomes 20 hubs — not one giant parent project.
@@ -785,10 +809,96 @@ pub fn discover_workspace_projects(root: &std::path::Path) -> Vec<std::path::Pat
     let mut out: Vec<std::path::PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && !is_ignored_dir(p) && has_project_marker(p))
+        .filter(|p| qualifies_as_project(p))
         .collect();
     out.sort();
     out
+}
+
+/// Register every qualifying immediate child of `root` as its OWN project — the
+/// `brain_set_workspace` loop, shared with boot re-discovery (ADR-021; extracted
+/// so the two paths cannot drift). Idempotent by stable id: an already-registered
+/// child is returned but not re-added. Returns `(registered children, newly added)`.
+pub fn register_workspace_children(
+    registry: &KodenBrainRegistry,
+    root: &std::path::Path,
+) -> (Vec<Project>, usize) {
+    let known: std::collections::HashSet<String> =
+        registry.projects().into_iter().map(|p| p.id).collect();
+    let mut children = Vec::new();
+    let mut added = 0usize;
+    for child in discover_workspace_projects(root) {
+        if let Some(p) = registry.add_root(&child) {
+            if !known.contains(&p.id) {
+                added += 1;
+            }
+            children.push(p);
+        }
+    }
+    (children, added)
+}
+
+/// ADR-021 nearest-ancestor rule: walking UP from `cwd`, the FIRST dir that
+/// [qualifies_as_project] STRICTLY below the workspace root is the candidate —
+/// nested-git-in-git picks the inner repo. A qualifying dir inside an ignored
+/// subtree (`node_modules/<dep>/package.json` is a project marker on every npm
+/// dependency) is discarded when the walk crosses the ignored component; the
+/// search continues above it. `None` when `cwd` is not strictly under the root,
+/// IS the root itself (never registered), or no ancestor qualifies. Comparisons
+/// use the registry norms (`to_canon` + Windows-only case fold), so an OSC 7
+/// `c:\ws\repo` cwd still matches a stored `C:/ws` root.
+pub fn first_use_candidate(
+    workspace_root: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    use crate::modules::brain::registry::fold_case;
+    let root_n = fold_case(to_canon(workspace_root).trim_end_matches('/'));
+    let cwd_n = fold_case(to_canon(cwd).trim_end_matches('/'));
+    if root_n.is_empty() || cwd_n == root_n || !cwd_n.starts_with(&format!("{root_n}/")) {
+        return None;
+    }
+    let mut candidate: Option<std::path::PathBuf> = None;
+    for anc in cwd.ancestors() {
+        let anc_n = fold_case(to_canon(anc).trim_end_matches('/'));
+        if anc_n == root_n || !anc_n.starts_with(&format!("{root_n}/")) {
+            break; // reached (or escaped) the workspace root — exclusive
+        }
+        if is_ignored_dir(anc) {
+            candidate = None; // anything found below lives in an ignored subtree
+            continue;
+        }
+        if candidate.is_none() && qualifies_as_project(anc) {
+            candidate = Some(anc.to_path_buf());
+        }
+    }
+    candidate
+}
+
+/// The resolve-or-register seam (ADR-021, testable over a bare registry):
+/// resolve `cwd`; on a miss find the [first_use_candidate] under the workspace
+/// root, register it, and RETRY the resolution — the triggering signal/turn is
+/// never lost. Returns the project plus whether THIS call registered it.
+/// `None`: cwd resolves nowhere and no candidate exists (no workspace root, cwd
+/// outside it or the root itself, no qualifying ancestor, insane root).
+/// Guards: the root itself never qualifies (strict-prefix walk); a candidate
+/// inside an EXISTING project is impossible (that prefix would have resolved);
+/// debounce is structural — the single worker thread is the only caller, and
+/// once registered the next trigger short-circuits on the resolve.
+pub(crate) fn resolve_or_register_project(
+    registry: &KodenBrainRegistry,
+    cwd: &str,
+) -> Option<(Project, bool)> {
+    if let Some(p) = registry.resolve(cwd) {
+        return Some((p, false));
+    }
+    let root = registry.workspace_root()?;
+    let candidate =
+        first_use_candidate(std::path::Path::new(&root), std::path::Path::new(cwd))?;
+    if !is_sane_root(&candidate) {
+        return None;
+    }
+    registry.add_root(&candidate)?;
+    registry.resolve(cwd).map(|p| (p, true))
 }
 
 /// Root sanity gate, shared by the boot seed and `brain_add_project`: never index
@@ -1473,7 +1583,7 @@ fn auto_apply_sweep(
 pub struct BrainActivityEvent {
     pub project: String,
     pub project_name: String,
-    pub kind: String, // "applied" | "reflected" | "reverted"
+    pub kind: String, // "applied" | "reflected" | "reverted" | "registered"
     pub count: usize,
     pub spent_usd: Option<f64>,
 }
@@ -1607,8 +1717,13 @@ pub(crate) fn enqueue_exit_reconcile(tx: &mpsc::Sender<BrainEvent>, project_id: 
 
 /// Resolve pty → cwd → project for a non-lifecycle ingest (the Turn leg):
 /// the exact `handle_agent` chain — live pty cwd first, then the cwd remembered
-/// on the LiveSession (so a turn racing the pty teardown still resolves).
-fn resolve_pty_project(app: &AppHandle, pty_id: u32) -> Option<String> {
+/// on the LiveSession (so a turn racing the pty teardown still resolves) —
+/// including ADR-021 first-use registration on a miss.
+fn resolve_pty_project(
+    app: &AppHandle,
+    tx: &mpsc::Sender<BrainEvent>,
+    pty_id: u32,
+) -> Option<String> {
     let brain = app.try_state::<BrainState>()?;
     let remembered = brain
         .sessions
@@ -1619,7 +1734,33 @@ fn resolve_pty_project(app: &AppHandle, pty_id: u32) -> Option<String> {
         .try_state::<PtyState>()
         .and_then(|pty| pty.session_cwd(pty_id))
         .or(remembered)?;
-    brain.registry.resolve(&cwd).map(|p| p.id)
+    resolve_or_register_cwd(app, tx, &cwd).map(|p| p.id)
+}
+
+/// ADR-021 register-on-first-use: resolve `cwd` against the registry; on a miss
+/// register the nearest qualifying ancestor under the workspace root and retry,
+/// so the triggering signal/turn lands in the new project's trail instead of
+/// being dropped. A NEW registration takes the exact `brain_add_project` path —
+/// registry add, then a reconcile enqueue (index + watcher re-arm + persist +
+/// the first artifact emission once indexing completes) — plus an INFO log and
+/// ONE coalesced `registered` activity event for the frontend toast.
+fn resolve_or_register_cwd(
+    app: &AppHandle,
+    tx: &mpsc::Sender<BrainEvent>,
+    cwd: &str,
+) -> Option<Project> {
+    let state = app.try_state::<BrainState>()?;
+    let (proj, newly_registered) = resolve_or_register_project(&state.registry, cwd)?;
+    if newly_registered {
+        log::info!(
+            "brain: registered new project '{}' on first use ({})",
+            proj.name,
+            proj.root
+        );
+        let _ = tx.send(BrainEvent::Rescan { project: None });
+        emit_brain_activity(app, &proj.id, "registered", 1, None);
+    }
+    Some(proj)
 }
 
 /// Tick-driven retention over every registered project. A prune that dropped
@@ -1996,6 +2137,7 @@ fn resume_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
 fn handle_agent(
     app: &AppHandle,
     index: &SqliteIndex,
+    tx: &mpsc::Sender<BrainEvent>,
     pty_id: u32,
     kind: &str,
     agent: Option<String>,
@@ -2015,7 +2157,9 @@ fn handle_agent(
     let live_cwd = app.try_state::<PtyState>().and_then(|pty| pty.session_cwd(pty_id));
     let cwd = live_cwd.or(remembered_cwd);
     let effective_agent = agent.clone().or(remembered_agent);
-    let project = cwd.as_deref().and_then(|c| brain.registry.resolve(c)).map(|p| p.id);
+    // ADR-021: a cwd resolving nowhere registers its nearest qualifying ancestor
+    // under the workspace root and retries, so this very signal is not lost.
+    let project = cwd.as_deref().and_then(|c| resolve_or_register_cwd(app, tx, c)).map(|p| p.id);
     let resolved = project.clone(); // returned to the caller (the `started` arm moves `project`)
 
     // Journal the lifecycle event (fail-open). pane_uuid is None until P4-a wires a
@@ -2638,5 +2782,156 @@ mod tests {
             complete: true,
         });
         assert_eq!(stats.pruned, 2, "complete walk over empty disk prunes");
+    }
+
+    /// ADR-021: the single-dir qualification shared by discovery and the
+    /// first-use walk — a git repo or a manifest qualifies; a plain dir, a
+    /// file, and an ignored-named dir (even one CARRYING a manifest, the
+    /// node_modules shape) do not.
+    #[test]
+    fn qualifies_as_project_markers_and_ignored_names() {
+        let work = tempfile::tempdir().unwrap();
+        let root = work.path();
+
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!qualifies_as_project(&plain), "no marker → not a project");
+
+        let git = root.join("gitproj");
+        std::fs::create_dir_all(git.join(".git")).unwrap();
+        assert!(qualifies_as_project(&git), "a git repo qualifies");
+
+        let manifest = root.join("nodeproj");
+        std::fs::create_dir_all(&manifest).unwrap();
+        std::fs::write(manifest.join("package.json"), "{}").unwrap();
+        assert!(qualifies_as_project(&manifest), "a manifest qualifies");
+
+        let nm = root.join("node_modules");
+        std::fs::create_dir_all(&nm).unwrap();
+        std::fs::write(nm.join("package.json"), "{}").unwrap();
+        assert!(!qualifies_as_project(&nm), "an ignored-named dir never qualifies");
+
+        let file = root.join("gitproj").join("README.md");
+        std::fs::write(&file, "x").unwrap();
+        assert!(!qualifies_as_project(&file), "a file never qualifies");
+    }
+
+    /// ADR-021 nearest-ancestor rule, defined precisely: walking UP from cwd,
+    /// the FIRST qualifying dir STRICTLY below the workspace root wins — a
+    /// nested-git-in-git cwd picks the INNER repo; the root itself is never a
+    /// candidate; a cwd outside the root yields nothing.
+    #[test]
+    fn first_use_candidate_picks_nearest_qualifying_ancestor_below_root() {
+        let work = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(work.path()).unwrap();
+        let outer = root.join("outer");
+        let inner = outer.join("inner");
+        let src = inner.join("src");
+        std::fs::create_dir_all(outer.join(".git")).unwrap();
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Nested git-in-git: the dir nearest to cwd wins.
+        assert_eq!(first_use_candidate(&root, &src).as_deref(), Some(inner.as_path()));
+        // cwd above the inner repo resolves to the outer one.
+        let outer_docs = outer.join("docs");
+        std::fs::create_dir_all(&outer_docs).unwrap();
+        assert_eq!(first_use_candidate(&root, &outer_docs).as_deref(), Some(outer.as_path()));
+        // cwd AT a project root registers that root.
+        assert_eq!(first_use_candidate(&root, &inner).as_deref(), Some(inner.as_path()));
+        // The workspace root itself is NEVER a candidate…
+        assert_eq!(first_use_candidate(&root, &root), None);
+        // …even when the root itself is a git repo and cwd is a plain child.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(first_use_candidate(&root, &plain), None, "no ancestor strictly below root");
+        // A cwd OUTSIDE the workspace root yields nothing.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let far = std::fs::canonicalize(elsewhere.path()).unwrap().join("x");
+        std::fs::create_dir_all(far.join(".git")).unwrap();
+        assert_eq!(first_use_candidate(&root, &far), None);
+    }
+
+    /// ADR-021: every npm dependency carries a package.json — a cwd inside
+    /// node_modules must attribute to the REAL project above it, never register
+    /// the dependency dir.
+    #[test]
+    fn first_use_candidate_skips_ignored_subtrees() {
+        let work = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(work.path()).unwrap();
+        let proj = root.join("proj");
+        let dep = proj.join("node_modules").join("dep");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join("package.json"), "{}").unwrap();
+        assert_eq!(first_use_candidate(&root, &dep).as_deref(), Some(proj.as_path()));
+    }
+
+    /// ADR-021 first-use path: an unresolvable cwd under the workspace root
+    /// registers its project ONCE and the retried resolution succeeds — the
+    /// triggering signal/turn is not lost; the second trigger resolves normally
+    /// without a second registration; the workspace root itself never registers;
+    /// no workspace root → no registration at all.
+    #[test]
+    fn resolve_or_register_registers_once_and_retries_resolution() {
+        let work = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(work.path()).unwrap();
+        let proj = root.join("proj");
+        let src = proj.join("src");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+
+        // No workspace root configured → a miss stays a miss.
+        let reg = KodenBrainRegistry::default();
+        let cwd = src.to_string_lossy().to_string();
+        assert!(resolve_or_register_project(&reg, &cwd).is_none());
+        assert!(reg.projects().is_empty());
+
+        // Workspace root set: the first trigger registers AND resolves.
+        reg.set_workspace_root(Some(to_canon(&root).trim_end_matches('/').to_string()));
+        let (p1, newly) = resolve_or_register_project(&reg, &cwd).expect("registers + resolves");
+        assert!(newly, "first trigger performs the registration");
+        assert_eq!(p1.name, "proj");
+        assert_eq!(reg.projects().len(), 1);
+
+        // Debounce: the second trigger (started signal + first turn arrive close
+        // together) resolves normally — same project, no second registration.
+        let (p2, newly2) = resolve_or_register_project(&reg, &cwd).expect("resolves");
+        assert!(!newly2, "second trigger must not re-register");
+        assert_eq!(p2.id, p1.id);
+        assert_eq!(reg.projects().len(), 1);
+
+        // The workspace root itself is never registered, even as a git repo.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root_cwd = root.to_string_lossy().to_string();
+        assert!(resolve_or_register_project(&reg, &root_cwd).is_none());
+        assert_eq!(reg.projects().len(), 1, "root trigger must not add a project");
+    }
+
+    /// ADR-021 boot re-discovery: the shared brain_set_workspace loop registers
+    /// only qualifying children, is idempotent across a double boot, and reports
+    /// how many were NEW (the boot log gate).
+    #[test]
+    fn register_workspace_children_is_idempotent_across_boots() {
+        let work = tempfile::tempdir().unwrap();
+        let root = work.path();
+        std::fs::create_dir_all(root.join("a").join(".git")).unwrap();
+        let b = root.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap(); // no marker
+
+        let reg = KodenBrainRegistry::default();
+        let (children, added) = register_workspace_children(&reg, root);
+        assert_eq!(added, 2, "both qualifying children are NEW on first boot");
+        assert_eq!(children.len(), 2);
+        assert_eq!(reg.projects().len(), 2);
+
+        // Second boot: same children returned, nothing newly added.
+        let (children2, added2) = register_workspace_children(&reg, root);
+        assert_eq!(added2, 0, "double boot registers nothing new");
+        assert_eq!(children2.len(), 2);
+        assert_eq!(reg.projects().len(), 2);
     }
 }

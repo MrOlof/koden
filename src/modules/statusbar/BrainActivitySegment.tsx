@@ -18,6 +18,7 @@ const VERB: Record<string, string> = {
   reflected: "reflect",
   applied: "applied",
   reverted: "revert",
+  registered: "registered",
 };
 
 /**
@@ -54,7 +55,7 @@ export function BrainActivitySegment() {
       (last.event.spent_usd != null
         ? ` · $${last.event.spent_usd.toFixed(4)}`
         : "") +
-      (last.event.count > 0
+      (last.event.count > 0 && last.event.kind !== "registered"
         ? ` · ${last.event.count} ${
             last.event.kind === "reflected" ? "proposal(s)" : "applied"
           }`

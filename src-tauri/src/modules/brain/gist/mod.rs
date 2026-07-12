@@ -195,6 +195,15 @@ fn build_gist_on_conn(
         }
         if notes.is_empty() {
             unknowns.push("- No memory notes in this project.".to_string());
+            // ADR-021 agent-writable memory loop: a fresh project tells the agent
+            // WHERE memory lives, so its first session can seed notes the watcher
+            // then ingests. Key-covered: note FILES are indexed, so the zero-notes
+            // state (and its flip) rides the content fingerprint — deterministic,
+            // no new key input.
+            unknowns.push(
+                "- Memory lives in .koden-memory/*.md (markdown + YAML frontmatter). Leave concise notes there for future sessions."
+                    .to_string(),
+            );
         }
         if !unknowns.is_empty() {
             push_line(&mut out, max_chars, &format!("## Known unknowns\n{}", unknowns.join("\n")));
@@ -659,6 +668,50 @@ mod tests {
         let g4 = build_gist(&db, "p", "proj", "login", 800);
         assert_eq!(g4.fingerprint, g3.fingerprint, "set semantics: repeats don't rotate");
         assert_eq!(g4.bytes, g3.bytes);
+    }
+
+    /// ADR-021 agent-writable memory loop: a fresh project (ZERO memory notes)
+    /// tells the agent WHERE memory lives, and the guidance disappears once a
+    /// note exists. Byte-identity both ways: the zero-notes state is key-covered
+    /// (note FILES are indexed → the content fingerprint carries the notes set),
+    /// so repeated builds are byte-identical in BOTH states and the first note
+    /// rotates the key — no new key input needed.
+    #[test]
+    fn fresh_project_gist_carries_memory_guidance_until_first_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("i.sqlite");
+        let idx = SqliteIndex::open(&db).unwrap();
+        idx.index_file("p", "src/main.rs", "pub fn main() {}", "h1", 17).unwrap();
+
+        let g1 = build_gist(&db, "p", "proj", "main", 800);
+        assert!(g1.bytes.contains("- No memory notes in this project."), "{}", g1.bytes);
+        assert!(
+            g1.bytes.contains(
+                "- Memory lives in .koden-memory/*.md (markdown + YAML frontmatter). Leave concise notes there for future sessions."
+            ),
+            "guidance line present on a fresh project: {}",
+            g1.bytes
+        );
+        let g2 = build_gist(&db, "p", "proj", "main", 800);
+        assert_eq!(g2.bytes, g1.bytes, "zero-notes builds are byte-identical");
+        assert_eq!(g2.fingerprint, g1.fingerprint);
+
+        // First note lands the way production lands it: the note FILE is indexed
+        // (rotating the fingerprint) and the parsed row hits the notes table.
+        let note = crate::modules::brain::memory::parse("# Auth flow", "auth-flow");
+        idx.upsert_note("p", &note, ".koden-memory/auth-flow.md", "h2").unwrap();
+        idx.index_file("p", ".koden-memory/auth-flow.md", "# Auth flow", "h2", 18).unwrap();
+        let g3 = build_gist(&db, "p", "proj", "main", 800);
+        assert!(
+            !g3.bytes.contains("Memory lives in .koden-memory/*.md"),
+            "guidance gone once a note exists: {}",
+            g3.bytes
+        );
+        assert!(!g3.bytes.contains("No memory notes"), "{}", g3.bytes);
+        assert_ne!(g3.fingerprint, g1.fingerprint, "the first note rotates the key");
+        let g4 = build_gist(&db, "p", "proj", "main", 800);
+        assert_eq!(g4.bytes, g3.bytes, "with-notes builds are byte-identical");
+        assert_eq!(g4.fingerprint, g3.fingerprint);
     }
 
     /// Regression (gauntlet S9 `secret-intent-echoed-to-gist`): a secret-shaped

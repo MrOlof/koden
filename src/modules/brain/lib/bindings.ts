@@ -309,11 +309,12 @@ export function brainRecordTurn(ptyId: number, prompt: string): Promise<void> {
 
 /** One coalesced Librarian activity event (ADR-020) — the `koden:brain-activity`
  *  Tauri event payload. Field names mirror the Rust serde struct (snake_case).
- *  One event per apply-sweep batch / reflect round / revert, never per-proposal. */
+ *  One event per apply-sweep batch / reflect round / revert / first-use project
+ *  registration (ADR-021), never per-proposal. */
 export type BrainActivityEvent = {
   project: string;
   project_name: string;
-  kind: "applied" | "reflected" | "reverted";
+  kind: "applied" | "reflected" | "reverted" | "registered";
   count: number;
   spent_usd: number | null;
 };

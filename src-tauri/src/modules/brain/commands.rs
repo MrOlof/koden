@@ -122,14 +122,11 @@ pub async fn brain_set_workspace(
     }
     let root_norm = crate::modules::fs::to_canon(&root).trim_end_matches('/').to_string();
     state.registry.set_workspace_root(Some(root_norm));
-    let mut added = Vec::new();
-    for child in crate::modules::brain::worker::discover_workspace_projects(&root) {
-        if let Some(p) = state.registry.add_root(&child) {
-            added.push(p);
-        }
-    }
+    // Shared with boot re-discovery + first-use registration (ADR-021, one loop).
+    let (children, _added) =
+        crate::modules::brain::worker::register_workspace_children(&state.registry, &root);
     enqueue(&state, BrainEvent::Rescan { project: None })?;
-    Ok(added)
+    Ok(children)
 }
 
 /// Overall status + per-project indexed file counts.

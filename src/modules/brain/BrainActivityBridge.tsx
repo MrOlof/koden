@@ -19,6 +19,8 @@ function summary(e: BrainActivityEvent): string {
       }`;
     case "reverted":
       return `${e.project_name}: memory change reverted`;
+    case "registered":
+      return `${e.project_name} registered — indexing`;
   }
 }
 
@@ -51,7 +53,7 @@ export function BrainActivityBridge({
       // Ambient chrome first — the status-bar segment is NOT pref-gated.
       useBrainActivityStore.getState().record(payload);
       if (!enabledRef.current) return;
-      toast("Librarian", {
+      toast(payload.kind === "registered" ? "Koden Brain" : "Librarian", {
         description: summary(payload),
         action: { label: "View", onClick: () => openRef.current() },
         duration: 5000,
