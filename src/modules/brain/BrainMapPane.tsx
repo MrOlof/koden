@@ -65,6 +65,26 @@ const SHELL_SP = [13, 18, 24, 30, 34]; // in-plane spread per shell
 const BAND_LABEL = ["Active", "Today", "This week", "Stale", "Memory"];
 const MAX_FILES_PER_PROJECT = 54;
 
+// ── animation params (brain-map life) ────────────────────────────────────────
+// Synapse travel: a pulse riding each core→lobe edge.
+const PULSE_SPEED = 0.09; // edge lengths per second, idle
+const PULSE_SPEED_LIVE = 0.32; // when an agent is live on that lobe
+const PULSE_SIZE = 7;
+const PULSE_SIZE_LIVE = 10;
+const PULSE_OPACITY = 0.35;
+const PULSE_OPACITY_LIVE = 0.95;
+// Core firing: a node flashes and ripples to its neighbors.
+const FIRE_INTERVAL_S = 14; // one firing chain per interval (~4/min)
+const FIRE_RIPPLE_S = 0.6; // flash duration per node
+const FIRE_NEIGHBOR_DELAY_S = 0.16; // ripple hop delay
+const FIRE_BOOST = 1.1; // additive brightness at flash peak
+// Edit glow: day-long ease-out + a hot phase right after the edit.
+const GLOW_HOT_MS = 8 * 60_000;
+const GLOW_HOT_BOOST = 0.6;
+// Lobe breathing.
+const BREATH_AMP = 0.02; // ±2%
+const BREATH_PERIOD_S = 7;
+
 function hexrgb(h: string): [number, number, number] {
   const s = h.replace("#", "");
   return [
@@ -426,6 +446,26 @@ export function BrainMapPane() {
       world.add(s);
       return s;
     });
+    // synapse travel pulses — one sprite riding each core→lobe edge
+    const liveColor = new THREE.Color(STATUS_COLOR.working);
+    const pulses = scene.projMeta.map((m, i) => {
+      const s = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: glowTex,
+          color: new THREE.Color(m.color),
+          blending: THREE.AdditiveBlending,
+          transparent: true,
+          depthWrite: false,
+          opacity: 0,
+        }),
+      );
+      s.scale.set(PULSE_SIZE, PULSE_SIZE, 1);
+      world.add(s);
+      // t accumulated per-frame (not derived from time) so a live-speed change
+      // never makes the pulse jump along the edge
+      return { s, base: new THREE.Color(m.color), t: (i * 0.618033988) % 1 };
+    });
+
     const agentGlowPool: THREE.Sprite[] = [];
     const ensureAgentGlows = (count: number) => {
       while (agentGlowPool.length < count) {
@@ -448,6 +488,7 @@ export function BrainMapPane() {
     const links = scene.links;
     const lpos = new Float32Array(links.length * 6);
     const lcol = new Float32Array(links.length * 6);
+    let hoverPidL: number | null = null; // hovered lobe → dim unrelated edges
     const rebuildLines = () => {
       const focus = focusRef.current;
       for (let i = 0; i < links.length; i++) {
@@ -461,7 +502,16 @@ export function BrainMapPane() {
         lpos[i * 6 + 4] = B[1];
         lpos[i * 6 + 5] = B[2];
         const c = hexrgb(scene.projMeta[pid]?.color ?? "#6096ff");
-        const f = focus != null ? (pid === focus ? 0.9 : 0.04) : 0.42;
+        const f =
+          focus != null
+            ? pid === focus
+              ? 0.9
+              : 0.04
+            : hoverPidL != null
+              ? pid === hoverPidL
+                ? 0.85
+                : 0.1
+              : 0.42;
         for (let k = 0; k < 2; k++) {
           lcol[i * 6 + k * 3] = c[0] * f;
           lcol[i * 6 + k * 3 + 1] = c[1] * f;
@@ -656,6 +706,7 @@ export function BrainMapPane() {
     // agents re-target among the hot files every few seconds (alive, like the
     // design's hop) — we know an agent's roster entry, not its exact file.
     const hopTimer = window.setInterval(() => {
+      if (document.hidden) return; // no re-target churn while the tab is hidden
       const hot = scene.fileNodes
         .filter((nd) => nd.lastEdit > 0)
         .sort((a, b) => b.lastEdit - a.lastEdit)
@@ -672,7 +723,9 @@ export function BrainMapPane() {
     const clock = new THREE.Clock();
     let raf = 0;
     let lastFocus = focusRef.current;
+    let lastHoverPid: number | null = null;
     const tmp = new THREE.Vector3();
+    const livePidsScratch = new Set<number>();
     const draw = () => {
       const dt = Math.min(0.05, clock.getDelta());
       const time = clock.elapsedTime;
@@ -682,8 +735,13 @@ export function BrainMapPane() {
       const hi = hiRef.current;
       const now = Date.now();
 
-      if (focus !== lastFocus) {
+      const hoverNd = hover ? scene.byId.get(hover) : null;
+      const hoverPid =
+        hoverNd && hoverNd.type === "project" ? hoverNd.pid : null;
+      if (focus !== lastFocus || hoverPid !== lastHoverPid) {
         lastFocus = focus;
+        lastHoverPid = hoverPid;
+        hoverPidL = hoverPid;
         rebuildLines();
       }
       if (!dragging && focus == null && !sel) cam.theta += dt * 0.5 * 0.28;
@@ -715,10 +773,26 @@ export function BrainMapPane() {
         let g = base[1];
         let b = base[2];
         let size = nd.type === "project" ? 15 : nd.type === "memory" ? 4 : 3;
+        if (nd.type === "project") {
+          // barely-perceptible breathing, phase-offset per lobe
+          size *=
+            1 +
+            BREATH_AMP *
+              Math.sin((time * 2 * Math.PI) / BREATH_PERIOD_S + nd.pid * 2.4);
+        }
         let glow = 0;
         if (nd.lastEdit) {
           const age = now - nd.lastEdit;
-          if (age < DAY) glow = 1 - age / DAY;
+          if (age < DAY) {
+            // ease-out across the day, plus a hot phase for fresh edits that
+            // itself eases out over minutes (no binary on/off)
+            const day = 1 - age / DAY;
+            glow = day * day;
+            if (age < GLOW_HOT_MS) {
+              const hot = 1 - age / GLOW_HOT_MS;
+              glow = Math.min(1, glow + hot * hot * GLOW_HOT_BOOST);
+            }
+          }
         }
         if (glow > 0) {
           const pulse = 0.7 + 0.3 * Math.sin(time * 3 + nd.phase);
@@ -761,9 +835,40 @@ export function BrainMapPane() {
       for (let i = 0; i < projGlows.length; i++) {
         let op = 0.6;
         if (focus != null) op = focus === i ? 0.95 : 0.08;
+        if (hoverPid != null) op *= hoverPid === i ? 1.15 : 0.45;
         if (hi) op *= 0.6;
         projGlows[i].material.opacity =
           op * (0.85 + 0.15 * Math.sin(time * 1.6 + i));
+        const breathe =
+          1 +
+          BREATH_AMP *
+            Math.sin((time * 2 * Math.PI) / BREATH_PERIOD_S + i * 2.4);
+        projGlows[i].scale.set(44 * breathe, 44 * breathe, 1);
+      }
+      // synapse travel — pulses ride the core→lobe edges; live-agent lobes
+      // pulse faster, brighter, and in the agent cyan. Reused Set: the draw
+      // loop runs at 60fps and a per-frame allocation is pure GC churn.
+      livePidsScratch.clear();
+      const livePids = livePidsScratch;
+      for (const a of agents3Ref.current) {
+        const nd = scene.byId.get(a.nodeId);
+        if (nd) livePids.add(nd.pid);
+      }
+      for (let i = 0; i < pulses.length; i++) {
+        const P = pulses[i];
+        const m = scene.projMeta[i];
+        const live = livePids.has(i);
+        P.t = (P.t + dt * (live ? PULSE_SPEED_LIVE : PULSE_SPEED)) % 1;
+        const e = P.t * P.t * (3 - 2 * P.t); // smoothstep — organic accel/decel
+        P.s.position.set(m.pos[0] * e, m.pos[1] * e, m.pos[2] * e);
+        let op = Math.sin(Math.PI * P.t) * (live ? PULSE_OPACITY_LIVE : PULSE_OPACITY);
+        if (focus != null && i !== focus) op *= 0.08;
+        else if (hoverPid != null && i !== hoverPid) op *= 0.25;
+        if (hi) op *= 0.6;
+        P.s.material.opacity = op;
+        P.s.material.color.copy(live ? liveColor : P.base);
+        const sz = live ? PULSE_SIZE_LIVE : PULSE_SIZE;
+        P.s.scale.set(sz, sz, 1);
       }
       // agent glows
       const a3 = agents3Ref.current;
@@ -781,7 +886,7 @@ export function BrainMapPane() {
           continue;
         }
         s.visible = true;
-        s.material.color = new THREE.Color(a.color);
+        s.material.color.set(a.color);
         s.position.set(nd.pos[0], nd.pos[1], nd.pos[2]);
         const p = 0.5 + 0.5 * Math.sin(time * 5 + i);
         s.material.opacity = 0.55 + 0.4 * p;
@@ -802,7 +907,14 @@ export function BrainMapPane() {
           const x = (tmp.x * 0.5 + 0.5) * w;
           const y = (-tmp.y * 0.5 + 0.5) * h;
           el.style.display = "block";
-          el.style.opacity = focus != null && focus !== i ? "0.25" : "1";
+          el.style.opacity =
+            focus != null && focus !== i
+              ? "0.25"
+              : hoverPid != null && hoverPid !== i
+                ? "0.3"
+                : "1";
+          // hovered lobe → label contrast up, the rest recede
+          el.style.color = hoverPid === i ? "#eef1f6" : "#aab2c0";
           el.style.transform = `translate(-50%,-50%) translate(${x.toFixed(1)}px,${(y + 20).toFixed(1)}px)`;
         }
       }
@@ -810,10 +922,22 @@ export function BrainMapPane() {
       renderer.render(sceneObj, camera);
       raf = requestAnimationFrame(draw);
     };
-    raf = requestAnimationFrame(draw);
+    // pause ALL animation work while the tab is hidden (rAF is throttled by
+    // the browser anyway, but this stops the loop outright and resumes clean)
+    const onVis = () => {
+      if (document.hidden) {
+        cancelAnimationFrame(raf);
+      } else {
+        clock.getDelta(); // flush the hidden-time delta so nothing lurches
+        raf = requestAnimationFrame(draw);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    if (!document.hidden) raf = requestAnimationFrame(draw);
 
     return () => {
       cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVis);
       clearInterval(hopTimer);
       ro.disconnect();
       dom.removeEventListener("pointerdown", onDown);
@@ -1444,6 +1568,28 @@ function buildCore(world: THREE.Group, glowTex: THREE.Texture) {
   );
   net.add(web);
 
+  // ── core firing: adjacency from the web segs + seeded per-tick randomness ──
+  const adj = new Map<number, number[]>();
+  const segIdx = new Map<number, number>();
+  const segKey = (a: number, b: number) =>
+    a < b ? a * 100000 + b : b * 100000 + a;
+  for (let s = 0; s < S; s++) {
+    const [i, j] = segs[s];
+    if (!adj.has(i)) adj.set(i, []);
+    if (!adj.has(j)) adj.set(j, []);
+    adj.get(i)?.push(j);
+    adj.get(j)?.push(i);
+    segIdx.set(segKey(i, j), s);
+  }
+  const fireSources = [...adj.keys()];
+  // deterministic per-tick hash (same mixing as mb) — no per-frame flicker
+  const hash01 = (n: number) => {
+    let t = (n + 0x6d2b79f5) | 0;
+    t = Math.imul(t ^ (t >>> 15), 1 | t);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
   const animate = (time: number, dt: number) => {
     glow.material.opacity = 0.34 + 0.1 * Math.sin(time * 1.6);
     glow.scale.setScalar(118 + 12 * Math.sin(time * 1.6));
@@ -1457,7 +1603,6 @@ function buildCore(world: THREE.Group, glowTex: THREE.Texture) {
       colArr[i * 3 + 1] = Math.min(1.4, baseArr[i * 3 + 1] * b);
       colArr[i * 3 + 2] = Math.min(1.5, baseArr[i * 3 + 2] * b);
     }
-    cluster.geometry.attributes.color.needsUpdate = true;
     for (let s = 0; s < S; s++) {
       const pulse = 0.5 + 0.5 * Math.sin(time * 2.6 + lphase[s]);
       const b = 0.12 + 0.8 * pulse;
@@ -1468,6 +1613,42 @@ function buildCore(world: THREE.Group, glowTex: THREE.Texture) {
       lcol[s * 6 + 4] = 0.72 * b;
       lcol[s * 6 + 5] = 1.0 * b;
     }
+    // gentle firing: one node flashes, the ripple hops to its neighbors
+    if (fireSources.length) {
+      const tick = Math.floor(time / FIRE_INTERVAL_S);
+      const start =
+        tick * FIRE_INTERVAL_S + hash01(tick * 31) * FIRE_INTERVAL_S * 0.4;
+      const tf = time - start;
+      if (tf >= 0 && tf < FIRE_RIPPLE_S + 3 * FIRE_NEIGHBOR_DELAY_S) {
+        const src =
+          fireSources[Math.floor(hash01(tick * 7919) * fireSources.length)];
+        const flash = (idx: number, delay: number) => {
+          const p = (tf - delay) / FIRE_RIPPLE_S;
+          if (p <= 0 || p >= 1) return;
+          const e = Math.sin(Math.PI * p) * FIRE_BOOST;
+          colArr[idx * 3] = Math.min(1.6, colArr[idx * 3] + e * 0.6);
+          colArr[idx * 3 + 1] = Math.min(1.6, colArr[idx * 3 + 1] + e * 0.85);
+          colArr[idx * 3 + 2] = Math.min(1.7, colArr[idx * 3 + 2] + e);
+        };
+        flash(src, 0);
+        const nbrs = adj.get(src) ?? [];
+        for (let k = 0; k < Math.min(3, nbrs.length); k++) {
+          const nb = nbrs[k];
+          flash(nb, FIRE_NEIGHBOR_DELAY_S * (k + 1));
+          const s = segIdx.get(segKey(src, nb));
+          if (s == null) continue;
+          const p = (tf - FIRE_NEIGHBOR_DELAY_S * k) / FIRE_RIPPLE_S;
+          if (p <= 0 || p >= 1) continue;
+          const e = Math.sin(Math.PI * p) * FIRE_BOOST;
+          for (let q = 0; q < 6; q += 3) {
+            lcol[s * 6 + q] = Math.min(1.4, lcol[s * 6 + q] + e * 0.5);
+            lcol[s * 6 + q + 1] = Math.min(1.4, lcol[s * 6 + q + 1] + e * 0.75);
+            lcol[s * 6 + q + 2] = Math.min(1.5, lcol[s * 6 + q + 2] + e);
+          }
+        }
+      }
+    }
+    cluster.geometry.attributes.color.needsUpdate = true;
     web.geometry.attributes.color.needsUpdate = true;
   };
 

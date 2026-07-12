@@ -26,3 +26,5 @@ stats.html
 *.sw?
 
 *.tsbuildinfo
+# Koden Brain derived artifact (ADR-019): regenerated per boot, never committed.
+.koden-memory/.koden-gist.json
