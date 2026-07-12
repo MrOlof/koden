@@ -161,6 +161,10 @@ export function useVoiceCapture({
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<{ ctx: AudioContext; timer: number } | null>(null);
+  // Live RMS of the capture (0 when idle), written by the analyser timer at
+  // 10Hz. A ref on purpose: the VoiceHud waveform polls it — level must never
+  // re-render the provider tree.
+  const levelRef = useRef(0);
   const cancelledRef = useRef(false);
   // Per-attempt epoch: state stays "idle" until getUserMedia resolves, so two
   // rapid start() calls both pass the idle guard and both await the mic. The
@@ -188,6 +192,7 @@ export function useVoiceCapture({
       void a.ctx.close().catch(() => undefined);
       audioRef.current = null;
     }
+    levelRef.current = 0;
     for (const t of streamRef.current?.getTracks() ?? []) t.stop();
     streamRef.current = null;
   }, []);
@@ -297,7 +302,9 @@ export function useVoiceCapture({
               : createSilenceDetector({ silenceMs, noSpeechMs });
           const timer = window.setInterval(() => {
             analyser.getFloatTimeDomainData(buf);
-            const verdict = detector.sample(rmsOf(buf), performance.now());
+            const rms = rmsOf(buf);
+            levelRef.current = rms;
+            const verdict = detector.sample(rms, performance.now());
             if (verdict === "continue") return;
             if (verdict === "cancel") {
               cancelledRef.current = true;
@@ -344,6 +351,8 @@ export function useVoiceCapture({
     /** Meta of the capture in flight (null when idle). */
     meta,
     error,
+    /** Live capture RMS, 10Hz, 0 when idle — poll it, never subscribe. */
+    levelRef,
     start,
     stop,
     cancel,

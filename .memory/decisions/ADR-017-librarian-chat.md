@@ -162,3 +162,29 @@ keep the conversational `mode: "auto"` (silence auto-stop + 8s no-speech
 cancel). Decision seams: `chordPressAction`/`chordReleaseAction` in
 `ai/hooks/voiceChord.ts`, mode policy in `createSilenceDetector`
 (`ai/hooks/useVoiceCapture.ts`).
+
+## Addendum — voice is headless (2026-07-13)
+
+Voice NEVER opens the Librarian window (Wispr-Flow feel: the window popping
+open was blocking whatever lives bottom-right). Every voice path — hotkey
+take, header-mic session, the voice auto-submit itself — runs with the window
+closed; typed sends keep the open-on-send behavior. The ONE sanctioned
+voice-path open is the approval auto-open in `AgentRunBridge` (a headless
+turn hitting a tool approval genuinely needs the user). The voice surface is
+the **VoiceHud** pill (`ai/components/VoiceHud.tsx`, mounted once at App-shell
+level, bottom-center, pointer-events only on its buttons): listening
+(RMS-driven mini-waveform off `useVoiceCapture.levelRef`, polled at 10Hz —
+never a re-render pipe), transcribing, "Librarian is working…" while the
+voice turn runs, a ~1.5s done flash, transient errors (~4s). **Reply
+routing:** a voice-originated turn (`opts.voice` on `submit`, tracked as
+`voiceTurnActive`) that settles cleanly with substantive assistant prose gets
+ONE compact toast — "Librarian" + ~140-char preview + an Open action
+(`voiceReplyPreview` in `ai/lib/voiceHud.ts`); action-only turns stay silent
+(the activity/approval system already narrates). The session re-arm no longer
+requires the window (`shouldRearmVoice` session lane; the legacy hands-free
+lane keeps its window-open gate exactly). The window-close effect is
+TRANSITION-ONLY (`miniCloseActionFor`, prev-ref guarded): only a genuine
+open → close still ends a session / delivers a live take — reacting to
+"closed" as a state would instantly self-stop every headless take. Esc
+tiering, blur stop-and-deliver, and the single-capture invariant are
+unchanged; the HUD derives from the same state, so it dismisses consistently.

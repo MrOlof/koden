@@ -35,20 +35,45 @@ export type RearmInput = {
 /**
  * Post-turn re-arm, evaluated once per assistant-turn completion. The session
  * lane re-arms regardless of the hands-free pref (and ignores the suspend
- * latch — Esc during a session discards the take, not the loop); the legacy
- * lane preserves the prior armed + window-open + not-suspended behavior
- * exactly, for users who armed hands-free without the session toggle.
+ * latch — Esc during a session discards the take, not the loop) and does NOT
+ * require the Librarian window: voice is headless (ADR-017), the HUD is the
+ * surface. The legacy lane preserves the prior armed + window-open +
+ * not-suspended behavior exactly, for users who armed hands-free without the
+ * session toggle.
  */
 export function shouldRearmVoice(i: RearmInput): boolean {
   if (i.status !== "idle") return false;
   if (i.prevStatus !== "thinking" && i.prevStatus !== "streaming") return false;
-  const sessionLoop = i.sessionActive && i.miniOpen;
+  const sessionLoop = i.sessionActive;
   const legacyLoop = i.handsFreeArmed && i.miniOpen && !i.suspended;
   if (!sessionLoop && !legacyLoop) return false;
   if (!i.supported || !i.hasKey) return false;
   if (i.captureState !== "idle") return false;
   if (i.hasDraft) return false;
   return i.windowFocused;
+}
+
+export type MiniCloseAction = "end-session" | "deliver-take" | "none";
+
+/**
+ * What the Librarian window's open-state change means for voice. THE critical
+ * headless interaction: takes normally run with the window CLOSED, so only a
+ * genuine open → close TRANSITION may act — reacting to "closed" as a state
+ * would instantly self-stop every headless take. On a real close: a live
+ * session ends (explicit "done with the Librarian" gesture, ADR-017); a live
+ * non-session take is stopped and DELIVERED (the user's words are not
+ * discarded); otherwise nothing.
+ */
+export function miniCloseActionFor(i: {
+  prevOpen: boolean;
+  open: boolean;
+  sessionActive: boolean;
+  recording: boolean;
+}): MiniCloseAction {
+  if (i.open || !i.prevOpen) return "none";
+  if (i.sessionActive) return "end-session";
+  if (i.recording) return "deliver-take";
+  return "none";
 }
 
 export type EscAction = "cancel-capture" | "end-session" | "none";

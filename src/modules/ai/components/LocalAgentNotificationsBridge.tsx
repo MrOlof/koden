@@ -67,7 +67,15 @@ export function LocalAgentNotificationsBridge() {
     } else if (status === "error") {
       fire("error", "Koden run failed", error ?? undefined);
     } else if (status === "idle" && isBusy(was)) {
-      fire("finished", "Koden finished", "Your task is ready");
+      // Headless voice (ADR-017): a focused voice completion is narrated by
+      // the HUD done flash + the Librarian reply toast — the generic finished
+      // toast would double-narrate. Unfocused still OS-notifies. This runs
+      // BEFORE the composer's settle effect clears the flag (child effects
+      // fire before the provider's).
+      const voiceTurn = useChatStore.getState().voiceTurn;
+      if (!voiceTurn || !focusedRef.current) {
+        fire("finished", "Koden finished", "Your task is ready");
+      }
     }
   }, [status, error]);
 

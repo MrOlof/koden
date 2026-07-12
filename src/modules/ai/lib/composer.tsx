@@ -8,14 +8,20 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import type { VoiceCaptureMeta, VoiceOrigin } from "../hooks/useVoiceCapture";
 import { useVoiceHotkey } from "../hooks/useVoiceHotkey";
 import { useWhisperRecording } from "../hooks/useWhisperRecording";
-import { escActionFor, shouldRearmVoice } from "../hooks/voiceSession";
+import {
+  escActionFor,
+  miniCloseActionFor,
+  shouldRearmVoice,
+} from "../hooks/voiceSession";
 import { expandSnippetTokens, type Snippet } from "../lib/snippets";
 import { getChat, useChatStore } from "../store/chatStore";
 import { useSnippetsStore } from "../store/snippetsStore";
 import { tryRunSlashCommand, type SlashCommandMeta } from "./slashCommands";
+import { voiceReplyPreview } from "./voiceHud";
 
 export type FileAttachment = {
   id: string;
@@ -55,8 +61,13 @@ type ComposerCtx = {
   addCommand: (c: SlashCommandMeta) => void;
   removeCommand: (name: string) => void;
   isBusy: boolean;
-  /** Send the composer. `overrideText` replaces the typed value (voice auto-submit). */
-  submit: (overrideText?: string) => void;
+  /**
+   * Send the composer. `overrideText` replaces the typed value (voice
+   * auto-submit). `opts.voice` marks a VOICE-originated send: it runs HEADLESS
+   * (never opens the Librarian window — the HUD narrates, the reply arrives as
+   * a toast) and flags the turn for the reply-routing lifecycle.
+   */
+  submit: (overrideText?: string, opts?: { voice?: boolean }) => void;
   stop: () => void;
   voice: Voice;
   /**
@@ -86,6 +97,15 @@ type ComposerCtx = {
   voiceSessionToggle: () => void;
   /** End the session (Esc tier 2, window close, toggle off): tear down, no re-arm. */
   voiceSessionEnd: () => void;
+  /** A VOICE-originated turn is in flight (drives the HUD's "working"). */
+  voiceTurnActive: boolean;
+  /** Bumps once per voice turn that completed CLEANLY (HUD's done flash). */
+  voiceDoneSignal: number;
+  /**
+   * The HUD pill's × — phase-appropriate: a live take is discarded (Esc
+   * tier-1 semantics), a running voice turn is stopped WITHOUT a reply toast.
+   */
+  voiceHudDismiss: () => void;
   canSend: boolean;
 };
 
@@ -240,8 +260,9 @@ export function AiComposerProvider({ children }: ProviderProps) {
     }
   };
 
-  const submit = (overrideText?: string) => {
+  const submit = (overrideText?: string, opts?: { voice?: boolean }) => {
     if (isBusy) return;
+    const voiceOrigin = opts?.voice === true;
     // Guard against event objects when passed as a handler directly.
     const source = typeof overrideText === "string" ? overrideText : value;
     const trimmed = source.trim();
@@ -333,7 +354,15 @@ export function AiComposerProvider({ children }: ProviderProps) {
     if (!sessionId) return;
     const store = useChatStore.getState();
     store.patchAgentMeta({ hitStepCap: false, compactionNotice: null });
-    if (!store.mini.open) store.openMini();
+    // HEADLESS voice (ADR-017): voice-originated sends never open the
+    // Librarian window — the HUD is the voice surface and the reply arrives
+    // as a toast. The ONE sanctioned voice-path open is the approval auto-open
+    // in AgentRunBridge. Typed sends keep the existing open-on-send behavior.
+    if (!voiceOrigin && !store.mini.open) store.openMini();
+    // Voice-turn lifecycle: flag the turn (drives the HUD "working" phase and
+    // gates the reply toast); a typed send clears any stale flag.
+    voiceTurnSessionRef.current = voiceOrigin ? sessionId : null;
+    store.setVoiceTurn(voiceOrigin);
     void (async () => {
       const { getOrCreateChat } = await import("../store/chatRuntime");
       const chat = getOrCreateChat(sessionId);
@@ -369,6 +398,14 @@ export function AiComposerProvider({ children }: ProviderProps) {
   // Mirror for close-transition effects: reading the live flag through a ref
   // keeps those effects keyed on the transition, not on recording churn.
   const voiceRecordingRef = useRef(false);
+  // VOICE-turn lifecycle (headless reply routing, ADR-017): set on a voice
+  // submit, cleared when the turn settles. Lives in chatStore (not local
+  // state) so LocalAgentNotificationsBridge can defer to the reply toast. The
+  // session ref pins which chat the reply toast reads — agentMeta resets on
+  // session switches mid-turn.
+  const voiceTurnActive = useChatStore((s) => s.voiceTurn);
+  const voiceTurnSessionRef = useRef<string | null>(null);
+  const [voiceDoneSignal, setVoiceDoneSignal] = useState(0);
 
   const voice = useWhisperRecording({
     // useVoiceCapture routes results through a latest-ref, so `value`,
@@ -376,7 +413,9 @@ export function AiComposerProvider({ children }: ProviderProps) {
     onResult: (transcript: string, meta: VoiceCaptureMeta) => {
       if (meta.autoSubmit && !isBusy && sessionId) {
         const drafted = value.trim();
-        submit(drafted ? `${drafted} ${transcript}` : transcript);
+        submit(drafted ? `${drafted} ${transcript}` : transcript, {
+          voice: true,
+        });
         return;
       }
       setValue((v) => (v ? `${v} ${transcript}` : transcript));
@@ -436,10 +475,8 @@ export function AiComposerProvider({ children }: ProviderProps) {
     }
     setVoiceSessionActive(true);
     setVoiceSuspended(false);
-    // Reach: the toggle works with the Librarian window closed — open it
-    // (the header button's openMini path; Mod+I drives the docked panel).
-    const store = useChatStore.getState();
-    if (!store.mini.open) store.openMini();
+    // HEADLESS (ADR-017): the session never opens the window — the VoiceHud
+    // pill is the surface, replies arrive as toasts.
     // Listen immediately. When a capture is live or the agent is mid-turn,
     // the post-turn re-arm picks the loop up instead — a capture started
     // while she talks would just no-speech-cancel or leave a stray draft.
@@ -453,17 +490,36 @@ export function AiComposerProvider({ children }: ProviderProps) {
     else voiceSessionStart();
   };
 
+  const voiceHudDismiss = () => {
+    if (voice.recording || voice.transcribing) {
+      // Esc tier-1 semantics: discard the take (and pause the legacy loop).
+      setVoiceSuspended(true);
+      voice.cancel();
+      return;
+    }
+    if (
+      useChatStore.getState().voiceTurn &&
+      agentStatus !== "idle" &&
+      agentStatus !== "error"
+    ) {
+      // Deliberate dismiss of a running voice turn: stop it and drop the
+      // reply routing (no toast, no done flash) — clear the flag first so the
+      // settle transition sees it lowered.
+      voiceTurnSessionRef.current = null;
+      useChatStore.getState().setVoiceTurn(false);
+      stop();
+    }
+  };
+
   useVoiceHotkey({
     enabled: voice.supported && voice.hasKey,
     recording: voiceRecording,
     transcribing: voiceTranscribing,
     onStart: () => {
-      // Reach: the chord works with the Librarian window closed — open it so
-      // the capture has a surface. No mount handshake needed: the capture
+      // HEADLESS (ADR-017): the chord never opens the window — the VoiceHud
+      // pill is the capture surface. No mount handshake needed: the capture
       // machinery + these listeners live in this app-level provider, not the
       // lazy mini window, so starting in the same tick is race-free.
-      const store = useChatStore.getState();
-      if (!store.mini.open) store.openMini();
       voiceToggle("hotkey");
     },
     // PTT release / second tap ends the utterance without suspending the
@@ -516,6 +572,45 @@ export function AiComposerProvider({ children }: ProviderProps) {
   useEffect(() => {
     const prev = prevAgentStatusRef.current;
     prevAgentStatusRef.current = agentStatus;
+    // Headless reply routing: a VOICE turn settling cleanly gets ONE compact
+    // toast when the assistant said something substantive (action-only turns
+    // stay silent — the activity/approval system already narrates); errors
+    // route through the notifications bridge like any turn.
+    if (prev !== agentStatus && useChatStore.getState().voiceTurn) {
+      const settled = agentStatus === "idle" || agentStatus === "error";
+      const wasActive = prev !== "idle" && prev !== "error";
+      if (settled && wasActive) {
+        useChatStore.getState().setVoiceTurn(false);
+        if (agentStatus === "idle") {
+          const turnSession = voiceTurnSessionRef.current;
+          voiceTurnSessionRef.current = null;
+          const pinned = turnSession ? getChat(turnSession) : undefined;
+          // A session switch resets agentMeta to idle while the pinned chat
+          // may still be STREAMING in the background — a done flash + toast
+          // built from its mid-stream partial would be a lie. Skip both; the
+          // background turn's eventual completion stays quiet (narrow case,
+          // ADR-documented).
+          const pinnedSettled =
+            !pinned || pinned.status === "ready" || pinned.status === "error";
+          if (pinnedSettled) {
+            setVoiceDoneSignal((n) => n + 1);
+            const preview = voiceReplyPreview(pinned?.lastMessage);
+            if (preview) {
+              toast("Librarian", {
+                description: preview,
+                action: {
+                  label: "Open",
+                  onClick: () => useChatStore.getState().openMini(),
+                },
+                duration: 6000,
+              });
+            }
+          }
+        } else {
+          voiceTurnSessionRef.current = null;
+        }
+      }
+    }
     const rearm = shouldRearmVoice({
       prevStatus: prev,
       status: agentStatus,
@@ -533,22 +628,33 @@ export function AiComposerProvider({ children }: ProviderProps) {
     if (rearm) void voice.start({ origin: "auto", autoSubmit: true });
   });
 
+  // TRANSITION-ONLY (the critical headless interaction): voice takes normally
+  // run with the window CLOSED, so this effect may act only on a genuine
+  // open → close flip — treating "closed" as a state (mount, dep churn) would
+  // instantly self-stop every headless take. On a real close: a live session
+  // ends (explicit done-with-the-Librarian gesture); a live non-session take
+  // (manual tap / mic dictation) is stopped and DELIVERED — the user's words
+  // shouldn't be discarded. Seam: miniCloseActionFor (voiceSession.ts).
+  const prevMiniOpenRef = useRef(miniOpen);
   useEffect(() => {
+    const prevOpen = prevMiniOpenRef.current;
+    prevMiniOpenRef.current = miniOpen;
     if (miniOpen) {
       setVoiceSuspended(false);
       return;
     }
-    // Closing the Librarian window ends the session: stop capture, tear
-    // down, no re-arm.
-    if (voiceSessionRef.current) {
+    const action = miniCloseActionFor({
+      prevOpen,
+      open: miniOpen,
+      sessionActive: voiceSessionRef.current,
+      recording: voiceRecordingRef.current,
+    });
+    if (action === "end-session") {
       setVoiceSessionActive(false);
       voiceCancel();
-      return;
+    } else if (action === "deliver-take") {
+      voice.stop();
     }
-    // A live non-session take (manual tap / mic dictation) is stopped and
-    // DELIVERED on panel close — a hot mic with no panel is ambiguous even
-    // with the header pulse, and the user's words shouldn't be discarded.
-    if (voiceRecordingRef.current) voice.stop();
   }, [miniOpen, voiceCancel, voice.stop]);
   useEffect(() => {
     if (handsFreeArmed) setVoiceSuspended(false);
@@ -601,6 +707,9 @@ export function AiComposerProvider({ children }: ProviderProps) {
     voiceSessionActive,
     voiceSessionToggle,
     voiceSessionEnd,
+    voiceTurnActive,
+    voiceDoneSignal,
+    voiceHudDismiss,
     canSend,
   };
 

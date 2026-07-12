@@ -7,6 +7,7 @@ import {
 } from "./voiceChord";
 import {
   escActionFor,
+  miniCloseActionFor,
   type RearmInput,
   shouldRearmVoice,
 } from "./voiceSession";
@@ -72,8 +73,8 @@ describe("shouldRearmVoice", () => {
     expect(shouldRearmVoice({ ...TURN_DONE, prevStatus: "error" })).toBe(false);
   });
 
-  it("session lane still requires the Librarian window (close ends the session)", () => {
-    expect(shouldRearmVoice({ ...TURN_DONE, miniOpen: false })).toBe(false);
+  it("session lane re-arms with the window CLOSED (headless voice, ADR-017)", () => {
+    expect(shouldRearmVoice({ ...TURN_DONE, miniOpen: false })).toBe(true);
   });
 
   it("stays out of the way of a keyboard draft", () => {
@@ -92,6 +93,101 @@ describe("shouldRearmVoice", () => {
     ).toBe(false);
     expect(shouldRearmVoice({ ...TURN_DONE, hasKey: false })).toBe(false);
     expect(shouldRearmVoice({ ...TURN_DONE, supported: false })).toBe(false);
+  });
+});
+
+describe("miniCloseActionFor (transition-only — THE headless interaction)", () => {
+  it("a headless take with the window simply CLOSED is untouched (no self-stop)", () => {
+    // The effect can run while a take records and the window was never open
+    // (mount, dep churn). prevOpen=false means no transition — never act.
+    expect(
+      miniCloseActionFor({
+        prevOpen: false,
+        open: false,
+        sessionActive: false,
+        recording: true,
+      }),
+    ).toBe("none");
+  });
+
+  it("a headless SESSION with the window closed keeps running", () => {
+    expect(
+      miniCloseActionFor({
+        prevOpen: false,
+        open: false,
+        sessionActive: true,
+        recording: false,
+      }),
+    ).toBe("none");
+    expect(
+      miniCloseActionFor({
+        prevOpen: false,
+        open: false,
+        sessionActive: true,
+        recording: true,
+      }),
+    ).toBe("none");
+  });
+
+  it("a genuine open → close ends a live session", () => {
+    expect(
+      miniCloseActionFor({
+        prevOpen: true,
+        open: false,
+        sessionActive: true,
+        recording: false,
+      }),
+    ).toBe("end-session");
+    // Session outranks a live capture — same order as the effect always had.
+    expect(
+      miniCloseActionFor({
+        prevOpen: true,
+        open: false,
+        sessionActive: true,
+        recording: true,
+      }),
+    ).toBe("end-session");
+  });
+
+  it("a genuine open → close stops + DELIVERS a live non-session take", () => {
+    expect(
+      miniCloseActionFor({
+        prevOpen: true,
+        open: false,
+        sessionActive: false,
+        recording: true,
+      }),
+    ).toBe("deliver-take");
+  });
+
+  it("open → close with nothing live is inert", () => {
+    expect(
+      miniCloseActionFor({
+        prevOpen: true,
+        open: false,
+        sessionActive: false,
+        recording: false,
+      }),
+    ).toBe("none");
+  });
+
+  it("never acts while the window is (or just became) open", () => {
+    expect(
+      miniCloseActionFor({
+        prevOpen: false,
+        open: true,
+        sessionActive: true,
+        recording: true,
+      }),
+    ).toBe("none");
+    expect(
+      miniCloseActionFor({
+        prevOpen: true,
+        open: true,
+        sessionActive: true,
+        recording: true,
+      }),
+    ).toBe("none");
   });
 });
 

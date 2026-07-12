@@ -120,6 +120,10 @@ function Bridge({
     });
   }, [status, approvalsPending, patch]);
 
+  // Auto-open on a pending approval — the user has to act; hiding it would be
+  // hostile. This is also the ONE sanctioned voice-path window open (ADR-017
+  // headless voice): a HEADLESS voice turn hitting a tool approval genuinely
+  // needs the user, so the window surfaces exactly then and only then.
   useEffect(() => {
     if (approvalsPending > 0) openMini();
   }, [approvalsPending, openMini]);

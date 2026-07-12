@@ -4,6 +4,7 @@ export {
   AiMiniWindow,
 } from "./components/lazy";
 export { AgentStatusPill } from "./components/AgentStatusPill";
+export { VoiceHud } from "./components/VoiceHud";
 export { useAiBootstrap } from "./hooks/useAiBootstrap";
 export { useAiLiveBridge } from "./lib/useAiLiveBridge";
 export { LocalAgentNotificationsBridge } from "./components/LocalAgentNotificationsBridge";

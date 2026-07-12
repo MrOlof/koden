@@ -166,6 +166,15 @@ type StoreState = {
   patchAgentMeta: (patch: Partial<AgentMeta>) => void;
   resetAgentMeta: () => void;
 
+  /**
+   * A VOICE-originated turn is in flight (headless voice, ADR-017). Set by the
+   * composer's submit, cleared when the turn settles. Read by the HUD (working
+   * phase) and by LocalAgentNotificationsBridge (the reply toast / done flash
+   * own a focused voice completion — the generic finished toast stays quiet).
+   */
+  voiceTurn: boolean;
+  setVoiceTurn: (on: boolean) => void;
+
   // Sessions
   sessionsHydrated: boolean;
   sessions: SessionMeta[];
@@ -317,6 +326,11 @@ export const useChatStore = create<StoreState>((set, get) => ({
   patchAgentMeta: (patch) =>
     set((s) => ({ agentMeta: { ...s.agentMeta, ...patch } })),
   resetAgentMeta: () => set({ agentMeta: IDLE_META }),
+
+  voiceTurn: false,
+  setVoiceTurn: (on) => {
+    if (get().voiceTurn !== on) set({ voiceTurn: on });
+  },
 
   sessionsHydrated: false,
   sessions: [],

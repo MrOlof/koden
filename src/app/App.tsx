@@ -24,6 +24,7 @@ import {
   useAiBootstrap,
   useAiLiveBridge,
   useChatStore,
+  VoiceHud,
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
@@ -2549,6 +2550,9 @@ export default function App() {
                 closeAiDiffTab={closeAiDiffTab}
               />
               <LocalAgentNotificationsBridge />
+              {/* Headless-voice surface (ADR-017): the pill narrates voice;
+                  the Librarian window stays closed on voice paths. */}
+              <VoiceHud />
             </>
           ) : null}
 
