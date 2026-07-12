@@ -6,15 +6,20 @@ import {
   MOD_KEY,
   USE_CUSTOM_WINDOW_CONTROLS,
 } from "@/lib/platform";
+import { cn } from "@/lib/utils";
 import { NotificationBell } from "@/modules/agents";
 import { useChatStore } from "@/modules/ai";
+import { useComposer } from "@/modules/ai/lib/composer";
+import { VOICE_NEEDS_KEY_MESSAGE } from "@/modules/ai/lib/whisperTranscribe";
 import { BrainHeaderMenu } from "@/modules/brain";
+import { useShortcutLabel } from "@/modules/shortcuts/lib/useShortcutLabel";
 import type { SpaceMeta } from "@/modules/spaces";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import {
   Brain02Icon,
   CommandIcon,
+  Mic01Icon,
   Settings01Icon,
   SidebarLeftIcon,
 } from "@hugeicons/core-free-icons";
@@ -229,6 +234,8 @@ export function Header({
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
 
+      <VoiceSessionButton />
+
       <Button
         size="sm"
         variant="outline"
@@ -268,5 +275,53 @@ export function Header({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Voice session toggle, adjacent to the Librarian button. Idle = muted mic;
+ * session on = primary mic + slow pulse dot; capture recording = stronger
+ * pulse. Its own component so composer-context churn (every keystroke)
+ * re-renders only this button, not the header.
+ */
+function VoiceSessionButton() {
+  const c = useComposer();
+  const shortcut = useShortcutLabel("ai.voiceInput");
+  if (!c.voice.supported) return null;
+  const on = c.voiceSessionActive;
+  const rec = c.voice.recording;
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      onClick={c.voiceSessionToggle}
+      disabled={!c.voice.hasKey}
+      aria-pressed={on}
+      aria-label="Voice session"
+      title={
+        !c.voice.hasKey
+          ? VOICE_NEEDS_KEY_MESSAGE
+          : `Voice session (${shortcut} held = push-to-talk, click = always on)`
+      }
+      className={cn(
+        "relative size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground",
+        (on || rec) && "text-primary hover:text-primary",
+        on && !rec && "bg-primary/10 hover:bg-primary/15",
+        rec && "bg-primary/15 hover:bg-primary/20",
+      )}
+    >
+      <HugeiconsIcon icon={Mic01Icon} size={15} strokeWidth={1.75} />
+      {(on || rec) && (
+        <span
+          aria-hidden
+          className={cn(
+            "absolute right-1 top-1 animate-pulse rounded-full bg-primary",
+            rec
+              ? "size-1.5 [animation-duration:0.9s]"
+              : "size-1 [animation-duration:2.8s]",
+          )}
+        />
+      )}
+    </Button>
   );
 }

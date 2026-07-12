@@ -139,6 +139,13 @@ export function useVoiceCapture({
   const streamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<{ ctx: AudioContext; timer: number } | null>(null);
   const cancelledRef = useRef(false);
+  // Per-attempt epoch: state stays "idle" until getUserMedia resolves, so two
+  // rapid start() calls both pass the idle guard and both await the mic. The
+  // superseded attempt must stop ITS OWN stream — otherwise its live track
+  // leaks (OS mic-in-use indicator stuck on) and its recorder keeps feeding
+  // the shared chunks. cancelledRef alone can't express this: a new start()
+  // resets it, reviving the older pending attempt.
+  const attemptRef = useRef(0);
 
   // rec.onstop closes over the render that called start(); route the
   // callbacks through a ref so results always use the freshest closures
@@ -185,6 +192,7 @@ export function useVoiceCapture({
       if (!supported || stateRef.current !== "idle") return false;
       setError(null);
       cancelledRef.current = false;
+      const attempt = ++attemptRef.current;
       const captureMeta: VoiceCaptureMeta = {
         ...DEFAULT_VOICE_META,
         ...metaIn,
@@ -193,8 +201,9 @@ export function useVoiceCapture({
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
         });
-        if (cancelledRef.current) {
-          // cancel() raced the permission prompt.
+        if (cancelledRef.current || attempt !== attemptRef.current) {
+          // cancel() raced the permission prompt, or a newer start()
+          // superseded this attempt while the mic prompt was open.
           for (const t of stream.getTracks()) t.stop();
           return false;
         }

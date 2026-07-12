@@ -9,6 +9,17 @@ import type { KeyBinding } from "@/modules/shortcuts/shortcuts";
 export const HOLD_TO_TALK_MS = 350;
 
 /**
+ * Release classification: a hold past the threshold is one push-to-talk take
+ * (release stops + transcribes); a quick tap arms the voice SESSION instead.
+ */
+export function chordReleaseKind(
+  heldMs: number,
+  holdToTalkMs: number = HOLD_TO_TALK_MS,
+): "tap" | "hold" {
+  return heldMs >= holdToTalkMs ? "hold" : "tap";
+}
+
+/**
  * Chord release: the bound key going up, or any bound modifier going up.
  * Modifiers count because macOS suppresses letter keyups while ⌘ is held —
  * releasing ⌘ is often the only release event we ever see.

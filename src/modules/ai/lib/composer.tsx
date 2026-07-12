@@ -11,6 +11,7 @@ import {
 import type { VoiceCaptureMeta, VoiceOrigin } from "../hooks/useVoiceCapture";
 import { useVoiceHotkey } from "../hooks/useVoiceHotkey";
 import { useWhisperRecording } from "../hooks/useWhisperRecording";
+import { escActionFor, shouldRearmVoice } from "../hooks/voiceSession";
 import { expandSnippetTokens, type Snippet } from "../lib/snippets";
 import { getChat, useChatStore } from "../store/chatStore";
 import { useSnippetsStore } from "../store/snippetsStore";
@@ -67,6 +68,17 @@ type ComposerCtx = {
   handsFreeArmed: boolean;
   /** The continuous loop was hard-stopped (Esc / mic click) for now. */
   voiceSuspended: boolean;
+  /**
+   * Always-on VOICE SESSION (session-scoped state, never persisted): the mic
+   * re-arms after every assistant turn until ended. Orthogonal to
+   * handsFreeArmed, which keeps governing ONLY terminal-submit approvals
+   * (ADR-017 addendum): listen-always ≠ approve-always.
+   */
+  voiceSessionActive: boolean;
+  /** Header mic toggle: ON opens the Librarian window + listens immediately. */
+  voiceSessionToggle: () => void;
+  /** End the session (Esc tier 2, window close, toggle off): tear down, no re-arm. */
+  voiceSessionEnd: () => void;
   canSend: boolean;
 };
 
@@ -342,6 +354,11 @@ export function AiComposerProvider({ children }: ProviderProps) {
   // Hard-stop latch for the continuous loop (Esc / mic click). Resets when
   // the user starts voice again, re-opens the window, or re-arms the pref.
   const [voiceSuspended, setVoiceSuspended] = useState(false);
+  // VOICE SESSION: session-scoped listen loop, deliberately NOT a persisted
+  // pref — listening is convenience, approvals are policy (handsFreeArmed).
+  const [voiceSessionActive, setVoiceSessionActive] = useState(false);
+  const voiceSessionRef = useRef(voiceSessionActive);
+  voiceSessionRef.current = voiceSessionActive;
 
   const voice = useWhisperRecording({
     // useVoiceCapture routes results through a latest-ref, so `value`,
@@ -367,7 +384,8 @@ export function AiComposerProvider({ children }: ProviderProps) {
   const voiceToggle = (origin: "mic" | "hotkey" = "mic") => {
     if (voice.recording) {
       // Manual stop = hard stop for the hands-free loop; the take still
-      // transcribes (Esc is the discard path).
+      // transcribes (Esc is the discard path). A live session ignores the
+      // latch and re-arms after the turn.
       setVoiceSuspended(true);
       voice.stop();
       return;
@@ -377,63 +395,146 @@ export function AiComposerProvider({ children }: ProviderProps) {
     void voice.start({
       origin,
       // PTT is the hands-free gesture (speak → she acts). Mic clicks only
-      // auto-submit while the hands-free pref is armed; otherwise they keep
-      // the legacy dictate-into-composer behavior.
-      autoSubmit: origin === "hotkey" || handsFreeArmed,
+      // auto-submit while the hands-free pref or a voice session is armed;
+      // otherwise they keep the legacy dictate-into-composer behavior.
+      autoSubmit: origin === "hotkey" || handsFreeArmed || voiceSessionActive,
     });
+  };
+
+  const voiceSessionEnd = () => {
+    setVoiceSessionActive(false);
+    // Unconditional: a start() awaiting getUserMedia (permission prompt)
+    // still reads "idle" — cancel sets the flag its raced-start branch
+    // checks, so the pending capture never goes hot. No-op when truly idle
+    // (the next start resets the flag).
+    voice.cancel();
+  };
+
+  const voiceSessionStart = () => {
+    if (!voice.supported || !voice.hasKey) return;
+    setVoiceSessionActive(true);
+    setVoiceSuspended(false);
+    // Reach: the toggle works with the Librarian window closed — open it
+    // (the header button's openMini path; Mod+I drives the docked panel).
+    const store = useChatStore.getState();
+    if (!store.mini.open) store.openMini();
+    // Listen immediately. When a capture is live or the agent is mid-turn,
+    // the post-turn re-arm picks the loop up instead — a capture started
+    // while she talks would just no-speech-cancel or leave a stray draft.
+    if (voice.state === "idle" && !isBusy) {
+      void voice.start({ origin: "auto", autoSubmit: true });
+    }
+  };
+
+  const voiceSessionToggle = () => {
+    if (voiceSessionActive) voiceSessionEnd();
+    else voiceSessionStart();
   };
 
   useVoiceHotkey({
     enabled: voice.supported && voice.hasKey,
     recording: voiceRecording,
     transcribing: voiceTranscribing,
-    onStart: () => voiceToggle("hotkey"),
+    onStart: () => {
+      // Reach: the chord works with the Librarian window closed — open it so
+      // the capture has a surface. No mount handshake needed: the capture
+      // machinery + these listeners live in this app-level provider, not the
+      // lazy mini window, so starting in the same tick is race-free.
+      const store = useChatStore.getState();
+      if (!store.mini.open) store.openMini();
+      voiceToggle("hotkey");
+    },
     // PTT release / toggle-off ends the utterance without suspending the loop.
     onStop: voice.stop,
+    // Quick tap = voice session ON (a hold stays one push-to-talk take).
+    onTap: () => {
+      setVoiceSuspended(false);
+      setVoiceSessionActive(true);
+    },
   });
 
-  // Esc = discard the take (and pause the loop) instead of closing the
-  // Librarian window; capture phase beats AiMiniWindow's close handler.
+  // Unified Esc tiering (capture phase beats AiMiniWindow's close handler):
+  // Esc while a capture is live discards the TAKE (and pauses the legacy
+  // loop); the next Esc — or Esc between captures — ends the SESSION; with
+  // neither, Esc falls through to the window's own close handler.
   useEffect(() => {
-    if (!voiceRecording && !voiceTranscribing) return;
+    const capturing = voiceRecording || voiceTranscribing;
+    if (!capturing && !voiceSessionActive) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      const action = escActionFor({
+        capturing,
+        sessionActive: voiceSessionActive,
+      });
+      if (action === "cancel-capture") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setVoiceSuspended(true);
+        voiceCancel();
+        return;
+      }
+      if (action !== "end-session") return;
+      // Inputs keep their own Esc meaning (pickers, search); the composer
+      // textarea handles this tier itself in AiComposerInput.
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      setVoiceSuspended(true);
+      setVoiceSessionActive(false);
+      // Same as voiceSessionEnd: catch a start() still awaiting the mic.
       voiceCancel();
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKey, { capture: true });
-  }, [voiceRecording, voiceTranscribing, voiceCancel]);
+  }, [voiceRecording, voiceTranscribing, voiceSessionActive, voiceCancel]);
 
-  // Continuous mode: hands-free armed + Librarian window open → re-arm the
-  // mic after each assistant turn completes (talk → she acts → talk again).
+  // Continuous mode: re-arm the mic after each assistant turn completes
+  // (talk → she acts → talk again). Session lane re-arms regardless of the
+  // hands-free pref; legacy lane preserves armed + open + not-suspended.
   // No dep array: the transition guard makes it fire once per completion.
   const prevAgentStatusRef = useRef(agentStatus);
   useEffect(() => {
     const prev = prevAgentStatusRef.current;
     prevAgentStatusRef.current = agentStatus;
-    if (agentStatus !== "idle") return;
-    if (prev !== "thinking" && prev !== "streaming") return;
-    if (!handsFreeArmed || !miniOpen || voiceSuspended) return;
-    if (!voice.supported || !voice.hasKey || voice.state !== "idle") return;
-    if (value.trim()) return; // keyboard draft in progress — stay out of the way
-    if (typeof document !== "undefined" && !document.hasFocus()) return; // never arm in the background
-    void voice.start({ origin: "auto", autoSubmit: true });
+    const rearm = shouldRearmVoice({
+      prevStatus: prev,
+      status: agentStatus,
+      sessionActive: voiceSessionActive,
+      handsFreeArmed,
+      miniOpen,
+      suspended: voiceSuspended,
+      captureState: voice.state,
+      supported: voice.supported,
+      hasKey: voice.hasKey,
+      hasDraft: value.trim().length > 0,
+      windowFocused:
+        typeof document === "undefined" ? false : document.hasFocus(),
+    });
+    if (rearm) void voice.start({ origin: "auto", autoSubmit: true });
   });
 
   useEffect(() => {
-    if (miniOpen) setVoiceSuspended(false);
-  }, [miniOpen]);
+    if (miniOpen) {
+      setVoiceSuspended(false);
+      return;
+    }
+    // Closing the Librarian window ends the session: stop capture, tear
+    // down, no re-arm. (Legacy captures without a session are untouched.)
+    if (!voiceSessionRef.current) return;
+    setVoiceSessionActive(false);
+    voiceCancel();
+  }, [miniOpen, voiceCancel]);
   useEffect(() => {
     if (handsFreeArmed) setVoiceSuspended(false);
   }, [handsFreeArmed]);
 
-  // A denied mic would otherwise retry every turn — suspend until re-armed.
+  // A denied mic would otherwise retry every turn — suspend the legacy loop
+  // and end the session until re-armed.
   useEffect(() => {
-    if (voiceError?.kind === "permission") setVoiceSuspended(true);
+    if (voiceError?.kind !== "permission") return;
+    setVoiceSuspended(true);
+    setVoiceSessionActive(false);
   }, [voiceError]);
 
   // Voice errors are transient UI — clear after a beat.
@@ -472,6 +573,9 @@ export function AiComposerProvider({ children }: ProviderProps) {
     voiceToggle,
     handsFreeArmed,
     voiceSuspended,
+    voiceSessionActive,
+    voiceSessionToggle,
+    voiceSessionEnd,
     canSend,
   };
 

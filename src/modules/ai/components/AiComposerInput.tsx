@@ -199,13 +199,16 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
     if (it) onPickItem(it);
   };
 
+  // "hands-free" tracks the approvals PREF (the honest armed signal,
+  // ADR-017), not autoSubmit — session captures auto-submit too.
   const voiceLabel = c.voice.recording
-    ? c.voice.meta?.autoSubmit
+    ? c.handsFreeArmed
       ? "Listening — hands-free…"
       : "Listening…"
     : c.voice.transcribing
       ? "Transcribing…"
-      : (c.voice.error?.message ?? null);
+      : (c.voice.error?.message ??
+        (c.voiceSessionActive ? "Voice session on" : null));
   const voiceRow = usePresence(Boolean(voiceLabel), 180);
   const lastVoiceLabel = useRef("");
   if (voiceLabel) lastVoiceLabel.current = voiceLabel;
@@ -294,6 +297,19 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
                     return;
                   }
                 }
+                if (
+                  e.key === "Escape" &&
+                  c.voiceSessionActive &&
+                  !c.voice.recording &&
+                  !c.voice.transcribing
+                ) {
+                  // Esc tier 2 from the textarea: end the SESSION. (Tier 1 —
+                  // discarding a live take — is the provider's capture-phase
+                  // handler; the window's Esc-close ignores textareas.)
+                  e.preventDefault();
+                  c.voiceSessionEnd();
+                  return;
+                }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   c.submit();
@@ -330,12 +346,13 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
                 ) : (
                   <HugeiconsIcon icon={Mic01Icon} size={13} strokeWidth={1.75} />
                 )}
-                {c.handsFreeArmed && !c.voice.recording && (
-                  <span
-                    aria-hidden
-                    className="absolute right-0.5 top-0.5 size-1 rounded-full bg-primary"
-                  />
-                )}
+                {(c.handsFreeArmed || c.voiceSessionActive) &&
+                  !c.voice.recording && (
+                    <span
+                      aria-hidden
+                      className="absolute right-0.5 top-0.5 size-1 rounded-full bg-primary"
+                    />
+                  )}
               </button>
             )}
           </div>
@@ -372,6 +389,9 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
               <span className="size-1.5 animate-pulse rounded-full bg-primary" />
             ) : c.voice.transcribing ? (
               <Spinner className="size-3" />
+            ) : c.voiceSessionActive && !c.voice.error ? (
+              // Session on, between captures — subtle, no pulse.
+              <span className="size-1.5 rounded-full bg-primary/60" />
             ) : null}
             <span className="truncate">
               {voiceLabel || lastVoiceLabel.current}

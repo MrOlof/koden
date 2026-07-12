@@ -1,7 +1,7 @@
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { matchBinding, SHORTCUTS } from "@/modules/shortcuts/shortcuts";
 import { useEffect, useRef } from "react";
-import { HOLD_TO_TALK_MS, isChordRelease } from "./voiceChord";
+import { chordReleaseKind, HOLD_TO_TALK_MS, isChordRelease } from "./voiceChord";
 
 const DEFAULT_BINDINGS =
   SHORTCUTS.find((s) => s.id === "ai.voiceInput")?.defaultBindings ?? [];
@@ -12,8 +12,9 @@ const DEFAULT_BINDINGS =
  * hook owns its own keydown+keyup capture listeners:
  *
  * - press while idle      → start capture
- * - release after a hold  → stop + transcribe (push-to-talk)
- * - quick tap             → stays listening; next press stops + transcribes
+ * - release after a hold  → stop + transcribe (push-to-talk, one take)
+ * - quick tap             → onTap (voice session ON); stays listening and the
+ *                           next press stops + transcribes, as before
  * - window blur           → stop (never keep the mic hot in the background)
  *
  * The chord is always swallowed (capture + preventDefault) so a held key
@@ -26,15 +27,25 @@ export function useVoiceHotkey({
   transcribing,
   onStart,
   onStop,
+  onTap,
 }: {
   enabled: boolean;
   recording: boolean;
   transcribing: boolean;
   onStart: () => void;
   onStop: () => void;
+  /** Quick release of a press that STARTED a capture (tap, not hold). */
+  onTap?: () => void;
 }) {
-  const latest = useRef({ enabled, recording, transcribing, onStart, onStop });
-  latest.current = { enabled, recording, transcribing, onStart, onStop };
+  const latest = useRef({
+    enabled,
+    recording,
+    transcribing,
+    onStart,
+    onStop,
+    onTap,
+  });
+  latest.current = { enabled, recording, transcribing, onStart, onStop, onTap };
   const userShortcuts = usePreferencesStore((s) => s.shortcuts);
   // null = chord not held; started = this press began the capture.
   const pressRef = useRef<{ at: number; started: boolean } | null>(null);
@@ -66,9 +77,11 @@ export function useVoiceHotkey({
       pressRef.current = null;
       if (!press.started) return;
       const held = performance.now() - press.at;
-      if (held >= HOLD_TO_TALK_MS && latest.current.recording) {
-        latest.current.onStop();
+      if (chordReleaseKind(held, HOLD_TO_TALK_MS) === "hold") {
+        if (latest.current.recording) latest.current.onStop();
+        return;
       }
+      latest.current.onTap?.();
     };
 
     const onBlur = () => {

@@ -132,3 +132,17 @@ on the mic button, "Listening — hands-free…" row, title suffix):
   a pane running an unrecognized foreground app (vim, a repl…) refuses armed
   sends — those still require the explicit approval path. Shell text passes
   `checkShellCommand` either way; payloads are capped (8k chars).
+
+## Addendum — voice session ≠ hands-free approvals (2026-07-13)
+
+The always-on VOICE SESSION (`voiceSessionActive`, composer state — session-
+scoped, never persisted; header mic toggle or a Mod+Shift+M tap turns it on,
+Esc tiering / toggle / window close end it) keeps the mic re-arming after
+every assistant turn. It is ORTHOGONAL to the `handsFreeMode` pref:
+listen-always ≠ approve-always. The session governs only when the mic
+LISTENS; terminal-submit approvals continue to follow `handsFreeMode` alone
+(arming stays the deliberate settings act above — the session toggle never
+touches it). Either can be on without the other: session-on with the pref off
+means every utterance still lands as an approval card; pref-on without a
+session keeps the exact legacy re-arm (armed + window open + not suspended,
+`shouldRearmVoice` in `ai/hooks/voiceSession.ts`).
