@@ -58,6 +58,7 @@ import {
 } from "../config";
 import { ACCEPTED_FILES, useComposer } from "../lib/composer";
 import { toggleFavoriteModel } from "../lib/modelPrefs";
+import { VOICE_NEEDS_KEY_MESSAGE } from "../lib/whisperTranscribe";
 import { useChatStore } from "../store/chatStore";
 
 const PROVIDER_ICON = {
@@ -109,16 +110,14 @@ export function AiStatusBarControls() {
         <IconBtn
           title={
             !c.voice.hasKey
-              ? "Voice needs an OpenAI key"
+              ? VOICE_NEEDS_KEY_MESSAGE
               : c.voice.recording
                 ? "Stop & transcribe"
                 : c.voice.transcribing
                   ? "Transcribing…"
                   : "Voice input"
           }
-          onClick={() =>
-            c.voice.recording ? c.voice.stop() : void c.voice.start()
-          }
+          onClick={() => c.voiceToggle("mic")}
           disabled={c.isBusy || c.voice.transcribing || !c.voice.hasKey}
           className={cn(
             c.voice.recording &&
@@ -174,7 +173,7 @@ export function AiStatusBarControls() {
         <Button
           type="button"
           size="icon"
-          onClick={c.submit}
+          onClick={() => c.submit()}
           disabled={!c.canSend}
           className="h-5.5 w-7.5 ml-1"
           aria-label="Send"

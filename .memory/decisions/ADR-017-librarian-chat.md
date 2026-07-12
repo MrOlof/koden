@@ -80,3 +80,55 @@ only** — no close/delete tools exist in v1 (and no close callbacks are even
 threaded through the Live bridge), so the chat can add to a layout but never
 tear one down. Plumbing follows the existing pattern: App.tsx callbacks →
 `useAiLiveBridge` → `Live` (chatStore) → `ToolContext` (chatRuntime).
+
+## Addendum — terminal targeting + hands-free sends (2026-07-12)
+
+`ai/tools/terminals.ts` gives the chat leaf-addressed reach into ANY terminal
+pane in ANY space (the prior tools only saw the active terminal / the
+session's one managed agent). Tiered by consequence:
+
+| Tier | Tools | Gate |
+|---|---|---|
+| List | `workspace_list_terminals` — every pane, all spaces: id, title, space, cwd, agent, active | free |
+| Read | `terminal_read` — redacted ~100-line tail of a named pane | free |
+| Type | `terminal_send` submit:false — text lands at the prompt, NO Enter; the user's keypress is the execution gate | free |
+| Submit | `terminal_send` submit:true — Enter included | approval card, OR free when hands-free is armed |
+
+The submit gate is the SDK's **dynamic `needsApproval`** (a function, not a
+boolean — first use in the repo): `submit === true && !ctx.isHandsFreeArmed()`,
+evaluated per call so mid-session toggles apply to the next send.
+
+**Resolution** (pure fn `resolveTerminalTarget`, unit-tested): pane id >
+exact title > case-insensitive title > title substring > agent name > cwd
+basename; titles match both the pane's own title and its tab label. Ambiguity
+within ONE tab collapses to that tab's focused pane (naming a tab means its
+focused pane — inject-into-active-pty semantics); any other ambiguity or no
+match is an ERROR listing all candidates with pane ids — never a best-effort
+pick into the wrong pty.
+
+**Pty discipline** (recon'd rules, enforced in `shapeSendText` + the bridge's
+`sendToTerminal`): type-only always flattens multiline to one line; shell
+submits flatten + `checkShellCommand` (what the approval card shows is the one
+logical line that runs); agent-pane submits keep newlines wrapped in bracketed
+paste; Enter is always a separate chunk 120 ms later (Claude TUIs treat a
+same-chunk CR as a literal newline); sends never focus panes or switch
+tabs/spaces. Privacy tabs refuse read AND send (closes the old
+`readLeafBuffer` gap for this lane); cold restored tabs resolve by name but
+error with "activate it first".
+
+**The hands-free contract** (`handsFreeMode` pref, default OFF, settings-store
+pattern; ARMING lives only in the Librarian settings tab with an explicit
+warning — deliberately not a one-click header switch, since arming waives
+approval gates; the ARMED STATE is always visible in the Librarian window: dot
+on the mic button, "Listening — hands-free…" row, title suffix):
+
+- **User-armed only.** The model and its tools can read the pref, never write
+  it. Arming is a deliberate act for voice-driving sessions; it persists until
+  the user disarms (the settings copy says so honestly).
+- **Visible.** Armed state shows in the header switch + settings status dot;
+  every hands-free send raises a toast AND still lands in the transcript as a
+  normal tool card (target pane, exact text, `hands_free: true`).
+- **Scoped.** Hands-free submits reach known agent panes and bare shells only;
+  a pane running an unrecognized foreground app (vim, a repl…) refuses armed
+  sends — those still require the explicit approval path. Shell text passes
+  `checkShellCommand` either way; payloads are capped (8k chars).

@@ -2,10 +2,14 @@ import { Popover, PopoverAnchor } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { usePresence } from "@/lib/usePresence";
 import { cn } from "@/lib/utils";
+import { useShortcutLabel } from "@/modules/shortcuts/lib/useShortcutLabel";
+import { Mic01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useWorkspaceFiles } from "../hooks/useWorkspaceFiles";
 import { useComposer } from "../lib/composer";
 import { SLASH_COMMANDS } from "../lib/slashCommands";
+import { VOICE_NEEDS_KEY_MESSAGE } from "../lib/whisperTranscribe";
 import { useChatStore } from "../store/chatStore";
 import { useSnippetsStore } from "../store/snippetsStore";
 import { FilePickerContent } from "./FilePicker";
@@ -57,7 +61,7 @@ function detectFileTrigger(value: string, caret: number): FileTrigger | null {
   return null;
 }
 
-export function AiComposerInput() {
+export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
   const c = useComposer();
   const snippets = useSnippetsStore((s) => s.snippets);
   const workspaceRoot = useChatStore((s) => s.live.getWorkspaceRoot());
@@ -196,13 +200,32 @@ export function AiComposerInput() {
   };
 
   const voiceLabel = c.voice.recording
-    ? "Listening…"
+    ? c.voice.meta?.autoSubmit
+      ? "Listening — hands-free…"
+      : "Listening…"
     : c.voice.transcribing
       ? "Transcribing…"
-      : null;
+      : (c.voice.error?.message ?? null);
   const voiceRow = usePresence(Boolean(voiceLabel), 180);
   const lastVoiceLabel = useRef("");
   if (voiceLabel) lastVoiceLabel.current = voiceLabel;
+  const voiceErrorTone =
+    c.voice.error && c.voice.error.kind !== "no-speech"
+      ? "text-destructive"
+      : "text-muted-foreground";
+
+  const voiceShortcut = useShortcutLabel("ai.voiceInput");
+  const micTitle = !c.voice.hasKey
+    ? VOICE_NEEDS_KEY_MESSAGE
+    : c.voice.recording
+      ? "Stop & transcribe (Esc discards)"
+      : c.voice.transcribing
+        ? "Transcribing…"
+        : `Voice input${c.handsFreeArmed ? " — hands-free armed" : ""}${
+            voiceShortcut
+              ? ` (${voiceShortcut} — hold to talk, tap to toggle)`
+              : ""
+          }`;
 
   return (
     <>
@@ -283,6 +306,38 @@ export function AiComposerInput() {
                 "placeholder:text-muted-foreground/60",
               )}
             />
+            {withMic && c.voice.supported && (
+              <button
+                type="button"
+                onClick={() => c.voiceToggle("mic")}
+                disabled={c.isBusy || c.voice.transcribing || !c.voice.hasKey}
+                title={micTitle}
+                aria-label="Voice input"
+                className={cn(
+                  "relative mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md transition-colors",
+                  "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  // No pointer-events-none: the disabled button keeps its
+                  // native title so the no-key state stays explained.
+                  "disabled:opacity-50",
+                  c.voice.recording &&
+                    "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                )}
+              >
+                {c.voice.recording ? (
+                  <span className="size-2 animate-pulse rounded-full bg-primary" />
+                ) : c.voice.transcribing ? (
+                  <Spinner className="size-3" />
+                ) : (
+                  <HugeiconsIcon icon={Mic01Icon} size={13} strokeWidth={1.75} />
+                )}
+                {c.handsFreeArmed && !c.voice.recording && (
+                  <span
+                    aria-hidden
+                    className="absolute right-0.5 top-0.5 size-1 rounded-full bg-primary"
+                  />
+                )}
+              </button>
+            )}
           </div>
         </PopoverAnchor>
         {fileTrigger ? (
@@ -307,12 +362,17 @@ export function AiComposerInput() {
 
       {voiceRow.mounted && (
         <div data-state={voiceRow.state} className="koden-reveal">
-          <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
-            {c.voice.recording ? (
-              <span className="size-1.5 animate-pulse rounded-full bg-destructive" />
-            ) : (
-              <Spinner className="size-3" />
+          <div
+            className={cn(
+              "flex items-center gap-1.5 px-1 text-[11px]",
+              c.voice.error ? voiceErrorTone : "text-muted-foreground",
             )}
+          >
+            {c.voice.recording ? (
+              <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+            ) : c.voice.transcribing ? (
+              <Spinner className="size-3" />
+            ) : null}
             <span className="truncate">
               {voiceLabel || lastVoiceLabel.current}
             </span>

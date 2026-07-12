@@ -38,6 +38,7 @@ export type ShortcutId =
   | "view.zenMode"
   | "ai.toggle"
   | "ai.askSelection"
+  | "ai.voiceInput"
   | "settings.open"
   | "sidebar.toggle"
   | "editor.undo"
@@ -250,6 +251,15 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Ask the Librarian about selection",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
+  },
+  {
+    id: "ai.voiceInput",
+    label: "Voice input",
+    group: "AI",
+    // Hold to talk (release sends), tap to toggle. Handled by useVoiceHotkey
+    // (needs keyup) rather than useGlobalShortcuts, which is keydown-only —
+    // registered here so the settings dialog can display + rebind it.
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "m" }],
   },
   {
     id: "sidebar.toggle",

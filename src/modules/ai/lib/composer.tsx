@@ -1,3 +1,5 @@
+import { useHandsFreeMode } from "@/modules/settings/preferences";
+import { currentWorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import {
   createContext,
@@ -6,12 +8,13 @@ import {
   useRef,
   useState,
 } from "react";
+import type { VoiceCaptureMeta, VoiceOrigin } from "../hooks/useVoiceCapture";
+import { useVoiceHotkey } from "../hooks/useVoiceHotkey";
 import { useWhisperRecording } from "../hooks/useWhisperRecording";
 import { expandSnippetTokens, type Snippet } from "../lib/snippets";
-import { tryRunSlashCommand, type SlashCommandMeta } from "./slashCommands";
 import { getChat, useChatStore } from "../store/chatStore";
 import { useSnippetsStore } from "../store/snippetsStore";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { tryRunSlashCommand, type SlashCommandMeta } from "./slashCommands";
 
 export type FileAttachment = {
   id: string;
@@ -51,9 +54,19 @@ type ComposerCtx = {
   addCommand: (c: SlashCommandMeta) => void;
   removeCommand: (name: string) => void;
   isBusy: boolean;
-  submit: () => void;
+  /** Send the composer. `overrideText` replaces the typed value (voice auto-submit). */
+  submit: (overrideText?: string) => void;
   stop: () => void;
   voice: Voice;
+  /**
+   * Mic affordance: starts a capture when idle, stops + transcribes when
+   * listening (a manual stop also hard-stops the hands-free loop).
+   */
+  voiceToggle: (origin?: Extract<VoiceOrigin, "mic" | "hotkey">) => void;
+  /** Lane A's hands-free pref (voice captures auto-submit while armed). */
+  handsFreeArmed: boolean;
+  /** The continuous loop was hard-stopped (Esc / mic click) for now. */
+  voiceSuspended: boolean;
   canSend: boolean;
 };
 
@@ -145,13 +158,6 @@ export function AiComposerProvider({ children }: ProviderProps) {
     });
   }, [pendingSelections, consumeSelections]);
 
-  const voice = useWhisperRecording({
-    onResult: (transcript: string) => {
-      setValue((v) => (v ? `${v} ${transcript}` : transcript));
-      requestAnimationFrame(() => textareaRef.current?.focus());
-    },
-  });
-
   const addFiles = async (list: FileList | null) => {
     if (!list) return;
     const next: FileAttachment[] = [];
@@ -215,9 +221,11 @@ export function AiComposerProvider({ children }: ProviderProps) {
     }
   };
 
-  const submit = () => {
+  const submit = (overrideText?: string) => {
     if (isBusy) return;
-    const trimmed = value.trim();
+    // Guard against event objects when passed as a handler directly.
+    const source = typeof overrideText === "string" ? overrideText : value;
+    const trimmed = source.trim();
     if (
       !trimmed &&
       files.length === 0 &&
@@ -327,6 +335,115 @@ export function AiComposerProvider({ children }: ProviderProps) {
     void getChat(sessionId)?.stop();
   };
 
+  // ── Voice ──────────────────────────────────────────────────────────────
+  const handsFreeArmed = useHandsFreeMode();
+  const miniOpen = useChatStore((s) => s.mini.open);
+  const agentStatus = useChatStore((s) => s.agentMeta.status);
+  // Hard-stop latch for the continuous loop (Esc / mic click). Resets when
+  // the user starts voice again, re-opens the window, or re-arms the pref.
+  const [voiceSuspended, setVoiceSuspended] = useState(false);
+
+  const voice = useWhisperRecording({
+    // useVoiceCapture routes results through a latest-ref, so `value`,
+    // `isBusy` and `submit` here are the current render's.
+    onResult: (transcript: string, meta: VoiceCaptureMeta) => {
+      if (meta.autoSubmit && !isBusy && sessionId) {
+        const drafted = value.trim();
+        submit(drafted ? `${drafted} ${transcript}` : transcript);
+        return;
+      }
+      setValue((v) => (v ? `${v} ${transcript}` : transcript));
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
+  });
+  const {
+    recording: voiceRecording,
+    transcribing: voiceTranscribing,
+    cancel: voiceCancel,
+    clearError: voiceClearError,
+    error: voiceError,
+  } = voice;
+
+  const voiceToggle = (origin: "mic" | "hotkey" = "mic") => {
+    if (voice.recording) {
+      // Manual stop = hard stop for the hands-free loop; the take still
+      // transcribes (Esc is the discard path).
+      setVoiceSuspended(true);
+      voice.stop();
+      return;
+    }
+    if (voice.transcribing) return;
+    setVoiceSuspended(false);
+    void voice.start({
+      origin,
+      // PTT is the hands-free gesture (speak → she acts). Mic clicks only
+      // auto-submit while the hands-free pref is armed; otherwise they keep
+      // the legacy dictate-into-composer behavior.
+      autoSubmit: origin === "hotkey" || handsFreeArmed,
+    });
+  };
+
+  useVoiceHotkey({
+    enabled: voice.supported && voice.hasKey,
+    recording: voiceRecording,
+    transcribing: voiceTranscribing,
+    onStart: () => voiceToggle("hotkey"),
+    // PTT release / toggle-off ends the utterance without suspending the loop.
+    onStop: voice.stop,
+  });
+
+  // Esc = discard the take (and pause the loop) instead of closing the
+  // Librarian window; capture phase beats AiMiniWindow's close handler.
+  useEffect(() => {
+    if (!voiceRecording && !voiceTranscribing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setVoiceSuspended(true);
+      voiceCancel();
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", onKey, { capture: true });
+  }, [voiceRecording, voiceTranscribing, voiceCancel]);
+
+  // Continuous mode: hands-free armed + Librarian window open → re-arm the
+  // mic after each assistant turn completes (talk → she acts → talk again).
+  // No dep array: the transition guard makes it fire once per completion.
+  const prevAgentStatusRef = useRef(agentStatus);
+  useEffect(() => {
+    const prev = prevAgentStatusRef.current;
+    prevAgentStatusRef.current = agentStatus;
+    if (agentStatus !== "idle") return;
+    if (prev !== "thinking" && prev !== "streaming") return;
+    if (!handsFreeArmed || !miniOpen || voiceSuspended) return;
+    if (!voice.supported || !voice.hasKey || voice.state !== "idle") return;
+    if (value.trim()) return; // keyboard draft in progress — stay out of the way
+    if (typeof document !== "undefined" && !document.hasFocus()) return; // never arm in the background
+    void voice.start({ origin: "auto", autoSubmit: true });
+  });
+
+  useEffect(() => {
+    if (miniOpen) setVoiceSuspended(false);
+  }, [miniOpen]);
+  useEffect(() => {
+    if (handsFreeArmed) setVoiceSuspended(false);
+  }, [handsFreeArmed]);
+
+  // A denied mic would otherwise retry every turn — suspend until re-armed.
+  useEffect(() => {
+    if (voiceError?.kind === "permission") setVoiceSuspended(true);
+  }, [voiceError]);
+
+  // Voice errors are transient UI — clear after a beat.
+  useEffect(() => {
+    if (!voiceError) return;
+    const t = window.setTimeout(() => voiceClearError(), 6000);
+    return () => window.clearTimeout(t);
+  }, [voiceError, voiceClearError]);
+  // ───────────────────────────────────────────────────────────────────────
+
   const canSend =
     !isBusy &&
     (value.trim().length > 0 ||
@@ -352,6 +469,9 @@ export function AiComposerProvider({ children }: ProviderProps) {
     submit,
     stop,
     voice,
+    voiceToggle,
+    handsFreeArmed,
+    voiceSuspended,
     canSend,
   };
 

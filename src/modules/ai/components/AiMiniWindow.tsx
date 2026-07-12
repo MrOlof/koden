@@ -230,7 +230,7 @@ function Body({
             "[&_textarea]:min-h-16 [&_textarea]:text-[13.5px]",
           )}
         >
-          <AiComposerInput />
+          <AiComposerInput withMic />
         </div>
       </div>
     </>
