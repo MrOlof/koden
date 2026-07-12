@@ -67,3 +67,16 @@ delete tools), each write paused by `needsApproval` behind the same in-chat
 approval card as `write_file` / `bash_run`. Writes go through the docs store
 APIs only (primary + staggered-backup persistence and crash-guard flush), never
 raw file IO, and are main-chat-only (not exposed to subagents).
+
+**Layout tools (same day):** the chat can also BUILD workspace layouts —
+`ai/tools/layout.ts` adds `workspace_open_tab` (terminal / notes / board /
+tasks / editor / library / brain; singletons focus instead of duplicating),
+`workspace_split_pane` (terminal | note | tasks — the full split-capable pane
+set; four directions; the new pane takes focus so sequential calls compose
+layouts), `workspace_focus_pane`, and the read `workspace_layout_state`.
+These run WITHOUT approval: every action is immediately visible in the UI,
+reversible with one click, and non-destructive. The lane is **create/arrange
+only** — no close/delete tools exist in v1 (and no close callbacks are even
+threaded through the Live bridge), so the chat can add to a layout but never
+tear one down. Plumbing follows the existing pattern: App.tsx callbacks →
+`useAiLiveBridge` → `Live` (chatStore) → `ToolContext` (chatRuntime).
