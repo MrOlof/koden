@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import {
+  AiBrain01Icon,
   ArrowRight01Icon,
   CheckListIcon,
   Edit02Icon,
@@ -18,11 +19,13 @@ import {
   FolderAddIcon,
   FolderOpenIcon,
   GlobalSearchIcon,
+  InformationCircleIcon,
   RobotIcon,
   SparklesIcon,
   TerminalIcon,
   ToolsIcon,
 } from "@hugeicons/core-free-icons";
+import { toolTitle } from "@/modules/ai/lib/toolLabels";
 import { useChatStore } from "@/modules/ai/store/chatStore";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
@@ -32,24 +35,37 @@ import { isValidElement, memo, useState } from "react";
 
 export type ToolPart = ToolUIPart | DynamicToolUIPart;
 
-const TOOL_META: Record<string, { label: string; icon: typeof File01Icon }> = {
-  read_file: { label: "Read", icon: File01Icon },
-  list_directory: { label: "List", icon: FolderOpenIcon },
-  write_file: { label: "Write", icon: FilePlusIcon },
-  create_directory: { label: "Create dir", icon: FolderAddIcon },
-  edit: { label: "Edit", icon: FileEditIcon },
-  multi_edit: { label: "Edit", icon: Edit02Icon },
-  bash_run: { label: "Run", icon: TerminalIcon },
-  bash_background: { label: "Spawn", icon: TerminalIcon },
-  bash_logs: { label: "Logs", icon: TerminalIcon },
-  bash_list: { label: "Jobs", icon: TerminalIcon },
-  bash_kill: { label: "Kill", icon: TerminalIcon },
-  grep: { label: "Search", icon: GlobalSearchIcon },
-  glob: { label: "Glob", icon: Folder01Icon },
-  suggest_command: { label: "Suggest", icon: SparklesIcon },
-  open_preview: { label: "Preview", icon: EyeIcon },
-  run_subagent: { label: "Subagent", icon: RobotIcon },
-  todo_write: { label: "Todos", icon: CheckListIcon },
+// Icons only — display labels come from toolTitle() (shared with the
+// status pill and approval card), so every tool gets a friendly name and
+// unknown tools prettify instead of leaking raw snake_case.
+const TOOL_ICONS: Record<string, typeof File01Icon> = {
+  read_file: File01Icon,
+  list_directory: FolderOpenIcon,
+  write_file: FilePlusIcon,
+  create_directory: FolderAddIcon,
+  edit: FileEditIcon,
+  multi_edit: Edit02Icon,
+  bash_run: TerminalIcon,
+  bash_background: TerminalIcon,
+  bash_logs: TerminalIcon,
+  bash_list: TerminalIcon,
+  bash_kill: TerminalIcon,
+  grep: GlobalSearchIcon,
+  glob: Folder01Icon,
+  suggest_command: SparklesIcon,
+  get_terminal_output: TerminalIcon,
+  open_preview: EyeIcon,
+  run_subagent: RobotIcon,
+  spawn_coding_agent: RobotIcon,
+  send_to_agent: RobotIcon,
+  read_agent_output: RobotIcon,
+  todo_write: CheckListIcon,
+  brain_search: AiBrain01Icon,
+  brain_notes: AiBrain01Icon,
+  brain_status: AiBrain01Icon,
+  brain_gist: AiBrain01Icon,
+  brain_proposals: AiBrain01Icon,
+  brain_librarian_info: InformationCircleIcon,
 };
 
 const STATUS_DOT: Record<ToolPart["state"], string> = {
@@ -102,6 +118,12 @@ function deriveSummary(toolName: string, input: unknown): string | null {
       return str("path") ?? str("url");
     case "run_subagent":
       return str("agent") ?? str("task");
+    case "brain_search":
+      return str("query");
+    case "brain_notes":
+    case "brain_gist":
+    case "brain_proposals":
+      return str("project");
     case "todo_write": {
       const items = Array.isArray(i.todos) ? i.todos : null;
       return items
@@ -144,9 +166,8 @@ const ToolImpl = ({
   defaultOpen,
   ...props
 }: ToolProps) => {
-  const meta = TOOL_META[toolName];
-  const Icon = meta?.icon ?? ToolsIcon;
-  const label = meta?.label ?? toolName;
+  const Icon = TOOL_ICONS[toolName] ?? ToolsIcon;
+  const label = toolTitle(toolName);
   const summary = deriveSummary(toolName, input);
   const isError = state === "output-error";
   const open = defaultOpen ?? isError;
@@ -166,6 +187,7 @@ const ToolImpl = ({
     >
       <CollapsibleTrigger
         disabled={!hasDetails}
+        title={toolName}
         className={cn(
           "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left",
           "text-[12px] transition-colors",

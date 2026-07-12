@@ -27,48 +27,9 @@ import { buildTools, type ToolContext } from "../tools/tools";
 import { compactModelMessagesDetailed } from "./compact";
 import type { ProviderKeys, CustomEndpointKeys } from "./keyring";
 import { createProxyFetch } from "./proxyFetch";
+import { toolStatusLabel } from "./toolLabels";
 
 const localProxyFetch = createProxyFetch({ allowPrivateNetwork: true });
-
-const TOOL_LABELS: Record<string, (input: Record<string, unknown>) => string> =
-  {
-    brain_search: (i) =>
-      `Searching the brain for ${ellipsize(String(i.query ?? ""), 40)}`,
-    brain_notes: () => `Reading memory notes`,
-    brain_status: () => `Checking the brain index`,
-    brain_gist: () => `Building a project briefing`,
-    brain_proposals: () => `Reading recent memory changes`,
-    brain_librarian_info: () => `Checking Librarian config & spend`,
-    read_file: (i) => `Reading ${shortPath(i.path)}`,
-    list_directory: (i) => `Listing ${shortPath(i.path)}`,
-    grep: (i) => `Grepping ${ellipsize(String(i.pattern ?? ""), 40)}`,
-    glob: (i) => `Globbing ${ellipsize(String(i.pattern ?? ""), 40)}`,
-    edit: (i) => `Editing ${shortPath(i.path)}`,
-    multi_edit: (i) => `Editing ${shortPath(i.path)}`,
-    write_file: (i) => `Writing ${shortPath(i.path)}`,
-    create_directory: (i) => `Creating ${shortPath(i.path)}`,
-    bash_run: (i) => `Running ${ellipsize(String(i.command ?? ""), 60)}`,
-    bash_background: (i) =>
-      `Spawning ${ellipsize(String(i.command ?? ""), 60)}`,
-    bash_logs: () => `Reading logs`,
-    bash_list: () => `Listing background processes`,
-    bash_kill: () => `Stopping background process`,
-    suggest_command: (i) =>
-      `Suggesting ${ellipsize(String(i.command ?? ""), 60)}`,
-    todo_write: (i) =>
-      `Updating plan (${Array.isArray(i.todos) ? i.todos.length : 0} items)`,
-    run_subagent: (i) => `Spawning ${String(i.type ?? "subagent")} subagent`,
-  };
-
-function shortPath(p: unknown): string {
-  if (typeof p !== "string") return "";
-  const i = p.lastIndexOf("/");
-  return i === -1 ? p : p.slice(i + 1);
-}
-
-function ellipsize(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-}
 
 export type BuildModelOptions = {
   modelIdOverride?: string;
@@ -461,11 +422,11 @@ export async function runAgentStream(opts: RunAgentOptions) {
       if (opts.onStep) {
         const last = step.toolCalls?.[step.toolCalls.length - 1];
         if (last) {
-          const label = TOOL_LABELS[last.toolName];
           opts.onStep(
-            label
-              ? label((last.input ?? {}) as Record<string, unknown>)
-              : `Calling ${last.toolName}`,
+            toolStatusLabel(
+              last.toolName,
+              (last.input ?? {}) as Record<string, unknown>,
+            ),
           );
         } else if (step.text) {
           opts.onStep("Writing");

@@ -2,6 +2,7 @@ import { generateText, stepCountIs } from "ai";
 import { DEFAULT_MODEL_ID, getModel, type ModelId } from "../config";
 import { buildLanguageModel } from "../lib/agent";
 import type { ProviderKeys } from "../lib/keyring";
+import { toolStatusLabel } from "../lib/toolLabels";
 import type { ToolContext } from "../tools/context";
 import { buildFsTools } from "../tools/fs";
 import { buildSearchTools } from "../tools/search";
@@ -63,7 +64,13 @@ export async function runSubagent({
     onStepFinish: (step) => {
       if (!onStep) return;
       const last = step.toolCalls?.[step.toolCalls.length - 1];
-      if (last) onStep(`${type}: ${last.toolName}`);
+      if (last)
+        onStep(
+          `${type}: ${toolStatusLabel(
+            last.toolName,
+            (last.input ?? {}) as Record<string, unknown>,
+          )}`,
+        );
     },
   });
 

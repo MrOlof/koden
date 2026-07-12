@@ -13,6 +13,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { ToolUIPart } from "ai";
 import { memo } from "react";
+import { toolTitle } from "../lib/toolLabels";
 
 type Props = {
   part: Extract<ToolUIPart, { state: "approval-requested" }>;
@@ -32,7 +33,7 @@ const TOOL_META: Record<string, { label: string; icon: typeof FilePlusIcon }> =
 
 function AiToolApprovalImpl({ part, toolName, onRespond }: Props) {
   const meta = TOOL_META[toolName];
-  const label = meta?.label ?? toolName;
+  const label = meta?.label ?? toolTitle(toolName);
   const Icon = meta?.icon ?? ToolsIcon;
   const input = part.input as Record<string, unknown>;
 
@@ -46,7 +47,7 @@ function AiToolApprovalImpl({ part, toolName, onRespond }: Props) {
           strokeWidth={1.75}
           className="shrink-0 text-muted-foreground"
         />
-        <span className="text-[12px] font-medium text-foreground">
+        <span className="text-[12px] font-medium text-foreground" title={toolName}>
           {label}
         </span>
         <span className="ml-auto text-[10px] text-muted-foreground">
