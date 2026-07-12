@@ -61,7 +61,9 @@ type ComposerCtx = {
   voice: Voice;
   /**
    * Mic affordance: starts a capture when idle, stops + transcribes when
-   * listening (a manual stop also hard-stops the hands-free loop).
+   * listening (a manual stop also hard-stops the hands-free loop). Hotkey
+   * origin starts a MANUAL take (no silence auto-stop — Wispr-style); mic
+   * origin keeps the conversational auto mode.
    */
   voiceToggle: (origin?: Extract<VoiceOrigin, "mic" | "hotkey">) => void;
   /** Lane A's hands-free pref (voice captures auto-submit while armed). */
@@ -75,7 +77,12 @@ type ComposerCtx = {
    * (ADR-017 addendum): listen-always ≠ approve-always.
    */
   voiceSessionActive: boolean;
-  /** Header mic toggle: ON opens the Librarian window + listens immediately. */
+  /**
+   * Header mic toggle — the ONLY way the session starts (the hotkey tap is a
+   * one-take gesture now): ON opens the Librarian window + listens
+   * immediately. A take already recording is stopped + delivered instead of
+   * arming the session (single-capture invariant).
+   */
   voiceSessionToggle: () => void;
   /** End the session (Esc tier 2, window close, toggle off): tear down, no re-arm. */
   voiceSessionEnd: () => void;
@@ -359,6 +366,9 @@ export function AiComposerProvider({ children }: ProviderProps) {
   const [voiceSessionActive, setVoiceSessionActive] = useState(false);
   const voiceSessionRef = useRef(voiceSessionActive);
   voiceSessionRef.current = voiceSessionActive;
+  // Mirror for close-transition effects: reading the live flag through a ref
+  // keeps those effects keyed on the transition, not on recording churn.
+  const voiceRecordingRef = useRef(false);
 
   const voice = useWhisperRecording({
     // useVoiceCapture routes results through a latest-ref, so `value`,
@@ -380,6 +390,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
     clearError: voiceClearError,
     error: voiceError,
   } = voice;
+  voiceRecordingRef.current = voiceRecording;
 
   const voiceToggle = (origin: "mic" | "hotkey" = "mic") => {
     if (voice.recording) {
@@ -398,6 +409,10 @@ export function AiComposerProvider({ children }: ProviderProps) {
       // auto-submit while the hands-free pref or a voice session is armed;
       // otherwise they keep the legacy dictate-into-composer behavior.
       autoSubmit: origin === "hotkey" || handsFreeArmed || voiceSessionActive,
+      // The hotkey starts a Wispr-style MANUAL take: pauses never end it —
+      // the second tap (or a hold's release) does. Mic clicks and the
+      // session loop keep the conversational silence auto-stop.
+      mode: origin === "hotkey" ? "manual" : "auto",
     });
   };
 
@@ -412,6 +427,13 @@ export function AiComposerProvider({ children }: ProviderProps) {
 
   const voiceSessionStart = () => {
     if (!voice.supported || !voice.hasKey) return;
+    // Single-capture invariant: a take already in flight (hotkey manual take,
+    // mic dictation) means this click stops + delivers THAT take — it neither
+    // arms the session nor opens a second capture.
+    if (voice.recording) {
+      voice.stop();
+      return;
+    }
     setVoiceSessionActive(true);
     setVoiceSuspended(false);
     // Reach: the toggle works with the Librarian window closed — open it
@@ -444,13 +466,10 @@ export function AiComposerProvider({ children }: ProviderProps) {
       if (!store.mini.open) store.openMini();
       voiceToggle("hotkey");
     },
-    // PTT release / toggle-off ends the utterance without suspending the loop.
+    // PTT release / second tap ends the utterance without suspending the
+    // loop. A quick tap needs no wiring of its own: its manual take simply
+    // keeps recording (the voice SESSION is the header mic's job only now).
     onStop: voice.stop,
-    // Quick tap = voice session ON (a hold stays one push-to-talk take).
-    onTap: () => {
-      setVoiceSuspended(false);
-      setVoiceSessionActive(true);
-    },
   });
 
   // Unified Esc tiering (capture phase beats AiMiniWindow's close handler):
@@ -520,11 +539,17 @@ export function AiComposerProvider({ children }: ProviderProps) {
       return;
     }
     // Closing the Librarian window ends the session: stop capture, tear
-    // down, no re-arm. (Legacy captures without a session are untouched.)
-    if (!voiceSessionRef.current) return;
-    setVoiceSessionActive(false);
-    voiceCancel();
-  }, [miniOpen, voiceCancel]);
+    // down, no re-arm.
+    if (voiceSessionRef.current) {
+      setVoiceSessionActive(false);
+      voiceCancel();
+      return;
+    }
+    // A live non-session take (manual tap / mic dictation) is stopped and
+    // DELIVERED on panel close — a hot mic with no panel is ambiguous even
+    // with the header pulse, and the user's words shouldn't be discarded.
+    if (voiceRecordingRef.current) voice.stop();
+  }, [miniOpen, voiceCancel, voice.stop]);
   useEffect(() => {
     if (handsFreeArmed) setVoiceSuspended(false);
   }, [handsFreeArmed]);

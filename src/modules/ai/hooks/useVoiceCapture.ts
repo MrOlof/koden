@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 /**
  * Backend-agnostic voice capture (the D7 refactor of useWhisperRecording):
  * owns getUserMedia, MIME negotiation, the idle → recording → transcribing
- * state machine, stream teardown, and silence auto-stop via a WebAudio
+ * state machine, stream teardown, and the per-capture silence policy ("auto"
+ * silence auto-stop vs "manual" run-until-stop takes) via a WebAudio
  * AnalyserNode. The transcriber is injected — see useWhisperRecording for the
  * default OpenAI whisper-1 backend; a local STT can slot in without touching
  * this file.
@@ -13,11 +14,24 @@ export type VoiceCaptureState = "idle" | "recording" | "transcribing";
 
 export type VoiceOrigin = "mic" | "hotkey" | "auto";
 
+/**
+ * Silence policy for one capture.
+ * "auto"   — conversational: silenceMs of quiet after speech stops the take,
+ *            noSpeechMs with no speech at all cancels it.
+ * "manual" — Wispr-style take: once ANY speech registered the take runs until
+ *            stop(); pauses never end it. One guard remains: a take where
+ *            nothing was EVER heard cancels after MANUAL_NO_SPEECH_MS, so a
+ *            pocket-tap can't keep the mic hot forever.
+ */
+export type VoiceCaptureMode = "auto" | "manual";
+
 export type VoiceCaptureMeta = {
   /** What started the capture: mic button, PTT hotkey, or the hands-free loop. */
   origin: VoiceOrigin;
   /** Hands-free capture: the transcript is submitted, not just inserted. */
   autoSubmit: boolean;
+  /** Silence policy for THIS capture (rides start() meta, like origin). */
+  mode: VoiceCaptureMode;
 };
 
 export type VoiceCaptureErrorKind = "permission" | "transcribe" | "no-speech";
@@ -30,12 +44,15 @@ export type VoiceCaptureError = {
 export const DEFAULT_VOICE_META: VoiceCaptureMeta = {
   origin: "mic",
   autoSubmit: false,
+  mode: "auto",
 };
 
 // Silence auto-stop tuning. RMS of Float32 time-domain samples: a quiet room
 // idles around 0.001–0.005, speech runs 0.02+.
 export const SILENCE_MS_DEFAULT = 1400;
 export const NO_SPEECH_MS_DEFAULT = 8000;
+/** Manual takes: sole guard — cancel if nothing was EVER heard for this long. */
+export const MANUAL_NO_SPEECH_MS = 60_000;
 export const SILENCE_RMS_THRESHOLD = 0.01;
 const RMS_POLL_MS = 100;
 
@@ -68,14 +85,19 @@ export type SilenceDetector = {
 /**
  * Pure state machine behind silence auto-stop (injectable clock for tests).
  * "stop"   → speech was heard, then silenceMs of quiet: stop + transcribe.
+ *            (auto mode only — a manual take never stops itself once speech
+ *            registered; the user's stop() ends it.)
  * "cancel" → nothing above threshold for noSpeechMs: discard the take, never
- *            upload — the mic must not stay hot unattended.
+ *            upload — the mic must not stay hot unattended. This is the ONE
+ *            guard manual mode keeps (with the longer MANUAL_NO_SPEECH_MS).
  */
 export function createSilenceDetector({
+  mode = "auto",
   silenceMs = SILENCE_MS_DEFAULT,
   noSpeechMs = NO_SPEECH_MS_DEFAULT,
   threshold = SILENCE_RMS_THRESHOLD,
 }: {
+  mode?: VoiceCaptureMode;
   silenceMs?: number;
   noSpeechMs?: number;
   threshold?: number;
@@ -92,6 +114,7 @@ export function createSilenceDetector({
       if (lastSpeechAt === null) {
         return now - firstAt >= noSpeechMs ? "cancel" : "continue";
       }
+      if (mode === "manual") return "continue";
       return now - lastSpeechAt >= silenceMs ? "stop" : "continue";
     },
   };
@@ -253,8 +276,10 @@ export function useVoiceCapture({
         };
         recRef.current = rec;
 
-        // Silence auto-stop: RMS below threshold for silenceMs ends the take;
-        // noSpeechMs with no speech at all discards it.
+        // Silence policy per capture mode. Auto: RMS below threshold for
+        // silenceMs ends the take; noSpeechMs with no speech at all discards
+        // it. Manual (Wispr-style take): never auto-stops once speech was
+        // heard — only the 60s never-spoke guard remains.
         try {
           const ctx = new AudioContext();
           void ctx.resume().catch(() => undefined);
@@ -263,7 +288,13 @@ export function useVoiceCapture({
           analyser.fftSize = 1024;
           source.connect(analyser);
           const buf = new Float32Array(analyser.fftSize);
-          const detector = createSilenceDetector({ silenceMs, noSpeechMs });
+          const detector =
+            captureMeta.mode === "manual"
+              ? createSilenceDetector({
+                  mode: "manual",
+                  noSpeechMs: MANUAL_NO_SPEECH_MS,
+                })
+              : createSilenceDetector({ silenceMs, noSpeechMs });
           const timer = window.setInterval(() => {
             analyser.getFloatTimeDomainData(buf);
             const verdict = detector.sample(rmsOf(buf), performance.now());

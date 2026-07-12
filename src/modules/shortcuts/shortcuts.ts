@@ -256,9 +256,10 @@ export const SHORTCUTS: Shortcut[] = [
     id: "ai.voiceInput",
     label: "Voice input",
     group: "AI",
-    // Hold to talk (release sends), tap to toggle. Handled by useVoiceHotkey
-    // (needs keyup) rather than useGlobalShortcuts, which is keydown-only —
-    // registered here so the settings dialog can display + rebind it.
+    // Hold to talk (release sends); tap = one continuous take (tap again
+    // sends). Handled by useVoiceHotkey (needs keyup) rather than
+    // useGlobalShortcuts, which is keydown-only — registered here so the
+    // settings dialog can display + rebind it.
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "m" }],
   },
   {

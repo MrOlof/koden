@@ -1,21 +1,33 @@
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { matchBinding, SHORTCUTS } from "@/modules/shortcuts/shortcuts";
 import { useEffect, useRef } from "react";
-import { chordReleaseKind, HOLD_TO_TALK_MS, isChordRelease } from "./voiceChord";
+import {
+  chordPressAction,
+  chordReleaseAction,
+  isChordRelease,
+} from "./voiceChord";
 
 const DEFAULT_BINDINGS =
   SHORTCUTS.find((s) => s.id === "ai.voiceInput")?.defaultBindings ?? [];
 
 /**
- * Hold-or-toggle push-to-talk chord ("ai.voiceInput" in the shortcuts
- * registry, user-rebindable). useGlobalShortcuts is keydown-only, so this
- * hook owns its own keydown+keyup capture listeners:
+ * Hold-or-tap push-to-talk chord ("ai.voiceInput" in the shortcuts registry,
+ * user-rebindable). useGlobalShortcuts is keydown-only, so this hook owns its
+ * own keydown+keyup capture listeners:
  *
- * - press while idle      → start capture
+ * - press while idle      → start capture (onStart decides the mode — the
+ *                           composer starts hotkey captures as MANUAL takes:
+ *                           no silence auto-stop once speech registered)
  * - release after a hold  → stop + transcribe (push-to-talk, one take)
- * - quick tap             → onTap (voice session ON); stays listening and the
- *                           next press stops + transcribes, as before
+ * - quick tap             → the take keeps recording, Wispr Flow style — the
+ *                           user may pause indefinitely; the next press stops
+ *                           + transcribes + submits (also true when the live
+ *                           capture belongs to the voice-session loop, which
+ *                           then re-arms as designed)
  * - window blur           → stop (never keep the mic hot in the background)
+ *
+ * The always-on voice SESSION is the header mic button's job only — the
+ * chord never toggles it.
  *
  * The chord is always swallowed (capture + preventDefault) so a held key
  * never leaks into the focused terminal — Ctrl+M variants would land as CR
@@ -27,15 +39,12 @@ export function useVoiceHotkey({
   transcribing,
   onStart,
   onStop,
-  onTap,
 }: {
   enabled: boolean;
   recording: boolean;
   transcribing: boolean;
   onStart: () => void;
   onStop: () => void;
-  /** Quick release of a press that STARTED a capture (tap, not hold). */
-  onTap?: () => void;
 }) {
   const latest = useRef({
     enabled,
@@ -43,9 +52,8 @@ export function useVoiceHotkey({
     transcribing,
     onStart,
     onStop,
-    onTap,
   });
-  latest.current = { enabled, recording, transcribing, onStart, onStop, onTap };
+  latest.current = { enabled, recording, transcribing, onStart, onStop };
   const userShortcuts = usePreferencesStore((s) => s.shortcuts);
   // null = chord not held; started = this press began the capture.
   const pressRef = useRef<{ at: number; started: boolean } | null>(null);
@@ -60,28 +68,27 @@ export function useVoiceHotkey({
       e.stopImmediatePropagation();
       if (e.repeat || pressRef.current) return;
       const s = latest.current;
-      if (!s.enabled || s.transcribing) return;
-      if (s.recording) {
-        // Second press while listening = toggle off (stop + transcribe).
-        pressRef.current = { at: performance.now(), started: false };
-        s.onStop();
-        return;
-      }
-      pressRef.current = { at: performance.now(), started: true };
-      s.onStart();
+      const action = chordPressAction(s);
+      if (action === "ignore") return;
+      pressRef.current = {
+        at: performance.now(),
+        started: action === "start-take",
+      };
+      if (action === "stop-capture") s.onStop();
+      else s.onStart();
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
       const press = pressRef.current;
       if (!press || !isChordRelease(e, bindings)) return;
       pressRef.current = null;
-      if (!press.started) return;
-      const held = performance.now() - press.at;
-      if (chordReleaseKind(held, HOLD_TO_TALK_MS) === "hold") {
-        if (latest.current.recording) latest.current.onStop();
-        return;
-      }
-      latest.current.onTap?.();
+      const action = chordReleaseAction({
+        started: press.started,
+        heldMs: performance.now() - press.at,
+        recording: latest.current.recording,
+      });
+      if (action === "stop-capture") latest.current.onStop();
+      // Tap release: nothing to do — the manual take keeps recording.
     };
 
     const onBlur = () => {

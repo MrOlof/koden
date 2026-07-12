@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createSilenceDetector, pickMime, rmsOf } from "./useVoiceCapture";
+import {
+  createSilenceDetector,
+  MANUAL_NO_SPEECH_MS,
+  pickMime,
+  rmsOf,
+} from "./useVoiceCapture";
 import { isChordRelease } from "./voiceChord";
 
 const QUIET = 0.001;
@@ -50,6 +55,39 @@ describe("createSilenceDetector", () => {
     expect(d.sample(0.01, 0)).toBe("continue");
     // Speech was seen, so long quiet stops (transcribe) — never cancels.
     expect(d.sample(QUIET, 8000)).toBe("stop");
+  });
+});
+
+describe("createSilenceDetector — manual mode (Wispr-style take)", () => {
+  const manual = { mode: "manual" as const, noSpeechMs: MANUAL_NO_SPEECH_MS };
+
+  it("never auto-stops once speech was heard — pauses run indefinitely", () => {
+    const d = createSilenceDetector(manual);
+    expect(d.sample(SPEECH, 0)).toBe("continue");
+    // Far past the auto silenceMs (1.4s), the auto no-speech (8s) AND the
+    // manual never-spoke guard (60s): still recording.
+    expect(d.sample(QUIET, 1500)).toBe("continue");
+    expect(d.sample(QUIET, 10_000)).toBe("continue");
+    expect(d.sample(QUIET, MANUAL_NO_SPEECH_MS + 1)).toBe("continue");
+    expect(d.sample(QUIET, 600_000)).toBe("continue");
+    // Speaking again mid-take keeps flowing.
+    expect(d.sample(SPEECH, 600_100)).toBe("continue");
+    expect(d.sample(QUIET, 1_200_000)).toBe("continue");
+  });
+
+  it("cancels a take where nothing was EVER heard (pocket tap) at 60s", () => {
+    const d = createSilenceDetector(manual);
+    expect(d.sample(QUIET, 0)).toBe("continue");
+    expect(d.sample(QUIET, MANUAL_NO_SPEECH_MS - 1)).toBe("continue");
+    expect(d.sample(QUIET, MANUAL_NO_SPEECH_MS)).toBe("cancel");
+  });
+
+  it("speech before the never-spoke guard disarms it for good", () => {
+    const d = createSilenceDetector(manual);
+    d.sample(QUIET, 0);
+    d.sample(SPEECH, MANUAL_NO_SPEECH_MS - 1000); // spoke just in time
+    expect(d.sample(QUIET, MANUAL_NO_SPEECH_MS)).toBe("continue");
+    expect(d.sample(QUIET, MANUAL_NO_SPEECH_MS * 10)).toBe("continue");
   });
 });
 

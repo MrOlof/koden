@@ -3,9 +3,10 @@ import type { VoiceCaptureState } from "./useVoiceCapture";
 
 /**
  * Pure decision seams for the always-on VOICE SESSION — the session-scoped
- * listen loop (header mic toggle / hotkey tap) — and the legacy hands-free
- * re-arm. Type-only imports, no runtime deps, so tests run without the Tauri
- * platform shim (voiceChord.ts pattern).
+ * listen loop (header mic toggle ONLY; the hotkey tap is a one-take gesture,
+ * see voiceChord.ts) — and the legacy hands-free re-arm. Type-only imports,
+ * no runtime deps, so tests run without the Tauri platform shim
+ * (voiceChord.ts pattern).
  *
  * The session and the hands-free pref are ORTHOGONAL (ADR-017 addendum):
  * the session governs only when the mic LISTENS; `handsFreeMode` governs only

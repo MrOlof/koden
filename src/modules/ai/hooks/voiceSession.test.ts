@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { chordReleaseKind, HOLD_TO_TALK_MS } from "./voiceChord";
+import {
+  chordPressAction,
+  chordReleaseAction,
+  chordReleaseKind,
+  HOLD_TO_TALK_MS,
+} from "./voiceChord";
 import {
   escActionFor,
   type RearmInput,
@@ -119,8 +124,97 @@ describe("chordReleaseKind", () => {
     expect(chordReleaseKind(HOLD_TO_TALK_MS + 500)).toBe("hold");
   });
 
-  it("a quick tap arms the session", () => {
+  it("a quicker release is a tap (one Wispr-style take)", () => {
     expect(chordReleaseKind(0)).toBe("tap");
     expect(chordReleaseKind(HOLD_TO_TALK_MS - 1)).toBe("tap");
+  });
+});
+
+describe("chordPressAction", () => {
+  const IDLE = { enabled: true, recording: false, transcribing: false };
+
+  it("press while idle starts a manual take", () => {
+    expect(chordPressAction(IDLE)).toBe("start-take");
+  });
+
+  it("press while THAT take records stops it (tap #2 = send)", () => {
+    expect(chordPressAction({ ...IDLE, recording: true })).toBe("stop-capture");
+  });
+
+  it("press during a session-loop capture stops + delivers it too", () => {
+    // Same seam on purpose: any live capture stops + submits on tap — the
+    // session's post-turn re-arm (shouldRearmVoice) then resumes the loop.
+    expect(chordPressAction({ ...IDLE, recording: true })).toBe("stop-capture");
+  });
+
+  it("ignores presses while disabled or transcribing", () => {
+    expect(chordPressAction({ ...IDLE, enabled: false })).toBe("ignore");
+    expect(chordPressAction({ ...IDLE, transcribing: true })).toBe("ignore");
+    expect(
+      chordPressAction({ ...IDLE, recording: true, transcribing: true }),
+    ).toBe("ignore");
+  });
+});
+
+describe("chordReleaseAction", () => {
+  it("hold release stops + transcribes (classic PTT, unchanged)", () => {
+    expect(
+      chordReleaseAction({
+        started: true,
+        heldMs: HOLD_TO_TALK_MS,
+        recording: true,
+      }),
+    ).toBe("stop-capture");
+    expect(
+      chordReleaseAction({
+        started: true,
+        heldMs: HOLD_TO_TALK_MS + 5000,
+        recording: true,
+      }),
+    ).toBe("stop-capture");
+  });
+
+  it("hold release is a no-op when the capture already ended", () => {
+    expect(
+      chordReleaseAction({
+        started: true,
+        heldMs: HOLD_TO_TALK_MS + 500,
+        recording: false,
+      }),
+    ).toBe("none");
+  });
+
+  it("tap release leaves the manual take recording (no session arming)", () => {
+    expect(
+      chordReleaseAction({ started: true, heldMs: 80, recording: true }),
+    ).toBe("none");
+  });
+
+  it("release of a stop-press is inert — quick or held", () => {
+    expect(
+      chordReleaseAction({ started: false, heldMs: 80, recording: false }),
+    ).toBe("none");
+    expect(
+      chordReleaseAction({ started: false, heldMs: 900, recording: true }),
+    ).toBe("none");
+  });
+
+  it("tap flow end-to-end: idle → manual take → still recording → send", () => {
+    // Tap 1 down: idle → start the take.
+    expect(
+      chordPressAction({ enabled: true, recording: false, transcribing: false }),
+    ).toBe("start-take");
+    // Tap 1 up (quick): the take keeps recording — pause as long as you like.
+    expect(
+      chordReleaseAction({ started: true, heldMs: 120, recording: true }),
+    ).toBe("none");
+    // Tap 2 down: stop + transcribe + submit.
+    expect(
+      chordPressAction({ enabled: true, recording: true, transcribing: false }),
+    ).toBe("stop-capture");
+    // Tap 2 up: inert.
+    expect(
+      chordReleaseAction({ started: false, heldMs: 120, recording: false }),
+    ).toBe("none");
   });
 });

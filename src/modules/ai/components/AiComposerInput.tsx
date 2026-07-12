@@ -199,12 +199,17 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
     if (it) onPickItem(it);
   };
 
+  const voiceShortcut = useShortcutLabel("ai.voiceInput");
   // "hands-free" tracks the approvals PREF (the honest armed signal,
-  // ADR-017), not autoSubmit — session captures auto-submit too.
+  // ADR-017), not autoSubmit — session captures auto-submit too. A MANUAL
+  // take (hotkey tap, Wispr-style) gets its own copy: nothing auto-stops it,
+  // so say what ends it — rebind-aware via useShortcutLabel.
   const voiceLabel = c.voice.recording
-    ? c.handsFreeArmed
-      ? "Listening — hands-free…"
-      : "Listening…"
+    ? c.voice.meta?.mode === "manual"
+      ? `Recording — tap ${voiceShortcut || "the voice key"} to send`
+      : c.handsFreeArmed
+        ? "Listening — hands-free…"
+        : "Listening…"
     : c.voice.transcribing
       ? "Transcribing…"
       : (c.voice.error?.message ??
@@ -217,7 +222,6 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
       ? "text-destructive"
       : "text-muted-foreground";
 
-  const voiceShortcut = useShortcutLabel("ai.voiceInput");
   const micTitle = !c.voice.hasKey
     ? VOICE_NEEDS_KEY_MESSAGE
     : c.voice.recording
@@ -226,7 +230,7 @@ export function AiComposerInput({ withMic = false }: { withMic?: boolean }) {
         ? "Transcribing…"
         : `Voice input${c.handsFreeArmed ? " — hands-free armed" : ""}${
             voiceShortcut
-              ? ` (${voiceShortcut} — hold to talk, tap to toggle)`
+              ? ` (${voiceShortcut} tap = one take, hold = push-to-talk)`
               : ""
           }`;
 

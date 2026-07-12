@@ -301,7 +301,9 @@ function VoiceSessionButton() {
       title={
         !c.voice.hasKey
           ? VOICE_NEEDS_KEY_MESSAGE
-          : `Voice session (${shortcut} held = push-to-talk, click = always on)`
+          : `click = voice session${
+              shortcut ? `; ${shortcut} tap = one take, hold = push-to-talk` : ""
+            }`
       }
       className={cn(
         "relative size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground",

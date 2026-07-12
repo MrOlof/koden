@@ -136,7 +136,7 @@ on the mic button, "Listening — hands-free…" row, title suffix):
 ## Addendum — voice session ≠ hands-free approvals (2026-07-13)
 
 The always-on VOICE SESSION (`voiceSessionActive`, composer state — session-
-scoped, never persisted; header mic toggle or a Mod+Shift+M tap turns it on,
+scoped, never persisted; the header mic toggle is the ONLY way it starts,
 Esc tiering / toggle / window close end it) keeps the mic re-arming after
 every assistant turn. It is ORTHOGONAL to the `handsFreeMode` pref:
 listen-always ≠ approve-always. The session governs only when the mic
@@ -146,3 +146,19 @@ touches it). Either can be on without the other: session-on with the pref off
 means every utterance still lands as an approval card; pref-on without a
 session keeps the exact legacy re-arm (armed + window open + not suspended,
 `shouldRearmVoice` in `ai/hooks/voiceSession.ts`).
+
+**Hotkey tap = one take, Wispr Flow style (2026-07-13).** The Mod+Shift+M tap
+no longer toggles the session — it starts ONE continuous MANUAL take
+(`mode: "manual"` rides `VoiceCaptureMeta`, like `origin`): no silence
+auto-stop, so the user can pause mid-thought indefinitely; the second tap
+stops, transcribes, and auto-submits. The one guard a manual take keeps is a
+60s never-spoke cancel (`MANUAL_NO_SPEECH_MS`) so a pocket-tap can't hold the
+mic hot forever — once any speech registers, the take runs until stopped.
+Hold stays classic push-to-talk (release sends). A tap while a session-loop
+capture is live stops + submits that capture and the loop re-arms; a header
+mic click while a take records stops + delivers that take instead of arming
+the session (single-capture invariant). Session-loop and mic-click captures
+keep the conversational `mode: "auto"` (silence auto-stop + 8s no-speech
+cancel). Decision seams: `chordPressAction`/`chordReleaseAction` in
+`ai/hooks/voiceChord.ts`, mode policy in `createSilenceDetector`
+(`ai/hooks/useVoiceCapture.ts`).
