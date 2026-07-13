@@ -35,6 +35,8 @@ import type {
   LayoutSplitResult,
   LayoutSplitSide,
   LayoutTabKind,
+  SpaceCreateResult,
+  SpaceInfo,
   TerminalTargetInfo,
 } from "../tools/context";
 import { useTodosStore } from "./todoStore";
@@ -64,6 +66,10 @@ export type Live = {
   ) => LayoutSplitResult;
   focusWorkspacePane: (paneId: number) => LayoutFocusResult;
   getWorkspaceLayout: () => LayoutSnapshot;
+  // Spaces lane (list/create/switch only; no delete/rename, ADR-017 addendum).
+  listSpaces: () => SpaceInfo[];
+  createSpace: (name: string) => SpaceCreateResult;
+  switchSpace: (id: string) => boolean;
   // Terminal targeting lane (list/read/type free; submit approval-or-hands-free,
   // ADR-017 addendum). Sends are leaf-addressed and never move focus.
   listTerminalTargets: () => TerminalTargetInfo[];
@@ -201,7 +207,15 @@ const NOOP_LIVE: Live = {
   openWorkspaceTab: () => ({ error: "workspace not ready" }),
   splitWorkspacePane: () => ({ error: "workspace not ready" }),
   focusWorkspacePane: () => ({ error: "workspace not ready" }),
-  getWorkspaceLayout: () => ({ activeTabId: null, tabs: [], paneTitles: {} }),
+  getWorkspaceLayout: () => ({
+    space: null,
+    activeTabId: null,
+    tabs: [],
+    paneTitles: {},
+  }),
+  listSpaces: () => [],
+  createSpace: () => ({ error: "workspace not ready" }),
+  switchSpace: () => false,
   listTerminalTargets: () => [],
   sendToTerminal: () => false,
   terminalHasForegroundProcess: async () => false,

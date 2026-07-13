@@ -5,6 +5,7 @@ import { buildFsTools } from "./fs";
 import { buildLayoutTools } from "./layout";
 import { buildSearchTools } from "./search";
 import { buildShellTools } from "./shell";
+import { buildSpaceTools } from "./spaces";
 import { buildSubagentTools } from "./subagent";
 import { buildTerminalTools } from "./terminal";
 import { buildTerminalTargetTools } from "./terminals";
@@ -33,6 +34,10 @@ export { resolvePath, type ToolContext } from "./context";
  *    approval: every action is immediately visible, reversible with one
  *    click, and non-destructive. Create/arrange only — no close/delete
  *    tools by design (ADR-017 addendum).
+ *  - Space tools (`workspace_list_spaces`, `workspace_create_space`,
+ *    `workspace_switch_space`) share that rationale and auto-execute:
+ *    visible in the header, one click reverses. Create/switch only; no
+ *    delete/rename tools in v1 (ADR-017 addendum).
  *  - Terminal targeting (`workspace_list_terminals`, `terminal_read`,
  *    `terminal_send`) is tiered: list/read auto-execute (redacted, Privacy
  *    tabs refused); `terminal_send` with submit:false types without Enter and
@@ -52,6 +57,7 @@ export function buildTools(ctx: import("./context").ToolContext) {
     ...buildLayoutTools(ctx),
     ...buildSearchTools(ctx),
     ...buildShellTools(ctx),
+    ...buildSpaceTools(ctx),
     ...buildSubagentTools(ctx),
     ...buildTerminalTools(ctx),
     ...buildTerminalTargetTools(ctx),

@@ -188,3 +188,35 @@ open → close still ends a session / delivers a live take — reacting to
 "closed" as a state would instantly self-stop every headless take. Esc
 tiering, blur stop-and-deliver, and the single-capture invariant are
 unchanged; the HUD derives from the same state, so it dismisses consistently.
+
+## Addendum: space tools (2026-07-13)
+
+"Create a new workspace" used to be declined: the user's "workspace" is a
+SPACE (the header tab groups, the Spaces switcher / Ctrl+Shift+S), and the
+Librarian had no space tools. Three exist now (`ai/tools/spaces.ts`), with
+the same no-approval rationale as the layout lane: every action is visible
+in the header, reversible with one click, non-destructive.
+
+- `workspace_list_spaces`: [{id, name, active, tabCount}].
+- `workspace_create_space({name})`: rides the UI's own path (App
+  `handleNewSpace`, now taking an optional name), so root/env inheritance,
+  the first terminal tab, persistence and the switch-to-it behave exactly
+  like the header's New space button. Duplicate names are allowed because
+  the UI allows them (the result carries a note so the model targets by id
+  later).
+- `workspace_switch_space({target})`: fuzzy, strictly tiered (space id >
+  exact name > case-insensitive > substring); ambiguity errors with the
+  candidates, never a best-effort pick. The switch itself is
+  `useSpaces.setActive`, the exact store call the switcher rows and the
+  space-cycling shortcuts make, so the App-level active-tab fallback applies
+  identically.
+
+Doctrine: create/switch/list ONLY. The create/arrange doctrine extends to
+spaces: no delete and no rename tools in v1; tearing down or renaming a
+space stays a user act. Vocabulary lives in the persona + system prompts
+("workspace" usually means a space; "create a workspace X with notes and
+tasks" = create the space, then build the layout with the layout tools).
+`workspace_layout_state` now names the active space (id + name) so the model
+can orient before building. Wiring follows the layout lane: create threads
+App.tsx -> useAiLiveBridge -> Live -> ToolContext; list/switch act on the
+spaces store from the bridge (the listTerminalTargets precedent).

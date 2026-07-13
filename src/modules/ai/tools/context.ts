@@ -28,6 +28,39 @@ export type LayoutFocusResult =
   | { focused: true; tabId: number; paneId: number }
   | { error: string };
 
+/** One space (header tab group) as the space tools see it. */
+export type SpaceInfo = {
+  id: string;
+  name: string;
+  active: boolean;
+  tabCount: number;
+};
+
+export type SpaceCreateResult =
+  | { spaceId: string; name: string; switched: true }
+  | { error: string };
+
+/**
+ * Store snapshot to model shape. Pure, so the store seam is testable.
+ * Lives here (not spaces.ts) so the bridge can value-import it without
+ * dragging the AI SDK into the eager graph — this file must stay free of
+ * ai/zod imports (src/app/eager-budget.test.ts).
+ */
+export function snapshotSpaces(
+  spaces: ReadonlyArray<{ id: string; name: string }>,
+  activeId: string | null,
+  tabs: ReadonlyArray<{ spaceId: string }>,
+): SpaceInfo[] {
+  const counts = new Map<string, number>();
+  for (const t of tabs) counts.set(t.spaceId, (counts.get(t.spaceId) ?? 0) + 1);
+  return spaces.map((s) => ({
+    id: s.id,
+    name: s.name,
+    active: s.id === activeId,
+    tabCount: counts.get(s.id) ?? 0,
+  }));
+}
+
 /**
  * One terminal pane as the targeting tools see it — every space, every tab
  * (the layout snapshot covers only the active space; this list never filters).
@@ -56,6 +89,8 @@ export type TerminalTargetInfo = {
 
 /** Raw layout snapshot from the app; the layout tool shapes it for the model. */
 export type LayoutSnapshot = {
+  /** The active space, so the model can orient. Null only pre-hydration. */
+  space: { id: string; name: string } | null;
   activeTabId: number | null;
   /** Tabs in the active space, bar order. paneTree only on terminal-kind tabs. */
   tabs: Array<{
@@ -108,6 +143,13 @@ export type ToolContext = {
   focusWorkspacePane: (paneId: number) => LayoutFocusResult;
   /** Raw layout state of the active space. */
   getWorkspaceLayout: () => LayoutSnapshot;
+  // Spaces lane (list/create/switch only; no delete/rename, ADR-017 addendum).
+  /** Every space with its tab count; exactly one is active. */
+  listSpaces: () => SpaceInfo[];
+  /** Create a space via the UI's own path (first tab opens, space activates). */
+  createSpace: (name: string) => SpaceCreateResult;
+  /** Activate a space by id. False = the id no longer exists. */
+  switchSpace: (id: string) => boolean;
   // Terminal targeting (ADR-017 addendum): list/read free, type free,
   // submit approval-gated unless the user armed hands-free mode.
   /** Every terminal pane across ALL spaces. */

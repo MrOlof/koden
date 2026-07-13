@@ -80,6 +80,7 @@ export function serializePaneTree(
 function shapeLayout(snap: LayoutSnapshot) {
   const active = snap.tabs.find((t) => t.tabId === snap.activeTabId) ?? null;
   return {
+    space: snap.space,
     activeTab: active
       ? {
           tabId: active.tabId,
@@ -174,7 +175,7 @@ export function buildLayoutTools(ctx: ToolContext) {
 
     workspace_layout_state: tool({
       description:
-        "Read the current workspace layout: the active tab's pane tree (pane ids, kinds, titles, focus) plus the open tabs of the active space. Call before building or extending a layout. Auto-executes.",
+        "Read the current workspace layout: the active space (name + id), the active tab's pane tree (pane ids, kinds, titles, focus), plus the open tabs of that space. Call before building or extending a layout. Auto-executes.",
       inputSchema: z.object({}),
       execute: async () => shapeLayout(ctx.getWorkspaceLayout()),
     }),

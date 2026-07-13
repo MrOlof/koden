@@ -37,6 +37,7 @@ import type {
   LayoutSplitResult,
   LayoutSplitSide,
   LayoutTabKind,
+  SpaceCreateResult,
 } from "@/modules/ai/tools/context";
 import {
   BrainActivityBridge,
@@ -1414,7 +1415,10 @@ export default function App() {
     for (const [id, t] of Object.entries(titles)) {
       if (t.label) paneTitles[Number(id)] = t.label;
     }
+    const spaceName =
+      useSpaces.getState().spaces.find((s) => s.id === space)?.name ?? space;
     return {
+      space: { id: space, name: spaceName },
       activeTabId: activeId,
       tabs: tabsRef.current
         .filter((t) => t.spaceId === space)
@@ -2032,18 +2036,34 @@ export default function App() {
 
   const activeCwd = activeTerminalLeafCwd;
 
-  const handleNewSpace = useCallback(() => {
-    const { spaces, create, setActive } = useSpaces.getState();
-    const meta = create({
-      name: `Space ${spaces.length + 1}`,
-      root: activeCwd ?? home ?? null,
-      env: workspaceEnv,
-    });
-    setActiveSpaceForNewTabs(meta.id);
-    newTab(activeCwd ?? undefined);
-    setActive(meta.id);
-    return meta.id;
-  }, [activeCwd, home, workspaceEnv, newTab, setActiveSpaceForNewTabs]);
+  const handleNewSpace = useCallback(
+    (name?: string) => {
+      const { spaces, create, setActive } = useSpaces.getState();
+      const meta = create({
+        name: name?.trim() || `Space ${spaces.length + 1}`,
+        root: activeCwd ?? home ?? null,
+        env: workspaceEnv,
+      });
+      setActiveSpaceForNewTabs(meta.id);
+      newTab(activeCwd ?? undefined);
+      setActive(meta.id);
+      return meta.id;
+    },
+    [activeCwd, home, workspaceEnv, newTab, setActiveSpaceForNewTabs],
+  );
+
+  // Librarian spaces lane: create rides the UI's own path (handleNewSpace),
+  // so root/env inheritance, the first tab, persistence, and the switch all
+  // behave exactly like the header's New space button.
+  const aiCreateSpace = useCallback(
+    (name: string): SpaceCreateResult => {
+      const trimmed = name.trim();
+      if (!trimmed) return { error: "space name is empty" };
+      const spaceId = handleNewSpace(trimmed);
+      return { spaceId, name: trimmed, switched: true };
+    },
+    [handleNewSpace],
+  );
 
   const handleDeleteSpace = useCallback(
     (id: string) => {
@@ -2269,6 +2289,7 @@ export default function App() {
     splitWorkspacePane: aiSplitWorkspacePane,
     focusWorkspacePane: aiFocusWorkspacePane,
     getWorkspaceLayout: aiWorkspaceLayout,
+    createSpace: aiCreateSpace,
   });
 
   const shell = (

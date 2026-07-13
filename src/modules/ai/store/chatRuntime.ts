@@ -42,6 +42,9 @@ function makeChat(sessionId: string): Chat<UIMessage> {
     focusWorkspacePane: (paneId) =>
       useChatStore.getState().live.focusWorkspacePane(paneId),
     getWorkspaceLayout: () => useChatStore.getState().live.getWorkspaceLayout(),
+    listSpaces: () => useChatStore.getState().live.listSpaces(),
+    createSpace: (name) => useChatStore.getState().live.createSpace(name),
+    switchSpace: (id) => useChatStore.getState().live.switchSpace(id),
     listTerminalTargets: () =>
       useChatStore.getState().live.listTerminalTargets(),
     readTerminalBuffer: (leafId) =>

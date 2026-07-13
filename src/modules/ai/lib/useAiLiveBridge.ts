@@ -14,7 +14,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { type RefObject, useEffect, useRef } from "react";
 import type { Live } from "../store/chatStore";
-import type { TerminalTargetInfo } from "../tools/context";
+import { snapshotSpaces, type TerminalTargetInfo } from "../tools/context";
 import { redactSensitive } from "./redact";
 
 type TuiWaitResult = "ready" | "gone" | "timeout";
@@ -56,6 +56,9 @@ type Params = {
   splitWorkspacePane: Live["splitWorkspacePane"];
   focusWorkspacePane: Live["focusWorkspacePane"];
   getWorkspaceLayout: Live["getWorkspaceLayout"];
+  // Spaces lane: create rides App's handleNewSpace (it also opens the
+  // space's first tab); list/switch act on the spaces store directly.
+  createSpace: Live["createSpace"];
 };
 
 /**
@@ -238,6 +241,20 @@ export function useAiLiveBridge(params: Params) {
         ref.current.splitWorkspacePane(kind, side, title),
       focusWorkspacePane: (paneId) => ref.current.focusWorkspacePane(paneId),
       getWorkspaceLayout: () => ref.current.getWorkspaceLayout(),
+      // Spaces lane (ADR-017 addendum). Switching is the exact store call
+      // the header switcher rows and space-cycling shortcuts make, so the
+      // App-level active-tab fallback behaves identically.
+      listSpaces: () => {
+        const { spaces, activeId } = useSpaces.getState();
+        return snapshotSpaces(spaces, activeId, ref.current.tabs);
+      },
+      createSpace: (name) => ref.current.createSpace(name),
+      switchSpace: (id) => {
+        const { spaces, setActive } = useSpaces.getState();
+        if (!spaces.some((s) => s.id === id)) return false;
+        setActive(id);
+        return true;
+      },
     });
   }, [setLive, terminalRefs]);
 }

@@ -57,6 +57,10 @@ const TOOL_TITLES: Record<string, string> = {
   workspace_split_pane: "Splitting the pane",
   workspace_focus_pane: "Focusing a pane",
   workspace_layout_state: "Reading the layout",
+  // Spaces
+  workspace_list_spaces: "Listing spaces",
+  workspace_create_space: "Creating a space",
+  workspace_switch_space: "Switching space",
 };
 
 // Input-aware labels for the live status pill — folds the interesting bit
@@ -82,6 +86,10 @@ const TOOL_STATUS_LABELS: Record<string, LabelFn> = {
   run_subagent: (i) => `Spawning ${String(i.type ?? "subagent")} subagent`,
   workspace_open_tab: (i) => `Opening a ${String(i.kind ?? "workspace")} tab`,
   workspace_split_pane: (i) => `Adding a ${String(i.kind ?? "new")} pane`,
+  workspace_create_space: (i) =>
+    `Creating space ${ellipsize(String(i.name ?? ""), 30)}`,
+  workspace_switch_space: (i) =>
+    `Switching to ${ellipsize(String(i.target ?? ""), 30)}`,
   terminal_read: (i) =>
     `Reading terminal ${ellipsize(String(i.target ?? ""), 30)}`,
   terminal_send: (i) =>
