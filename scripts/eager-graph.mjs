@@ -1,4 +1,9 @@
-#!/usr/bin/env node
+// No shebang here on purpose. This module is imported by
+// src/app/eager-budget.test.ts, and Vite hoists its SSR import shims above the
+// first line; a shebang pushed into the middle of a file is an invalid token,
+// so vitest fails the whole suite with "SyntaxError: Invalid or unexpected
+// token" while plain node loads it fine. It is always run as `node <file>`.
+//
 // Static eager-import tracer. BFS from an entry following only *static* value
 // imports (`import ... from "x"`, `export ... from "x"`). `import type` /
 // `export type` are erased by the compiler, and `import("x")` /
