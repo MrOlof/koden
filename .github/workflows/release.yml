@@ -26,8 +26,20 @@ jobs:
             rust-target: ""
 
     runs-on: ${{ matrix.platform }}
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v6
+
+      # ci.yml's rust job hit "No space left on device" on this runner image.
+      # A release build is a single pass rather than four, so it is less exposed,
+      # but a disk-full failure here costs a whole release cycle. Cheap insurance.
+      - name: Free runner disk space
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
