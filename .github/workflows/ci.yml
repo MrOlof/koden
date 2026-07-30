@@ -54,8 +54,23 @@ jobs:
 
   rust:
     runs-on: ubuntu-22.04
+    # This job builds the whole dependency tree four times (check, clippy,
+    # nextest, then clippy + nextest again under `semantic`). With incremental
+    # artifacts and full debuginfo that filled the runner disk and killed the
+    # worker mid-step with "No space left on device". Incremental buys nothing
+    # on a throwaway runner, and line tables still give usable panic locations.
+    # Local dev keeps `incremental = true` from Cargo.toml either way.
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       - name: Install Linux build dependencies
         run: |
