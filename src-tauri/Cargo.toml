@@ -1,6 +1,6 @@
 [package]
 name = "koden"
-version = "0.8.0"
+version = "0.9.0"
 description = "Koden — an open-source AI-native terminal emulator"
 authors = ["Kosta Wadenfalk"]
 license = "Apache-2.0"
