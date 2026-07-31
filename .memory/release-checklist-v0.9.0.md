@@ -4,6 +4,65 @@ created: 2026-07-30
 status: DONE — v0.9.0 PUBLISHED 2026-07-31T06:36Z, repo public, updater live
 ---
 
+## LIBRARIAN ROUND (2026-07-31, after v0.10.0)
+
+Kosta's framing, which reframed the whole feature set: the Librarian runs on a
+deliberately CHEAP key and must NOT code — that is the real agents' job. Its job
+is to keep everything indexed so those expensive agents get answers fast instead
+of reading whole project folders. A cheap model cannot reason its way out of a
+bad index, so retrieval quality is the entire product.
+
+1. **`934d9b3` — the activity trail was lying.** `files_activity_payload` had
+   RE-IMPLEMENTED the indexer's gate set off the raw watcher batch and drifted:
+   3 of 5 gates, missing `rel_under_skip_dir` (holds `.git`) and
+   `is_ignored_file`. A `git commit` fanned `.git/index.lock` into the injected
+   gist. Fixed structurally — `index_changed_accepted` returns the accepted rels
+   (already computed for the edge relink, then discarded) and the trail consumes
+   those, so it cannot disagree with the index by construction. SECOND defect:
+   render was `take(6)` over a BTreeSet, so lexicographic order gave dot-prefixed
+   paths every slot and source could never appear. Now ranked by a PURE function
+   of the path string. Ranking by recency would rotate the gist key every
+   debounce tick — that is why the intuitive answer is wrong. Negative control
+   run: with the old render restored the test reproduces the live symptom.
+   Side effect: `reflect::append_recent_activity` renders the same rows into
+   every PAID Librarian round, so this was also burning tokens on git plumbing.
+2. **`b89259d` — `koden-brain`, a read-only MCP server** (`src-tauri/src/bin/`).
+   The index existed but was unreachable from outside the app. Tools:
+   brain_search (omit project = search ALL indexed projects), brain_symbol,
+   brain_impact, brain_recent_activity, brain_projects. No new deps.
+   Unblocked because the brain was ALREADY headless (`examples/brain_cli.rs`:
+   "no GUI, no Tauri app") and the store is WAL with `open_readonly` —
+   cross-process reads are an explicit design goal (CONCEPT §8).
+   Usability pivot: the store keys on an opaque 16-hex id but an agent only
+   knows a directory, so tools take `path` (default cwd) and walk UP ancestors
+   to the deepest indexed match, via new `registry::project_id_for_root`.
+3. **`f056fc6` — the gist advertises retrieval.** Without it the server was
+   discoverable only by luck. Worded conditionally; the gist cannot know whether
+   the reader registered it.
+4. **`2e86554` — the narrative layer.** Even with clean paths, a path list is
+   not an answer to "what did we last work on?". The worker now records the git
+   HEAD subject as a `commit` activity row when HEAD MOVES, and the gist renders
+   commits FIRST in each day line. Chosen over LLM summarization deliberately:
+   deterministic, free, cache-stable, cannot hallucinate a history.
+   Fail-open off-git and pre-first-commit.
+5. **`bf20fc2` — `rust-toolchain.toml`** pinning 1.97.1. `@stable` cost two CI
+   cycles when it resolved ahead of the local toolchain.
+6. **`0997d8e` — checklist item B closed.** The 15 dirty `.memory` paths
+   (ADRs 007-016, brain-verification screenshots, morning reports) committed.
+
+**Signing key backed up.** `_ClaudeSetup/secrets/` now holds the encrypted key
+plus a README. Verified scrypt-encrypted (`kdf_alg`=`Sc`) — an earlier memory
+note wrongly recorded it as passwordless. The PASSWORD is deliberately not
+stored with it and cannot be recovered from GitHub (Actions secrets are
+write-only): it must live in a password manager.
+
+**MCP server installed at a stable path**
+(`%LOCALAPPDATA%\app.mrolof.koden\bin\koden-brain.exe`, release build) and
+registered user-level, so it survives `cargo clean`. New-machine steps are in
+`_ClaudeSetup\NEW-MACHINE-HANDOVER.md`.
+
+**svart worktree folded** — merged, shipped, deregistered.
+
 ## SHIPPED (2026-07-31)
 
 `v0.9.0` is public at https://github.com/MrOlof/koden/releases/tag/v0.9.0,
