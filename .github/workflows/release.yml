@@ -12,14 +12,12 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # macOS is deliberately not built: no Apple signing/notarization credentials
+      # exist, and an unsigned .dmg is worse than no .dmg. Windows and Linux are
+      # the supported targets. Re-add the two macos-latest legs (and the Apple
+      # key step + APPLE_* env on the tauri action) if that ever changes.
       matrix:
         include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            rust-target: aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            rust-target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             args: ""
             rust-target: ""
@@ -28,8 +26,20 @@ jobs:
             rust-target: ""
 
     runs-on: ${{ matrix.platform }}
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v6
+
+      # ci.yml's rust job hit "No space left on device" on this runner image.
+      # A release build is a single pass rather than four, so it is less exposed,
+      # but a disk-full failure here costs a whole release cycle. Cheap insurance.
+      - name: Free runner disk space
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -61,52 +71,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-
-      # Apple signing/notarization secrets are optional. When absent, no
-      # APPLE_* env may reach tauri-action — empty values still count as
-      # "set" and break the signing path — so the secrets are exported to
-      # GITHUB_ENV only when the certificate secret is non-empty.
-      - name: Detect Apple signing secrets
-        if: startsWith(matrix.platform, 'macos')
-        shell: bash
-        env:
-          APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE }}
-        run: |
-          if [ -n "$APPLE_CERT" ]; then
-            echo "HAS_APPLE=true" >> "$GITHUB_ENV"
-          else
-            echo "Apple signing secrets absent; building unsigned macOS bundles."
-          fi
-
-      - name: Write Apple API key to disk
-        if: startsWith(matrix.platform, 'macos') && env.HAS_APPLE == 'true'
-        shell: bash
-        env:
-          KEY_CONTENT: ${{ secrets.APPLE_API_KEY_PATH }}
-        run: |
-          mkdir -p "$HOME/private_keys"
-          printf '%s' "$KEY_CONTENT" > "$HOME/private_keys/AuthKey.p8"
-          echo "APPLE_API_KEY_PATH=$HOME/private_keys/AuthKey.p8" >> "$GITHUB_ENV"
-
-      - name: Export Apple signing environment
-        if: startsWith(matrix.platform, 'macos') && env.HAS_APPLE == 'true'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        run: |
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
-                   APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY; do
-            {
-              echo "$v<<__APPLE_EOF__"
-              printf '%s\n' "${!v}"
-              echo "__APPLE_EOF__"
-            } >> "$GITHUB_ENV"
-          done
 
       - id: tauri
         uses: tauri-apps/tauri-action@v0

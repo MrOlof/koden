@@ -1688,9 +1688,7 @@ fn rust_use_base(importer: &str, spec: &str) -> Option<String> {
             let mut d = self_dir(&dir);
             let mut i = 0;
             while i < segs.len() && segs[i] == "super" {
-                if d.pop().is_none() {
-                    return None; // escaped above the project root
-                }
+                d.pop()?;
                 i += 1;
             }
             (d, &segs[i..])
@@ -1698,7 +1696,7 @@ fn rust_use_base(importer: &str, spec: &str) -> Option<String> {
         _name => {
             // Leading crate NAME: only meaningful from tests/examples/benches
             // crates (no `src` ancestor), which reference the lib by name.
-            if dir.iter().any(|c| *c == "src") {
+            if dir.contains(&"src") {
                 return None;
             }
             let i = dir
@@ -2589,13 +2587,17 @@ pub fn librarian_config_readonly(
         }))
 }
 
-/// Recent Librarian LLM calls (the budget ledger) via a read-only connection:
-/// `(status, est_cost_usd, actual_cost_usd, model, reserved_at_ms)`, newest first.
-/// Each row is a real reflect/curate call (reserved before the call, spent after).
+/// One Librarian budget-ledger row:
+/// `(status, est_cost_usd, actual_cost_usd, model, reserved_at_ms)`.
+pub type LibrarianLedgerRow = (String, f64, Option<f64>, String, i64);
+
+/// Recent Librarian LLM calls (the budget ledger) via a read-only connection,
+/// newest first. Each row is a real reflect/curate call (reserved before the
+/// call, spent after).
 pub fn librarian_ledger_readonly(
     db_path: &Path,
     limit: i64,
-) -> rusqlite::Result<Vec<(String, f64, Option<f64>, String, i64)>> {
+) -> rusqlite::Result<Vec<LibrarianLedgerRow>> {
     let conn = open_readonly(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT status, est_cost_usd, actual_cost_usd, model, reserved_at \

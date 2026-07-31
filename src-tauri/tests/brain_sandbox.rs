@@ -514,13 +514,26 @@ fn gist_cache_key_stable_under_concurrent_writes() {
     });
 
     // Reader: build gists in a tight loop, asserting key→bytes is a function.
+    //
+    // Sample until the reader has actually observed the writer flip the index
+    // (>1 distinct state), not merely for a fixed iteration count. A fixed count
+    // races the scheduler: on a loaded CI runner the reader can finish every
+    // sample inside a single writer state, which failed the sanity assert below
+    // even though the no-tear invariant itself held. Bounded by a deadline so a
+    // genuinely stuck or erroring writer still fails loudly instead of hanging.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut seen: HashMap<String, String> = HashMap::new();
-    for _ in 0..400 {
+    let mut samples = 0usize;
+    while samples < 400 || seen.len() < 2 {
         let g = build_gist(&db, PID, "proj", "login", 400);
         if let Some(prev) = seen.get(&g.fingerprint) {
             assert_eq!(prev, &g.bytes, "torn snapshot: one cache key, two gist bodies");
         } else {
             seen.insert(g.fingerprint.clone(), g.bytes.clone());
+        }
+        samples += 1;
+        if std::time::Instant::now() >= deadline {
+            break;
         }
     }
     stop.store(true, Ordering::Relaxed);
@@ -528,7 +541,11 @@ fn gist_cache_key_stable_under_concurrent_writes() {
 
     // Sanity: the writer actually churned the index, so the reader observed more
     // than one state (otherwise the no-tear assertion would be vacuous).
-    assert!(seen.len() >= 2, "expected to observe >1 index state, saw {}", seen.len());
+    assert!(
+        seen.len() >= 2,
+        "expected to observe >1 index state across {samples} samples, saw {}",
+        seen.len()
+    );
 }
 
 /// ADR-011 gist upgrade 1 (known unknowns): an EMPTY retrieval leg is stated

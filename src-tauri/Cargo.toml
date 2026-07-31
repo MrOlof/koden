@@ -1,6 +1,6 @@
 [package]
 name = "koden"
-version = "0.8.0"
+version = "0.9.0"
 description = "Koden — an open-source AI-native terminal emulator"
 authors = ["Kosta Wadenfalk"]
 license = "Apache-2.0"
@@ -14,6 +14,14 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "koden_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints.clippy]
+# Fires where a paragraph follows a markdown list inside a doc comment. It only
+# affects rustdoc rendering, and Koden publishes no rustdoc. The 33 hits are in
+# dense measurement notes (brain scoring thresholds and their evidence) where
+# reflowing the prose to satisfy the lint risks corrupting what it records.
+# `cargo clippy --fix` refuses to rewrite them. Drop this if rustdoc ever ships.
+doc_lazy_continuation = "allow"
 
 [features]
 default = []

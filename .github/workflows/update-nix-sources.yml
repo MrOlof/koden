@@ -1,8 +1,11 @@
 name: Update Nix sources
 
+# Manual-only since v0.9.0. This job hashes the two darwin .app.tar.gz assets,
+# and release.yml no longer builds macOS, so firing it automatically on publish
+# would fail every release at the download step. nix/package.nix still carries
+# the darwin surface; restore the `release: published` trigger together with the
+# macos legs in release.yml if Apple builds come back.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:

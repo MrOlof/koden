@@ -156,8 +156,8 @@ mod tests {
     fn query_dedups_reinserted_id() {
         let store = HnswStore::new("e", 16);
         let v = unit(4, 0);
-        store.upsert(&["x".into()], &[v.clone()]).unwrap();
-        store.upsert(&["x".into()], &[v.clone()]).unwrap(); // re-insert same id
+        store.upsert(&["x".into()], std::slice::from_ref(&v)).unwrap();
+        store.upsert(&["x".into()], std::slice::from_ref(&v)).unwrap(); // re-insert same id
         let hits = store.query(&v, 10).unwrap();
         assert_eq!(hits.iter().filter(|(d, _)| d == "x").count(), 1, "re-inserted id returns once");
     }
@@ -177,8 +177,8 @@ mod tests {
         let store = HnswStore::new("e", 16);
         let old = unit(4, 0);
         let new = unit(4, 1); // orthogonal: cosine(old, new) = 0
-        store.upsert(&["x".into()], &[old.clone()]).unwrap();
-        store.upsert(&["x".into()], &[new.clone()]).unwrap(); // the edit / re-embed
+        store.upsert(&["x".into()], std::slice::from_ref(&old)).unwrap();
+        store.upsert(&["x".into()], std::slice::from_ref(&new)).unwrap(); // the edit / re-embed
         // Query at the OLD embedding: the only admissible hit is the live (new)
         // vector at ~0 similarity — the stale one would score ~1.0 here.
         let hits = store.query(&old, 5).unwrap();

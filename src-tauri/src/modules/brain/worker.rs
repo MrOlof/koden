@@ -2570,7 +2570,7 @@ mod tests {
         std::fs::write(sub.join("zz.txt"), "alpha").unwrap();
         std::fs::write(sub.join("kept.txt"), "bravo").unwrap();
 
-        index_changed(&index, "p", root, &[sub.clone()]);
+        index_changed(&index, "p", root, std::slice::from_ref(&sub));
         let paths = index.existing_paths("p").unwrap();
         assert!(paths.contains(&"sub/kept.txt".to_string()), "non-ignored child is indexed");
         assert!(

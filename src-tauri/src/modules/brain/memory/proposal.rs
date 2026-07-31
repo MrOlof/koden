@@ -181,7 +181,7 @@ mod tests {
             "The webhook signature check precedes parsing of the request payload body in the handler.",
         );
         assert!(
-            is_near_duplicate(&b, &[a.clone()], NEAR_DUPE_THRESHOLD),
+            is_near_duplicate(&b, std::slice::from_ref(&a), NEAR_DUPE_THRESHOLD),
             "paraphrase must be caught as a near-duplicate"
         );
 

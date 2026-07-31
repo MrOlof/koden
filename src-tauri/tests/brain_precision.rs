@@ -9,8 +9,8 @@
 //!     precision can actually drop (a corpus where every hit is relevant would
 //!     measure a vanity 1.0);
 //!   - >=3 NEGATIVE CONTROLS (empty relevant sets): token-disjoint ones must
-//!     return ZERO hits, and the aggregate pollution ceiling makes a
-//!     return-everything ranker FAIL (it would score pollution ~1.0);
+//!     > return ZERO hits, and the aggregate pollution ceiling makes a
+//!     > return-everything ranker FAIL (it would score pollution ~1.0);
 //!   - floors set from MEASURED values with headroom, never tuned upward to
 //!     flatter the search; known-weak query classes are reported, not hidden.
 //!

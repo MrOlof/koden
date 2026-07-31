@@ -191,7 +191,7 @@ pub fn hotspots_readonly(
         .collect();
     // BTreeMap iteration is path-asc, and the sort is stable → the tie-break
     // (commits desc, then path asc) holds by construction.
-    rows.sort_by(|a, b| b.commits.cmp(&a.commits));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.commits));
     rows.truncate(limit);
     Ok(Hotspots { rows, skipped_reason: None })
 }

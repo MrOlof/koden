@@ -91,6 +91,9 @@ pub fn detect_candidates(
         let Some(id) = f.note_id.as_deref() else { continue };
         match f.check {
             "stale_revalidate" => add(id, SIG_PASSED_REVALIDATE, W_REVALIDATE, &mut score, &mut signals),
+            // clippy wants this collapsed into a match guard, but `insert` mutates
+            // `anchor_counted`. A side-effecting guard hides the dedupe; keep it explicit.
+            #[allow(clippy::collapsible_match)]
             "broken_anchor" => {
                 if anchor_counted.insert(id.to_string()) {
                     add(id, SIG_BROKEN_ANCHOR, W_BROKEN_ANCHOR, &mut score, &mut signals);
