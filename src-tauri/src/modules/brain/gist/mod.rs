@@ -208,6 +208,25 @@ fn build_gist_on_conn(
         if !unknowns.is_empty() {
             push_line(&mut out, max_chars, &format!("## Known unknowns\n{}", unknowns.join("\n")));
         }
+
+        // Point the agent at the index it is already standing on. Without this the
+        // gist is a one-shot blob: an agent needing "where is X" greps the tree and
+        // re-reads files the brain has already indexed and parsed. The koden-brain
+        // MCP server exposes that index read-only, but nothing else advertises it.
+        //
+        // Deliberately conditional in WORDING rather than in fact: the gist cannot
+        // know whether the reader registered the MCP server, and claiming a tool
+        // that isn't there would be worse than saying nothing. An agent without it
+        // simply greps, which is today's behavior.
+        //
+        // Constant text, so byte-stability is unaffected: for any given key the
+        // bytes stay identical. It shifts every project's gist ONCE on upgrade,
+        // the same one-time rotation class as the activity-section change.
+        push_line(
+            &mut out,
+            max_chars,
+            "## Retrieval\n- This project is indexed. If the koden-brain MCP tools are available, prefer them over grepping or listing the tree: brain_search (ranked files; omit the project arg to search every indexed project), brain_symbol (where a symbol is defined), brain_impact (what a change would affect). They answer from the index, so they are far cheaper than re-reading files.",
+        );
     }
 
     // Code layer: relevant files + their top symbols.
@@ -677,6 +696,43 @@ mod tests {
             "source ordered before chrome: {line}"
         );
         assert_eq!(activity_day_lines(&rows), lines, "render stays pure");
+    }
+
+    /// The gist is the ONLY channel that reaches an external agent before it acts,
+    /// so it has to name the query surface or the agent greps a tree the brain has
+    /// already indexed. Gated on a ready, non-empty index (same guard as
+    /// known-unknowns): an empty or unready index must still yield the
+    /// freshness-only gist rather than advertise retrieval over nothing.
+    #[test]
+    fn gist_points_agents_at_the_brain_instead_of_grepping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("i.sqlite");
+        let idx = SqliteIndex::open(&db).unwrap();
+        idx.index_file("p", "src/auth/login.ts", "export function loginHandler() {}", "h1", 17)
+            .unwrap();
+
+        let g = build_gist(&db, "p", "proj", "login", 800);
+        assert!(
+            g.bytes.contains("brain_search"),
+            "names the search tool: {}",
+            g.bytes
+        );
+        assert!(
+            g.bytes.contains("prefer them over grepping"),
+            "states the preference: {}",
+            g.bytes
+        );
+
+        // Empty index: freshness only, no retrieval claim over nothing.
+        let empty_dir = tempfile::tempdir().unwrap();
+        let empty_db = empty_dir.path().join("i.sqlite");
+        let _ = SqliteIndex::open(&empty_db).unwrap();
+        let g2 = build_gist(&empty_db, "p", "proj", "login", 800);
+        assert!(
+            !g2.bytes.contains("brain_search"),
+            "no retrieval claim over an empty index: {}",
+            g2.bytes
+        );
     }
 
     /// ADR-020: the day-line derivation is a COUNT-FREE set fold — turns only
