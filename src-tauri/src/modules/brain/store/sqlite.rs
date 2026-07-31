@@ -2538,6 +2538,36 @@ pub fn file_count_readonly(db_path: &Path, project_id: &str) -> rusqlite::Result
     file_count_with_conn(&open_readonly(db_path)?, project_id)
 }
 
+/// Indexed projects with their file counts, `(project_id, files)`, busiest first.
+/// Exists for OUT-OF-PROCESS readers (the `koden-brain` MCP server): an external
+/// agent has a cwd, not a project id, and needs the id before it can scope
+/// `get_symbol_readonly` / `code_impact_readonly`. Read-only, so it is wait-free
+/// against the running app's writer (WAL).
+pub fn projects_readonly(db_path: &Path) -> rusqlite::Result<Vec<(String, i64)>> {
+    let conn = open_readonly(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT project_id, COUNT(*) AS n FROM files
+         GROUP BY project_id ORDER BY n DESC, project_id ASC",
+    )?;
+    let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut v = Vec::new();
+    for x in it {
+        v.push(x?);
+    }
+    Ok(v)
+}
+
+/// Newest-first activity rows via a fresh read-only connection — the
+/// out-of-process counterpart of [recent_activity_with_conn], so an external
+/// agent can ask "what was last worked on here" without re-reading the tree.
+pub fn recent_activity_readonly(
+    db_path: &Path,
+    project_id: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<ActivityRow>> {
+    recent_activity_with_conn(&open_readonly(db_path)?, project_id, limit)
+}
+
 /// Reflect budget `(ceiling_usd, spent_total_usd)` via a read-only connection
 /// (the command-thread status read — WAL → wait-free vs the writer). P4.
 pub fn budget_state_readonly(db_path: &Path) -> rusqlite::Result<(f64, f64)> {

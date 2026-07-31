@@ -238,6 +238,18 @@ fn project_id_for(root_str: &str) -> ProjectId {
     blake3::hash(fold_case(root_str).as_bytes()).to_hex()[..16].to_string()
 }
 
+/// [project_id_for] over a filesystem path, for OUT-OF-PROCESS callers (the
+/// `koden-brain` MCP server). An external agent knows its cwd, never the opaque
+/// 16-hex id the store keys on, so it needs the same derivation the app uses —
+/// including `normalize`'s canonicalization, or Windows verbatim prefixes and
+/// trailing separators would hash to a different id than the one on disk.
+///
+/// Pure: no registry state, no IO beyond canonicalization, so a reader process
+/// can resolve an id without the app running.
+pub fn project_id_for_root(root: &Path) -> ProjectId {
+    project_id_for(&normalize(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
