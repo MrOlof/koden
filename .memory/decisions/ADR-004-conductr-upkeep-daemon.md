@@ -1,8 +1,10 @@
 # ADR-004: Conductr embedded in Koden as the upkeep / memory daemon (pointer)
 
-Status: Proposed — 2026-06-20. Cross-project decision; **canonical record lives in Conductr**:
-`Products/Conductr/.memory/decisions/ADR-033-conductr-in-koden-upkeep-daemon.md`. This file is the
-Koden-side pointer so a Koden session finds it.
+Status: **Superseded — 2026-06-20** by **ADR-005 — Koden Brain integration**
+(`./ADR-005-koden-brain-integration.md`), which is the canonical record. ADR-005 reframes this as a
+Koden-branded subsystem ("Koden Brain", Conductr invisible to users) and corrects the design after a
+code-verified pass: stdio MCP child (not an `externalBin` sidecar), a `std::thread` daemon (not tokio),
+and no new `maintain --if-milestone` gate for v1. Everything below is retained for history only.
 
 ## Summary
 
