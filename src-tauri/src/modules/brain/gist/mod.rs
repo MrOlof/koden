@@ -47,6 +47,9 @@ const MAX_NOTES: usize = 8;
 const ACTIVITY_MAX_DAYS: usize = 3;
 const ACTIVITY_MAX_AGENTS: usize = 3;
 const ACTIVITY_MAX_FILES: usize = 6;
+/// Commit subjects per day. Small on purpose: the newest few carry the narrative
+/// and a busy day would otherwise crowd out the file and note layers below.
+const ACTIVITY_MAX_COMMITS: usize = 3;
 const ACTIVITY_READ_ROWS: usize = 500;
 /// chars-per-token heuristic ([DP-21]) — no exact cross-vendor tokenizer.
 const CHARS_PER_TOKEN: usize = 4;
@@ -318,12 +321,23 @@ fn activity_day_lines(rows: &[store::ActivityRow]) -> Vec<String> {
     use std::collections::BTreeSet;
     // Rows arrive newest-first; BTreeMap orders days ascending — take the LAST
     // (= most recent) ACTIVITY_MAX_DAYS buckets, rendered newest first.
-    let mut days: std::collections::BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> =
-        std::collections::BTreeMap::new();
+    // Bucket = (agents, files, commit subjects).
+    #[allow(clippy::type_complexity)]
+    let mut days: std::collections::BTreeMap<
+        String,
+        (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>),
+    > = std::collections::BTreeMap::new();
     for r in rows {
         let day = epoch_ms_to_utc_date(r.ts_ms);
         let bucket = days.entry(day).or_default();
         match r.kind.as_str() {
+            // The narrative: what the work WAS, not which paths moved.
+            "commit" => {
+                let s = r.payload_redacted.trim();
+                if !s.is_empty() {
+                    bucket.2.insert(s.to_string());
+                }
+            }
             "start" | "end" => {
                 let agent = r.payload_redacted.trim();
                 if !agent.is_empty() {
@@ -352,8 +366,20 @@ fn activity_day_lines(rows: &[store::ActivityRow]) -> Vec<String> {
     days.iter()
         .rev()
         .take(ACTIVITY_MAX_DAYS)
-        .map(|(day, (agents, files))| {
+        .map(|(day, (agents, files, commits))| {
             let mut parts: Vec<String> = vec![format!("- {day}")];
+            // Commits lead: a subject answers "what did we work on" outright,
+            // where agents and paths only circumstantially imply it.
+            if !commits.is_empty() {
+                parts.push(
+                    commits
+                        .iter()
+                        .take(ACTIVITY_MAX_COMMITS)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+            }
             if !agents.is_empty() {
                 parts.push(
                     agents.iter().take(ACTIVITY_MAX_AGENTS).cloned().collect::<Vec<_>>().join(", "),
@@ -694,6 +720,42 @@ mod tests {
         assert!(
             line.find("src/main.rs") < line.find(".github"),
             "source ordered before chrome: {line}"
+        );
+        assert_eq!(activity_day_lines(&rows), lines, "render stays pure");
+    }
+
+    /// The narrative layer. A files-touched row can only say which PATHS moved;
+    /// asked "what was the latest thing we worked on?", a path list is not an
+    /// answer. Commit subjects are, they are free, and they are deterministic —
+    /// so they lead the day line, ahead of agents and files.
+    #[test]
+    fn activity_day_lines_lead_with_commit_subjects() {
+        let day = iso_date_to_epoch_ms("2026-07-31").unwrap();
+        let row = |ts: i64, kind: &str, payload: &str| ActivityRow {
+            ts_ms: ts,
+            kind: kind.into(),
+            payload_redacted: payload.into(),
+        };
+        let rows = vec![
+            row(day + 300, "commit", "brain: koden-brain, a read-only MCP server over the index"),
+            row(day + 200, "start", "claude"),
+            row(day + 100, "files", r#"["src/modules/brain/worker.rs"]"#),
+        ];
+        let lines = activity_day_lines(&rows);
+        let line = lines.first().expect("one day line");
+
+        assert!(
+            line.contains("koden-brain, a read-only MCP server"),
+            "narrative present: {line}"
+        );
+        // Ahead of both the agent and the file list.
+        assert!(
+            line.find("koden-brain").unwrap() < line.find("claude").unwrap(),
+            "commit leads the line: {line}"
+        );
+        assert!(
+            line.find("koden-brain").unwrap() < line.find("worker.rs").unwrap(),
+            "commit precedes files: {line}"
         );
         assert_eq!(activity_day_lines(&rows), lines, "render stays pure");
     }

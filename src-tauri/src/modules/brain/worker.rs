@@ -277,6 +277,11 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
     // ADR-020: per-project debounce stamp for coarse files-touched activity rows
     // (worker-thread-local like lib_state; a restart just re-arms the first row).
     let mut files_activity_last: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    // Last HEAD sha recorded per project, so an unchanged HEAD never re-writes
+    // the same commit subject (worker-thread-local; a restart re-records once,
+    // which the day-set fold absorbs as a no-op).
+    let mut head_commit_last: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // 7. Steady-state event loop. Single writer; ingest paths only send events.
     for ev in rx {
@@ -726,6 +731,33 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                                 index.record_activity(&project, None, "files", &payload, now_ms)
                             {
                                 log::debug!("brain: files activity write failed ({e})");
+                            }
+                            // The NARRATIVE layer. A files row can only say which
+                            // paths moved; the commit subject says what the work
+                            // WAS, which is the actual answer to "what did we last
+                            // work on?". Recorded only when HEAD has MOVED since the
+                            // last row for this project, so a working-tree edit on an
+                            // unchanged HEAD writes nothing and the day's commit set
+                            // stays stable (the gist key folds it — re-recording an
+                            // unchanged subject would be churn, not signal).
+                            //
+                            // Rides the same debounce, and is fail-open: a non-git
+                            // project or a missing git simply records no commit rows.
+                            if let Some((sha, subject)) =
+                                crate::modules::brain::store::head_commit_readonly(
+                                    std::path::Path::new(&root),
+                                )
+                            {
+                                let seen = head_commit_last.get(&project);
+                                if seen.map(|s| s != &sha).unwrap_or(true) {
+                                    head_commit_last.insert(project.clone(), sha);
+                                    let redacted = secrets::redact(&subject).0;
+                                    if let Err(e) = index
+                                        .record_activity(&project, None, "commit", &redacted, now_ms)
+                                    {
+                                        log::debug!("brain: commit activity write failed ({e})");
+                                    }
+                                }
                             }
                         }
                     }

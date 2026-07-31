@@ -103,6 +103,27 @@ pub(super) fn run_git_readonly(project_root: &Path, args: &[&str]) -> Result<Str
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// HEAD as `(short_sha, subject)`, or `None` when git can't answer (not a repo,
+/// no commits yet, git missing) — fail-open like every other git probe here.
+///
+/// This is the NARRATIVE the activity trail otherwise lacks. A files-touched row
+/// can only ever say which paths moved; a commit subject says what the work WAS
+/// ("brain: koden-brain, a read-only MCP server over the index"), which is the
+/// actual answer to "what did we last work on?". Deterministic and free — no LLM
+/// call, so it costs the Librarian's budget nothing and stays cache-stable.
+///
+/// `%s` is the subject line only; bodies are deliberately excluded (unbounded,
+/// and the subject is the summary by construction).
+pub fn head_commit_readonly(project_root: &Path) -> Option<(String, String)> {
+    let out = run_git_readonly(project_root, &["log", "-1", "--format=%h%x09%s"]).ok()?;
+    let line = out.lines().next()?.trim();
+    let (sha, subject) = line.split_once('\t')?;
+    if sha.is_empty() || subject.trim().is_empty() {
+        return None;
+    }
+    Some((sha.to_string(), subject.trim().to_string()))
+}
+
 /// Run one read-only `git diff --name-only` probe and return the touched paths
 /// (forward-slash normalized). `Err` carries the skipped-reason class.
 fn git_diff_names(project_root: &Path, staged: bool) -> Result<Vec<String>, String> {
@@ -209,4 +230,43 @@ pub fn detect_changes_readonly(
         affected: affected.into_values().collect(),
         skipped_reason: None,
     })
+}
+
+#[cfg(test)]
+mod head_commit_tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn head_commit_reads_the_subject_and_fails_open_off_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Not a repo yet: soft None, never an error.
+        assert!(head_commit_readonly(root).is_none(), "no repo -> None");
+
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@koden.local"]);
+        git(root, &["config", "user.name", "Koden Test"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        // A repo with NO commits is also a normal state.
+        assert!(head_commit_readonly(root).is_none(), "no commits -> None");
+
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "brain: narrative from commit subjects"]);
+
+        let (sha, subject) = head_commit_readonly(root).expect("head after commit");
+        assert!(!sha.is_empty(), "short sha captured");
+        assert_eq!(subject, "brain: narrative from commit subjects");
+    }
 }

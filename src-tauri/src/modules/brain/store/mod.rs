@@ -10,7 +10,9 @@ pub mod schema;
 pub mod sqlite;
 pub mod temporal;
 
-pub use changes::{detect_changes_readonly, AffectedFile, DetectMode, DetectedChanges};
+pub use changes::{
+    detect_changes_readonly, head_commit_readonly, AffectedFile, DetectMode, DetectedChanges,
+};
 pub use graph::{graph_readonly, BrainGraph};
 pub use plan::{plan_context_readonly, PlanAdvisory, PlanContext};
 pub use temporal::{
