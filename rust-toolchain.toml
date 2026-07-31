@@ -1,0 +1,16 @@
+# Pinned deliberately. CI runs clippy with -D warnings, so every new Rust stable
+# can turn the build red on lints that have nothing to do with any change we
+# made - that happened twice in one evening (2026-07-30): clippy 1.94 flagged 40
+# pre-existing doc/style lints, then CI resolved `stable` to 1.97 while this
+# machine was still on 1.94, so the second batch was invisible locally and only
+# surfaced after a push.
+#
+# With this file, rustup uses the same compiler here and in CI, and a Rust
+# upgrade becomes a deliberate commit that can be verified locally first.
+#
+# To upgrade: bump `channel`, run `rustup update`, then
+#   cd src-tauri && cargo clippy --all-targets --locked -- -D warnings
+# (also with `--features semantic`) and fix the new lints in that same commit.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
