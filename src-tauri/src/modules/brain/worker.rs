@@ -692,7 +692,12 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
             }
             BrainEvent::Fs { project, changed } => {
                 if let Some(root) = project_root(&app, &project) {
-                    let stats = index_changed(&index, &project, std::path::Path::new(&root), &changed);
+                    let (stats, accepted_rels) = index_changed_accepted(
+                        &index,
+                        &project,
+                        std::path::Path::new(&root),
+                        &changed,
+                    );
                     if stats.indexed > 0 || stats.pruned > 0 {
                         log::debug!(
                             "brain: incremental '{project}' indexed {}, pruned {}",
@@ -716,8 +721,7 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                         let last = files_activity_last.get(&project).copied().unwrap_or(0);
                         if now_ms.saturating_sub(last) >= FILES_ACTIVITY_DEBOUNCE_MS {
                             files_activity_last.insert(project.clone(), now_ms);
-                            let payload =
-                                files_activity_payload(std::path::Path::new(&root), &changed);
+                            let payload = files_activity_payload(&accepted_rels);
                             if let Err(e) =
                                 index.record_activity(&project, None, "files", &payload, now_ms)
                             {
@@ -1351,6 +1355,23 @@ pub fn index_changed(
     root: &std::path::Path,
     changed: &[std::path::PathBuf],
 ) -> IndexStats {
+    index_changed_accepted(index, project_id, root, changed).0
+}
+
+/// [index_changed], additionally returning the project-relative paths that
+/// actually SURVIVED every gate and were indexed. The activity trail (ADR-020)
+/// consumes this instead of the raw watcher batch: deriving "files touched" from
+/// `changed` re-implemented the gate set and drifted, so a `git commit` fanned
+/// `.git/index.lock` into the injected gist's "Recent activity" while the indexer
+/// had correctly skipped it. One gate, one definition — the trail cannot disagree
+/// with the index about what a touched file is, by construction rather than by
+/// a second filter kept in sync by hand.
+pub fn index_changed_accepted(
+    index: &SqliteIndex,
+    project_id: &str,
+    root: &std::path::Path,
+    changed: &[std::path::PathBuf],
+) -> (IndexStats, Vec<String>) {
     let now_ms = now_epoch_ms(); // recency stamp for whatever changed in this delta
     let mut indexed = 0usize;
     let mut pruned = 0usize;
@@ -1458,7 +1479,7 @@ pub fn index_changed(
     // dst side via stored import bases); converges byte-identically with a full
     // rebuild (perf pair: proportional to the delta, not O(project)).
     let _ = index.relink_edges_delta(project_id, &changed_rels, &removed_rels);
-    IndexStats { indexed, pruned }
+    (IndexStats { indexed, pruned }, changed_rels)
 }
 
 /// Per-project autonomous-reflect bookkeeping (worker-thread-local; resets on
@@ -1693,17 +1714,17 @@ pub(crate) fn clean_turn_text(prompt: &str) -> Option<String> {
 /// notes, then the artifact — the watcher coalesces both), and recording our
 /// own derived artifact as "activity" would put a self-referential line in the
 /// injected gist and rotate its key for nothing.
-fn files_activity_payload(root: &std::path::Path, changed: &[std::path::PathBuf]) -> String {
-    let mut rels: Vec<String> = changed
+/// Build the ADR-020 files-touched payload from the paths the indexer ACCEPTED
+/// (see [index_changed_accepted]) — never from the raw watcher batch. Every
+/// exclusion gate (skip-dirs incl. `.git`, `.gitignore`/`.kodenignore`, reserved
+/// artifacts, secret denylist) has already run upstream, so the only thing left
+/// to strip here is the transient-write chaff, which is a property of the write
+/// rather than of the file's indexability.
+fn files_activity_payload(accepted_rels: &[String]) -> String {
+    let mut rels: Vec<String> = accepted_rels
         .iter()
-        .filter(|p| {
-            !walk::is_reserved_artifact(p)
-                && !secrets::is_denylisted_path(&to_canon(p))
-                && !is_transient_write(p)
-        })
-        .map(|p| rel_path(root, p))
-        .filter(|r| !r.is_empty())
-        .map(|r| secrets::redact(&r).0)
+        .filter(|r| !r.is_empty() && !is_transient_write(std::path::Path::new(r)))
+        .map(|r| secrets::redact(r).0)
         .collect();
     rels.sort();
     rels.dedup();
@@ -2250,21 +2271,64 @@ mod tests {
     /// only — the brain's own derived artifact and denylisted paths ride the
     /// same coalesced watcher batch as genuine edits (an apply writes notes,
     /// then refreshes the artifact) and must never appear as "activity".
+    ///
+    /// These gates now live UPSTREAM: the payload is built from the paths
+    /// `index_changed_accepted` returned, so the exclusion is structural. The
+    /// end-to-end version of this assertion is
+    /// `activity_trail_matches_what_the_indexer_accepted` below.
     #[test]
-    fn files_activity_payload_excludes_reserved_artifacts_and_denylisted_paths() {
-        let root = std::path::Path::new("C:/proj");
-        let changed = vec![
-            std::path::PathBuf::from("C:/proj/src/main.rs"),
-            std::path::PathBuf::from("C:/proj/.koden-memory/.koden-gist.json"),
-            std::path::PathBuf::from("C:/proj/.env"),
-        ];
-        let payload = files_activity_payload(root, &changed);
+    fn files_activity_payload_keeps_accepted_rels() {
+        let payload = files_activity_payload(&["src/main.rs".to_string()]);
         assert!(payload.contains("main.rs"), "real edit kept: {payload}");
+    }
+
+    /// The bug this pairs with: `files_activity_payload` used to re-derive its
+    /// own gate set from the RAW watcher batch and drifted from the indexer's,
+    /// missing `rel_under_skip_dir` (which holds `.git`) and the gitignore gate.
+    /// A `git commit` then fanned `.git/index.lock` into the injected gist, so
+    /// "what did we last work on?" answered with git plumbing.
+    ///
+    /// Locks the invariant structurally: the trail names a path IFF the indexer
+    /// accepted it. Fails on the old behavior, which listed all six.
+    #[test]
+    fn activity_trail_matches_what_the_indexer_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".gitignore"), "out/\n").unwrap();
+        for d in ["src", "out", ".git", "node_modules/pkg"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("src/main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(root.join("out/bundle.js"), b"x").unwrap();
+        std::fs::write(root.join(".git/index.lock"), b"").unwrap();
+        std::fs::write(root.join(".git/ORIG_HEAD"), b"deadbeef").unwrap();
+        std::fs::write(root.join("node_modules/pkg/index.js"), b"x").unwrap();
+
+        let index = SqliteIndex::open(&dir.path().join("i.sqlite")).unwrap();
+        let changed: Vec<std::path::PathBuf> = [
+            "src/main.rs",
+            "out/bundle.js",
+            ".git/index.lock",
+            ".git/ORIG_HEAD",
+            "node_modules/pkg/index.js",
+        ]
+        .iter()
+        .map(|p| root.join(p))
+        .collect();
+
+        let (_stats, accepted) = index_changed_accepted(&index, "p", root, &changed);
+        let payload = files_activity_payload(&accepted);
+
+        assert!(payload.contains("src/main.rs"), "real edit kept: {payload}");
+        assert!(!payload.contains(".git"), "git internals excluded: {payload}");
         assert!(
-            !payload.contains("koden-gist"),
-            "own artifact excluded: {payload}"
+            !payload.contains("node_modules"),
+            "skip-dir excluded: {payload}"
         );
-        assert!(!payload.contains(".env"), "denylisted excluded: {payload}");
+        assert!(
+            !payload.contains("bundle.js"),
+            "gitignored excluded: {payload}"
+        );
     }
 
     /// Observed live: atomic writers leave `x.md.tmp.<pid>.<hash>` droppings that
@@ -2272,14 +2336,16 @@ mod tests {
     /// list the file, never its transient spelling.
     #[test]
     fn files_activity_payload_excludes_transient_writes() {
-        let root = std::path::Path::new("C:/proj");
-        let changed = vec![
-            std::path::PathBuf::from("C:/proj/docs/ADR-021.md"),
-            std::path::PathBuf::from("C:/proj/docs/ADR-021.md.tmp.41168.983e1e3a"),
-            std::path::PathBuf::from("C:/proj/notes/draft.md~"),
-            std::path::PathBuf::from("C:/proj/notes/.#lock.md"),
-        ];
-        let payload = files_activity_payload(root, &changed);
+        let accepted: Vec<String> = [
+            "docs/ADR-021.md",
+            "docs/ADR-021.md.tmp.41168.983e1e3a",
+            "notes/draft.md~",
+            "notes/.#lock.md",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let payload = files_activity_payload(&accepted);
         assert!(payload.contains("ADR-021.md"), "real file kept: {payload}");
         assert!(!payload.contains(".tmp."), "atomic temp excluded: {payload}");
         assert!(!payload.contains("~"), "editor backup excluded: {payload}");

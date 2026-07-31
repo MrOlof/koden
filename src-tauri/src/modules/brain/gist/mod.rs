@@ -275,6 +275,26 @@ fn build_gist_on_conn(
 /// touched, both capped. Deterministic given the row set; a turn on an
 /// already-covered day changes NOTHING here (the gist-key stability contract),
 /// while a new day / agent / file entry moves exactly one line.
+/// Priority for the ACTIVITY_MAX_FILES slots in a day line. A day is a SET, so
+/// the slots used to go to whatever sorted first lexicographically — and since
+/// dot-prefixed paths sort before every letter, `.github/*` and `.memory/*` took
+/// every slot and real source could never appear. Observed live: the day two
+/// releases shipped rendered as four CI-config paths plus two memory files.
+///
+/// Ordering is a PURE function of the path string, which is what keeps this
+/// cache-safe: the gist key folds the rendered lines, so any total order over
+/// the same set yields the same bytes. Ranking by recency or touch count would
+/// instead rotate the key on every debounce tick — hence deliberately not that.
+///
+/// Rank: real source before dotfile chrome, then shallower before deeper (a
+/// top-level file is usually the more telling one), then lexicographic to stay
+/// total and deterministic.
+fn activity_file_rank(rel: &str) -> (u8, usize, &str) {
+    let is_chrome = rel.starts_with('.') || rel.split('/').any(|c| c.starts_with('.'));
+    let depth = rel.matches('/').count();
+    (u8::from(is_chrome), depth, rel)
+}
+
 fn activity_day_lines(rows: &[store::ActivityRow]) -> Vec<String> {
     use std::collections::BTreeSet;
     // Rows arrive newest-first; BTreeMap orders days ascending — take the LAST
@@ -295,7 +315,14 @@ fn activity_day_lines(rows: &[store::ActivityRow]) -> Vec<String> {
                 let files: Vec<String> =
                     serde_json::from_str(&r.payload_redacted).unwrap_or_default();
                 for f in files {
-                    if !f.trim().is_empty() {
+                    // Read-side noise gate. Ingest now derives this payload from the
+                    // paths the indexer accepted, but rows written BEFORE that fix are
+                    // still in the DB carrying `.git/index.lock` and friends, and they
+                    // age out only after ACTIVITY_MAX_DAYS. Re-checking here heals them
+                    // immediately. Pure string test (no IO, no project root), so the
+                    // render stays a pure function of the row set and the gist key
+                    // contract holds.
+                    if !f.trim().is_empty() && !crate::modules::brain::freshness::walk::rel_under_skip_dir(&f) {
                         bucket.1.insert(f);
                     }
                 }
@@ -314,8 +341,15 @@ fn activity_day_lines(rows: &[store::ActivityRow]) -> Vec<String> {
                 );
             }
             if !files.is_empty() {
+                let mut ranked: Vec<&String> = files.iter().collect();
+                ranked.sort_by(|a, b| activity_file_rank(a).cmp(&activity_file_rank(b)));
                 parts.push(
-                    files.iter().take(ACTIVITY_MAX_FILES).cloned().collect::<Vec<_>>().join(", "),
+                    ranked
+                        .into_iter()
+                        .take(ACTIVITY_MAX_FILES)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 );
             }
             if parts.len() == 1 {
@@ -593,6 +627,56 @@ mod tests {
         assert!(e.chars().count() <= super::EXCERPT_CHARS + 1, "bounded: {}", e.len());
         assert!(e.ends_with('…'));
         assert_eq!(intent_excerpt(&long), e, "deterministic");
+    }
+
+    /// Two live defects, both observed in a real injected gist.
+    ///
+    /// 1. Rows written before the ingest fix still carry `.git/index.lock` etc.
+    ///    They must be filtered at render, or they poison the section until they
+    ///    age out of the ACTIVITY_MAX_DAYS window.
+    /// 2. The slots used to go to whatever sorted first lexicographically, and
+    ///    dot-prefixed paths beat every letter — so on the day two releases
+    ///    shipped, all six slots went to `.github/*` and `.memory/*` and no
+    ///    source file could appear. Real source must win the slots.
+    ///
+    /// Also re-asserts byte-identity across calls, proving the new ordering is
+    /// still a pure function of the row set (the gist-key stability contract).
+    #[test]
+    fn activity_day_lines_drop_skip_dirs_and_rank_source_over_dotfiles() {
+        let day = iso_date_to_epoch_ms("2026-07-31").unwrap();
+        let rows = vec![ActivityRow {
+            ts_ms: day + 100,
+            kind: "files".into(),
+            payload_redacted: serde_json::to_string(&[
+                ".git/index.lock",
+                ".git/ORIG_HEAD",
+                "node_modules/pkg/index.js",
+                ".github/workflows/ci.yml",
+                ".github/workflows/release.yml",
+                ".memory/release-checklist.md",
+                "src/modules/brain/worker.rs",
+                "src/main.rs",
+            ])
+            .unwrap(),
+        }];
+        let lines = activity_day_lines(&rows);
+        let line = lines.first().expect("one day line");
+
+        assert!(!line.contains(".git/"), "poisoned git rows healed: {line}");
+        assert!(
+            !line.contains("node_modules"),
+            "skip-dir healed: {line}"
+        );
+        // Real source outranks dotfile chrome, shallower first.
+        assert!(
+            line.contains("src/main.rs") && line.contains("src/modules/brain/worker.rs"),
+            "source wins slots: {line}"
+        );
+        assert!(
+            line.find("src/main.rs") < line.find(".github"),
+            "source ordered before chrome: {line}"
+        );
+        assert_eq!(activity_day_lines(&rows), lines, "render stays pure");
     }
 
     /// ADR-020: the day-line derivation is a COUNT-FREE set fold — turns only
