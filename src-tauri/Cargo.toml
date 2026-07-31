@@ -1,5 +1,13 @@
 [package]
 name = "koden"
+# The crate ships TWO binaries (the app, and the koden-brain MCP server). Without
+# this, "which one is the app" is ambiguous and the Tauri bundler packaged the
+# 1.5 MB MCP server instead of the 6 MB app -- a v0.11.0 release candidate went
+# out with a 1 MB installer wrapping the wrong executable. Only the AppImage
+# repack's sanity check ("koden binary missing from repacked AppImage") caught
+# it; the Windows leg shipped it silently. Both binaries are declared explicitly
+# below, and tauri.conf.json carries the matching mainBinaryName.
+default-run = "koden"
 version = "0.11.0"
 description = "Koden — an open-source AI-native terminal emulator"
 authors = ["Kosta Wadenfalk"]
@@ -14,6 +22,18 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "koden_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Declared explicitly rather than auto-discovered, so adding a future binary
+# cannot silently change which one the bundler treats as the app.
+[[bin]]
+name = "koden"
+path = "src/main.rs"
+
+# Read-only MCP server over the brain index. Not part of the app bundle; built
+# and installed separately (see src/bin/koden-brain.rs).
+[[bin]]
+name = "koden-brain"
+path = "src/bin/koden-brain.rs"
 
 [lints.clippy]
 # Fires where a paragraph follows a markdown list inside a doc comment. It only
