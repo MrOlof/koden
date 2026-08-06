@@ -29,6 +29,7 @@ use koden_lib::modules::brain::resume::{
 use koden_lib::modules::brain::ast::ImpactDirection;
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, list_notes_readonly, list_proposals_readonly,
+    outline_for_path_readonly,
     semantic_meta_readonly, SearchIndex, SqliteIndex,
 };
 use koden_lib::modules::brain::worker::{index_changed, index_dir};
@@ -861,6 +862,35 @@ fn incremental_relink_equals_full_rebuild_add_delete_rename() {
         full.project_node_keys(PID).unwrap(),
         "nodes diverge (add/delete/rename)"
     );
+}
+
+/// `brain_outline`: one file's definitions in SOURCE order (line-targeted Read
+/// is the point), scoped to exactly that file. Negative control: an unindexed
+/// path yields empty, not an error.
+#[test]
+fn outline_for_path_source_order_and_scope() {
+    let work = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(
+        root,
+        "src/m.ts",
+        b"export function zulu() {}\nexport function alpha() { zulu(); }\nexport class Mid {}",
+    );
+    write(root, "src/other.ts", b"export function omega() {}");
+    let db = store.path().join("i.sqlite");
+    let idx = SqliteIndex::open(&db).unwrap();
+    index_dir(&idx, PID, root);
+
+    let o = outline_for_path_readonly(&db, PID, "src/m.ts").unwrap();
+    let names: Vec<&str> = o.iter().map(|i| i.name.as_str()).collect();
+    // Source order (zulu line 1 before alpha line 2), NOT name order.
+    assert_eq!(names, vec!["zulu", "alpha", "Mid"], "{o:?}");
+    assert_eq!(o[0].start_line, 1, "{o:?}");
+    assert_eq!(o[1].start_line, 2, "{o:?}");
+    assert!(o.iter().all(|i| i.path == "src/m.ts"), "leaked other files: {o:?}");
+
+    assert!(outline_for_path_readonly(&db, PID, "src/nope.ts").unwrap().is_empty());
 }
 
 /// A getter and setter on the same line are both kept (start_col disambiguates

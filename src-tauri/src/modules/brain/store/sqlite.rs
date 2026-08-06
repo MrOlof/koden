@@ -2524,6 +2524,34 @@ pub fn symbols_for_path_readonly(
     symbols_for_path_with_conn(&open_readonly(db_path)?, project_id, path, limit)
 }
 
+/// Full definition outline of ONE file, in source order (`brain_outline`).
+/// The middle rung of the MCP progressive-disclosure ladder: search gives
+/// ranked paths, this gives (name, kind, start_line) per path, so an agent can
+/// Read just the relevant line range instead of the whole file.
+pub fn outline_for_path_readonly(
+    db_path: &Path,
+    project_id: &str,
+    path: &str,
+) -> rusqlite::Result<Vec<SymbolInfo>> {
+    let conn = open_readonly(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT path,name,kind,start_line FROM code_nodes WHERE project_id=?1 AND path=?2 ORDER BY start_line,start_col",
+    )?;
+    let it = stmt.query_map((project_id, path), |r| {
+        Ok(SymbolInfo {
+            path: r.get(0)?,
+            name: r.get(1)?,
+            kind: r.get(2)?,
+            start_line: r.get(3)?,
+        })
+    })?;
+    let mut v = Vec::new();
+    for x in it {
+        v.push(x?);
+    }
+    Ok(v)
+}
+
 /// File count for a project over a caller-supplied connection.
 pub fn file_count_with_conn(conn: &Connection, project_id: &str) -> rusqlite::Result<i64> {
     conn.query_row(

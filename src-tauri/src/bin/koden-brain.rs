@@ -31,8 +31,8 @@ use std::path::PathBuf;
 use koden_lib::modules::brain::ast::ImpactDirection;
 use koden_lib::modules::brain::registry::project_id_for_root;
 use koden_lib::modules::brain::store::{
-    code_impact_readonly, get_symbol_readonly, projects_readonly, recent_activity_readonly,
-    search_readonly,
+    code_impact_readonly, get_symbol_readonly, outline_for_path_readonly, projects_readonly,
+    recent_activity_readonly, search_readonly,
 };
 use serde_json::{json, Value};
 
@@ -55,7 +55,7 @@ fn tool_defs() -> Value {
     json!([
         {
             "name": "brain_search",
-            "description": "Search the Koden Brain index for files relevant to a query, ranked (BM25 + path/symbol fusion). Use this INSTEAD of grepping or listing a project tree: it is already indexed, so it is far cheaper and returns ranked paths directly. Omit `project` to search every indexed project at once - useful for 'have I solved this before'.",
+            "description": "Search the Koden Brain index for files relevant to a query, ranked (BM25 + path/symbol fusion). Use this INSTEAD of grepping or listing a project tree: it is already indexed, so it is far cheaper and returns ranked paths directly. Omit `project` to search every indexed project at once - useful for 'have I solved this before'. Progressive disclosure: follow up with brain_outline on a hit to see its definitions + line numbers, then Read only the relevant line range instead of the whole file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -77,6 +77,19 @@ fn tool_defs() -> Value {
                     "project": { "type": "string", "description": "Explicit project id; overrides `path`." }
                 },
                 "required": ["symbol"]
+            }
+        },
+        {
+            "name": "brain_outline",
+            "description": "Definition outline of ONE indexed file: every symbol (name, kind, start line) in source order. The middle step between brain_search and Read: pick a search hit, outline it, then Read only the line range you need instead of the whole file. `file` must be the root-relative path exactly as brain_search/brain_symbol return it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Root-relative file path as returned by brain_search (forward slashes)." },
+                    "path": { "type": "string", "description": "Any directory inside the project (defaults to cwd). Resolved to the project automatically - prefer this over `project`." },
+                    "project": { "type": "string", "description": "Explicit project id; overrides `path`." }
+                },
+                "required": ["file"]
             }
         },
         {
@@ -217,6 +230,31 @@ fn call_tool(name: &str, args: &Value) -> Value {
                         .join("\n"),
                 ),
                 Err(e) => error_result(format!("symbol lookup failed: {e}")),
+            }
+        }
+        "brain_outline" => {
+            // Stored paths are root-relative + forward-slash; forgive the two
+            // agent slips that cost a useless round-trip: backslashes and `./`.
+            let file = s("file").replace('\\', "/");
+            let file = file.strip_prefix("./").unwrap_or(&file);
+            if file.trim().is_empty() {
+                return error_result("file is required".into());
+            }
+            let project = match resolve_project(args, &db) {
+                Ok(p) => p,
+                Err(e) => return error_result(e),
+            };
+            match outline_for_path_readonly(&db, &project, file) {
+                Ok(v) if v.is_empty() => text_result(format!(
+                    "no indexed symbols in {file:?} - either the path is not root-relative (pass it exactly as brain_search returned it) or the file has no extractable definitions"
+                )),
+                Ok(v) => text_result(
+                    v.iter()
+                        .map(|i| format!("{}\t{}\t{}", i.start_line, i.kind, i.name))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                Err(e) => error_result(format!("outline failed: {e}")),
             }
         }
         "brain_impact" => {
