@@ -248,7 +248,7 @@ export function useAiLiveBridge(params: Params) {
         const { spaces, activeId } = useSpaces.getState();
         return snapshotSpaces(spaces, activeId, ref.current.tabs);
       },
-      createSpace: (name) => ref.current.createSpace(name),
+      createSpace: (name, root) => ref.current.createSpace(name, root),
       switchSpace: (id) => {
         const { spaces, setActive } = useSpaces.getState();
         if (!spaces.some((s) => s.id === id)) return false;

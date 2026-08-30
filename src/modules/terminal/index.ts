@@ -28,6 +28,7 @@ export {
   leafIdForPty,
   navigateFocusedBlocks,
   ptyIdForLeaf,
+  readLeafTail,
   respawnSession,
   scrollToCommandForLeaf,
   submitToLeaf,

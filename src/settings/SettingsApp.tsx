@@ -6,6 +6,7 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   AiScanIcon,
   Brain02Icon,
+  CommandLineIcon,
   InformationCircleIcon,
   KeyboardIcon,
   PaintBoardIcon,
@@ -19,6 +20,7 @@ import { type JSX, useEffect, useState } from "react";
 import { AboutSection } from "./sections/AboutSection";
 import { AgentsSection } from "./sections/AgentsSection";
 import { BrainSection } from "./sections/BrainSection";
+import { CliSection } from "./sections/CliSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
@@ -69,6 +71,12 @@ const TABS: {
     label: "Brain",
     icon: Brain02Icon,
     component: BrainSection,
+  },
+  {
+    id: "cli",
+    label: "CLI",
+    icon: CommandLineIcon,
+    component: CliSection,
   },
   {
     id: "about",

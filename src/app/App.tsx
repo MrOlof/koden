@@ -45,6 +45,7 @@ import {
   requestBrainView,
   resolveProjectForCwd,
 } from "@/modules/brain";
+import { CliBridge } from "@/modules/cli";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import {
   type EditorPaneHandle,
@@ -1266,7 +1267,7 @@ export default function App() {
   const aiOpenWorkspaceTab = useCallback(
     (
       kind: LayoutTabKind,
-      opts?: { title?: string; path?: string },
+      opts?: { title?: string; path?: string; cwd?: string },
     ): LayoutOpenTabResult => {
       const title = opts?.title?.trim() || undefined;
       // An id already present pre-call means a singleton was focused, not opened.
@@ -1275,7 +1276,7 @@ export default function App() {
         before.some((t) => t.id === id) ? "focused" : "opened";
       switch (kind) {
         case "terminal": {
-          const id = newTab(inheritedCwdForNewTab());
+          const id = newTab(opts?.cwd?.trim() || inheritedCwdForNewTab());
           if (title) updateTab(id, { customTitle: title });
           return { tabId: id, action: "opened", title: title ?? "shell" };
         }
@@ -2037,15 +2038,16 @@ export default function App() {
   const activeCwd = activeTerminalLeafCwd;
 
   const handleNewSpace = useCallback(
-    (name?: string) => {
+    (name?: string, root?: string) => {
       const { spaces, create, setActive } = useSpaces.getState();
+      const spaceRoot = root?.trim() || activeCwd;
       const meta = create({
         name: name?.trim() || `Space ${spaces.length + 1}`,
-        root: activeCwd ?? home ?? null,
+        root: spaceRoot ?? home ?? null,
         env: workspaceEnv,
       });
       setActiveSpaceForNewTabs(meta.id);
-      newTab(activeCwd ?? undefined);
+      newTab(spaceRoot ?? undefined);
       setActive(meta.id);
       return meta.id;
     },
@@ -2056,10 +2058,10 @@ export default function App() {
   // so root/env inheritance, the first tab, persistence, and the switch all
   // behave exactly like the header's New space button.
   const aiCreateSpace = useCallback(
-    (name: string): SpaceCreateResult => {
+    (name: string, root?: string): SpaceCreateResult => {
       const trimmed = name.trim();
       if (!trimmed) return { error: "space name is empty" };
-      const spaceId = handleNewSpace(trimmed);
+      const spaceId = handleNewSpace(trimmed, root);
       return { spaceId, name: trimmed, switched: true };
     },
     [handleNewSpace],
@@ -2554,6 +2556,7 @@ export default function App() {
           />
           <RetryBridge />
           <UsageBridge />
+          <CliBridge onActivate={onActivateAgent} />
           <OrchestrationActivityBridge />
           <OrchestrationAttentionBridge />
           <AgentBusBridge busPath={busPath} />

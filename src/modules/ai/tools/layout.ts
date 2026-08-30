@@ -1,13 +1,21 @@
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
 import { tool } from "ai";
 import { z } from "zod";
-import type {
-  LayoutSnapshot,
-  LayoutSplitKind,
-  LayoutSplitSide,
-  ToolContext,
-} from "./context";
+import type { LayoutSnapshot, LayoutSplitKind, ToolContext } from "./context";
 import { resolvePath } from "./context";
+import {
+  normalizeSplitKind,
+  sideForDirection,
+  SPLIT_KINDS,
+} from "./layoutShared";
+
+// Kind/direction normalization lives in layoutShared.ts (no ai/zod imports)
+// so the koden CLI bridge shares it; re-exported to keep this surface stable.
+export {
+  normalizeSplitKind,
+  SPLIT_KINDS,
+  sideForDirection,
+} from "./layoutShared";
 
 // Layout tools: the Librarian builds workspace layouts on request — open tabs,
 // split the active pane, re-focus, read the tree. Deliberately NO approval
@@ -16,29 +24,6 @@ import { resolvePath } from "./context";
 // For the same reason there are NO close/delete tools in v1 — create/arrange
 // only (ADR-017 addendum). Sequential split calls compose layouts because
 // focus follows each new pane.
-
-/** Pane kinds that can live in a split (recon truth: PaneTreeView's
- * SplitPaneType / PaneNode leaf `content`). Everything else is tab-only. */
-export const SPLIT_KINDS = ["terminal", "note", "tasks"] as const;
-
-/** Model-facing 'up'/'down' → the pane model's top/bottom SplitSide. */
-export function sideForDirection(
-  direction: "left" | "right" | "up" | "down",
-): LayoutSplitSide {
-  if (direction === "up") return "top";
-  if (direction === "down") return "bottom";
-  return direction;
-}
-
-/** Case-insensitive; accepts the plural alias 'notes'. Unknown kinds → null —
- * the caller must error listing SPLIT_KINDS, never silently substitute. */
-export function normalizeSplitKind(kind: string): LayoutSplitKind | null {
-  const k = kind.trim().toLowerCase();
-  if (k === "notes") return "note";
-  return (SPLIT_KINDS as readonly string[]).includes(k)
-    ? (k as LayoutSplitKind)
-    : null;
-}
 
 export type SerializedPane =
   | {

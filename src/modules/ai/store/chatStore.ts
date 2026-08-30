@@ -57,7 +57,7 @@ export type Live = {
   // Workspace layout lane (create/arrange only; no close/delete, ADR-017).
   openWorkspaceTab: (
     kind: LayoutTabKind,
-    opts?: { title?: string; path?: string },
+    opts?: { title?: string; path?: string; cwd?: string },
   ) => LayoutOpenTabResult;
   splitWorkspacePane: (
     kind: LayoutSplitKind,
@@ -68,7 +68,7 @@ export type Live = {
   getWorkspaceLayout: () => LayoutSnapshot;
   // Spaces lane (list/create/switch only; no delete/rename, ADR-017 addendum).
   listSpaces: () => SpaceInfo[];
-  createSpace: (name: string) => SpaceCreateResult;
+  createSpace: (name: string, root?: string) => SpaceCreateResult;
   switchSpace: (id: string) => boolean;
   // Terminal targeting lane (list/read/type free; submit approval-or-hands-free,
   // ADR-017 addendum). Sends are leaf-addressed and never move focus.

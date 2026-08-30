@@ -146,6 +146,20 @@ export type Preferences = {
   shortcuts: Record<ShortcutId, KeyBinding[]>;
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
+  /**
+   * `koden` CLI (modules/cli): the command a coding agent inside a Koden
+   * terminal calls. Master switch plus a surface x access matrix; each gate
+   * defaults ON and a denied call answers with the Settings > CLI hint.
+   */
+  cliEnabled: boolean;
+  /** terminal list / read. */
+  cliTerminalRead: boolean;
+  /** terminal type / press / run. */
+  cliTerminalInput: boolean;
+  /** tab open / pane split / space new. */
+  cliPanelControl: boolean;
+  /** notify. */
+  cliNotify: boolean;
 };
 
 const STORE_PATH = "koden-settings.json";
@@ -210,6 +224,11 @@ const KEY_USAGE_GUARD_HARD_STOP = "usageGuardHardStop";
 const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
+const KEY_CLI_ENABLED = "cliEnabled";
+const KEY_CLI_TERMINAL_READ = "cliTerminalRead";
+const KEY_CLI_TERMINAL_INPUT = "cliTerminalInput";
+const KEY_CLI_PANEL_CONTROL = "cliPanelControl";
+const KEY_CLI_NOTIFY = "cliNotify";
 
 export const TERMINAL_FONT_SIZE_DEFAULT = 15;
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -293,6 +312,11 @@ export const DEFAULT_PREFERENCES: Preferences = {
   shortcuts: {} as Record<ShortcutId, KeyBinding[]>,
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
+  cliEnabled: true,
+  cliTerminalRead: true,
+  cliTerminalInput: true,
+  cliPanelControl: true,
+  cliNotify: true,
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
@@ -491,6 +515,17 @@ export async function loadPreferences(): Promise<Preferences> {
       get<number>(KEY_EDITOR_AUTO_SAVE_DELAY) ??
         DEFAULT_PREFERENCES.editorAutoSaveDelay,
     ),
+    cliEnabled: get<boolean>(KEY_CLI_ENABLED) ?? DEFAULT_PREFERENCES.cliEnabled,
+    cliTerminalRead:
+      get<boolean>(KEY_CLI_TERMINAL_READ) ??
+      DEFAULT_PREFERENCES.cliTerminalRead,
+    cliTerminalInput:
+      get<boolean>(KEY_CLI_TERMINAL_INPUT) ??
+      DEFAULT_PREFERENCES.cliTerminalInput,
+    cliPanelControl:
+      get<boolean>(KEY_CLI_PANEL_CONTROL) ??
+      DEFAULT_PREFERENCES.cliPanelControl,
+    cliNotify: get<boolean>(KEY_CLI_NOTIFY) ?? DEFAULT_PREFERENCES.cliNotify,
   };
 }
 
@@ -820,6 +855,26 @@ export async function setUsageGuardPausePct(value: number): Promise<void> {
 
 export async function setUsageGuardHardStop(value: boolean): Promise<void> {
   await writePref(KEY_USAGE_GUARD_HARD_STOP, value);
+}
+
+export async function setCliEnabled(value: boolean): Promise<void> {
+  await writePref(KEY_CLI_ENABLED, value);
+}
+
+export async function setCliTerminalRead(value: boolean): Promise<void> {
+  await writePref(KEY_CLI_TERMINAL_READ, value);
+}
+
+export async function setCliTerminalInput(value: boolean): Promise<void> {
+  await writePref(KEY_CLI_TERMINAL_INPUT, value);
+}
+
+export async function setCliPanelControl(value: boolean): Promise<void> {
+  await writePref(KEY_CLI_PANEL_CONTROL, value);
+}
+
+export async function setCliNotify(value: boolean): Promise<void> {
+  await writePref(KEY_CLI_NOTIFY, value);
 }
 
 export async function setShortcuts(
