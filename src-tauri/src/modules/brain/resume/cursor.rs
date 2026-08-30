@@ -48,7 +48,11 @@ pub fn recover_all(resume_dir: &Path) -> Vec<RecoveredPane> {
 }
 
 /// Fold one journal's text into its tail state (or `None` if empty / cleanly
-/// exited / all-garbage).
+/// exited / all-garbage). The Claude session id is folded separately from the
+/// tail record: the LAST non-None id since the most recent `started` wins, so a
+/// lifecycle record written without it (a torn order, an older writer) never
+/// hides a captured id, and an id from an earlier session under the same key
+/// (same cwd + agent) is never resurrected for a new one.
 fn fold_journal(path: &Path, content: &str) -> Option<RecoveredPane> {
     let key = path.file_stem()?.to_str()?.to_string();
     // Drop the trailing partial line: split on '\n' and take all but the last
@@ -56,11 +60,18 @@ fn fold_journal(path: &Path, content: &str) -> Option<RecoveredPane> {
     let parts: Vec<&str> = content.split('\n').collect();
     let complete = parts.len().saturating_sub(1);
     let mut last: Option<ResumeRecord> = None;
+    let mut session_id: Option<String> = None;
     for line in &parts[..complete] {
         if line.is_empty() {
             continue;
         }
         if let Ok(rec) = serde_json::from_str::<ResumeRecord>(line) {
+            if rec.kind == "started" {
+                session_id = None;
+            }
+            if rec.claude_session_id.is_some() {
+                session_id = rec.claude_session_id.clone();
+            }
             last = Some(rec); // guarded parse — skip junk, keep the latest good record
         }
     }
@@ -74,7 +85,7 @@ fn fold_journal(path: &Path, content: &str) -> Option<RecoveredPane> {
         agent: rec.agent,
         cwd: rec.cwd,
         project: rec.project,
-        claude_session_id: rec.claude_session_id,
+        claude_session_id: session_id,
         last_ts: rec.ts,
     })
 }
@@ -179,6 +190,61 @@ mod tests {
         let recovered = recover_all(dir.path());
         assert_eq!(recovered.len(), 1, "garbage skipped, good record kept");
         assert_eq!(recovered[0].last_kind, "attention");
+    }
+
+    fn rec_id(kind: &str, id: Option<&str>) -> ResumeRecord {
+        ResumeRecord { claude_session_id: id.map(String::from), ..rec(kind) }
+    }
+
+    fn only_pane(dir: &Path) -> RecoveredPane {
+        let mut recovered = recover_all(dir);
+        assert_eq!(recovered.len(), 1);
+        recovered.remove(0)
+    }
+
+    #[test]
+    fn folds_the_last_captured_session_id_across_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SessionKey::derive("/work/a", "claude", None);
+        // started(None) -> working(Some) -> finished(Some): the id survives.
+        for r in [
+            rec_id("started", None),
+            rec_id("working", Some("sess-aaaa-1111")),
+            rec_id("finished", Some("sess-aaaa-1111")),
+        ] {
+            record_event(dir.path(), &key, &r).unwrap();
+        }
+        let pane = only_pane(dir.path());
+        assert_eq!(pane.last_kind, "finished");
+        assert_eq!(pane.claude_session_id.as_deref(), Some("sess-aaaa-1111"));
+
+        // A later record WITHOUT the id (torn order / older writer) never hides it,
+        // and a newer id (a "/clear" mid-pane) replaces the older one.
+        record_event(dir.path(), &key, &rec_id("attention", None)).unwrap();
+        assert_eq!(only_pane(dir.path()).claude_session_id.as_deref(), Some("sess-aaaa-1111"));
+        record_event(dir.path(), &key, &rec_id("working", Some("sess-bbbb-2222"))).unwrap();
+        record_event(dir.path(), &key, &rec_id("working", None)).unwrap();
+        assert_eq!(only_pane(dir.path()).claude_session_id.as_deref(), Some("sess-bbbb-2222"));
+    }
+
+    #[test]
+    fn never_invents_or_resurrects_a_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SessionKey::derive("/work/a", "claude", None);
+        // No record ever carried an id: none is invented.
+        record_event(dir.path(), &key, &rec_id("started", None)).unwrap();
+        record_event(dir.path(), &key, &rec_id("working", None)).unwrap();
+        assert_eq!(only_pane(dir.path()).claude_session_id, None);
+
+        // A previous session under the SAME key captured an id and exited; the
+        // next session's `started` resets it until its own first prompt lands.
+        record_event(dir.path(), &key, &rec_id("working", Some("sess-old-0000"))).unwrap();
+        record_event(dir.path(), &key, &rec_id("exited", Some("sess-old-0000"))).unwrap();
+        record_event(dir.path(), &key, &rec_id("started", None)).unwrap();
+        record_event(dir.path(), &key, &rec_id("working", None)).unwrap();
+        let pane = only_pane(dir.path());
+        assert_eq!(pane.last_kind, "working");
+        assert_eq!(pane.claude_session_id, None, "stale id must not be resurrected");
     }
 
     #[test]

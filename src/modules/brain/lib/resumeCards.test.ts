@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { RecoveredPane } from "./bindings";
 import {
   buildResumeCards,
+  cardMeta,
   frontendCwd,
   matchRecoveredPanes,
   normalizeCwd,
   recoveredLauncherSections,
   relativeTime,
+  resumeActionLabel,
   resumeCommandFor,
   shortenCwd,
 } from "./resumeCards";
@@ -78,6 +80,25 @@ describe("buildResumeCards", () => {
       resumable: true,
       lastActivity: "3 h ago",
     });
+  });
+
+  it("renders Resume plus the short id once a session id was captured, Reopen otherwise", () => {
+    const [withId] = buildResumeCards([pane()], { now: T0 + 5 * 60_000 });
+    expect(resumeActionLabel(withId)).toBe("Resume");
+    expect(cardMeta(withId)).toBe("Claude Code · 0198d2fc · 5 min ago");
+    expect(cardMeta(withId)).not.toContain("no session id");
+
+    const [noId] = buildResumeCards([pane({ claude_session_id: null })], {
+      now: T0 + 5 * 60_000,
+    });
+    expect(resumeActionLabel(noId)).toBe("Reopen");
+    expect(cardMeta(noId)).toBe("Claude Code · no session id · 5 min ago");
+
+    // An id on a non-claude agent is never a Tier-2 resume.
+    const [codex] = buildResumeCards([pane({ agent: "codex" })], {
+      now: T0 + 5 * 60_000,
+    });
+    expect(resumeActionLabel(codex)).toBe("Reopen");
   });
 
   it("shortens deep paths and formats relative time", () => {

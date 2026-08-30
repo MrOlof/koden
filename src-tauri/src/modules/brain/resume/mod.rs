@@ -16,7 +16,7 @@ pub mod tier2;
 pub use cursor::{gc_resume_dir, recover_all, RecoveredPane};
 pub use journal::{record_event, ResumeRecord};
 pub use sessionkey::SessionKey;
-pub use tier2::{resume_command, ResumePlan};
+pub use tier2::{resume_command, valid_session_id, ResumePlan};
 
 /// A journal older than this many days (by mtime) is GC'd on boot (§4.4).
 pub const RESUME_TTL_DAYS: i64 = 7;

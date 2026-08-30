@@ -16,8 +16,10 @@ export type AgentBusState = {
 };
 
 export type AgentBusEvents = {
-  /** UserPromptSubmit bus hook: one entry per captured user turn. */
-  turns: { pty: number; prompt: string }[];
+  /** UserPromptSubmit bus hook: one entry per captured user turn. `sessionId`
+   *  is the payload's Claude `session_id` when it passes the allowlist (the
+   *  Tier-2 resume capture), else null. */
+  turns: { pty: number; prompt: string; sessionId: string | null }[];
   statuses: { pty: number; state: string }[];
   stops: { parent: number }[];
   starts: SubagentStart[];
@@ -30,9 +32,20 @@ type BusLine = {
   id?: number | string;
   state?: string;
   parent?: number | string;
-  // user-turn: the raw UserPromptSubmit hook payload (carries `prompt`).
-  data?: { prompt?: string };
+  // user-turn: the raw UserPromptSubmit hook payload (carries `prompt` and
+  // Claude Code's `session_id`).
+  data?: { prompt?: string; session_id?: unknown };
 };
+
+// Mirrors the Rust allowlist (`resume::valid_session_id`): the bus is
+// attacker-influencable content and the id ends up on a relaunch command line,
+// so anything outside it is dropped, never sanitized. Claude ids are UUIDs or
+// 25-char alphanumerics.
+const SESSION_ID_RE = /^[A-Za-z0-9._-]{8,128}$/;
+
+function sessionIdOf(v: unknown): string | null {
+  return typeof v === "string" && SESSION_ID_RE.test(v) ? v : null;
+}
 
 function asPty(v: number | string | undefined): number | null {
   if (v == null) return null;
@@ -85,7 +98,13 @@ export function readAgentBus(
       const pty = asPty(evt.id);
       const prompt =
         typeof evt.data?.prompt === "string" ? evt.data.prompt.trim() : "";
-      if (pty !== null && prompt) events.turns.push({ pty, prompt });
+      if (pty !== null && prompt) {
+        events.turns.push({
+          pty,
+          prompt,
+          sessionId: sessionIdOf(evt.data?.session_id),
+        });
+      }
     } else if (evt.cmd === "agent-status") {
       const pty = asPty(evt.id);
       if (pty !== null && evt.state)

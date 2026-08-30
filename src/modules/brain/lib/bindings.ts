@@ -329,9 +329,15 @@ export function brainDismissRecovered(paneKey: string): Promise<boolean> {
 
 /** Record one submitted user prompt against its pty (ADR-020 session activity).
  *  Fire-and-forget from AgentBusBridge; the worker filters, truncates, REDACTS
- *  at ingest and resolves pty → project on the single writer thread. */
-export function brainRecordTurn(ptyId: number, prompt: string): Promise<void> {
-  return invoke<void>("brain_record_turn", { ptyId, prompt });
+ *  at ingest and resolves pty → project on the single writer thread.
+ *  `sessionId` is the hook payload's Claude session id (Tier-2 resume capture);
+ *  Rust re-validates it against the same allowlist and drops a mismatch. */
+export function brainRecordTurn(
+  ptyId: number,
+  prompt: string,
+  sessionId: string | null = null,
+): Promise<void> {
+  return invoke<void>("brain_record_turn", { ptyId, prompt, sessionId });
 }
 
 /** One coalesced Librarian activity event (ADR-020) — the `koden:brain-activity`

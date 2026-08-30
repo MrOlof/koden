@@ -31,7 +31,8 @@ const TAB_STATUS: Record<string, "working" | "waiting" | "done"> = {
  * tagged with the writer's pty id (KODEN_SESSION, injected per pane in
  * session.rs):
  *  - `{"cmd":"user-turn","id":"<pty>","data":<hook json>}` — the captured
- *    prompt of every submitted turn (Claude + Codex UserPromptSubmit)
+ *    prompt of every submitted turn (Claude + Codex UserPromptSubmit); the
+ *    payload's `session_id` is what makes a crash-resume card Tier-2
  *  - `{"parent":"<pty>","task":<PreToolUse(Task) hook json>}` — a Task
  *    subagent started (recovered tolerantly; the hook write is non-atomic)
  *  - `{"cmd":"subagent-stop","parent":"<pty>"}` — a subagent finished
@@ -76,12 +77,13 @@ export function AgentBusBridge({ busPath }: { busPath: string | null }) {
       // User turns: route to the pane's turn store so the Inputs list shows
       // every turn (the reliable path; scanTurns scraping is the fallback) AND
       // to the Brain worker (ADR-020 session activity — filtered, truncated and
-      // REDACTED at the Rust ingest seam before storage). Fire-and-forget: a
+      // REDACTED at the Rust ingest seam before storage; the Claude session id
+      // rides along for the Tier-2 resume journal). Fire-and-forget: a
       // not-yet-started worker just drops the turn.
       for (const t of events.turns) {
         const leafId = leafIdForPty(t.pty);
         if (leafId !== null) addTurnForLeaf(leafId, t.prompt);
-        brainRecordTurn(t.pty, t.prompt).catch(() => {});
+        brainRecordTurn(t.pty, t.prompt, t.sessionId).catch(() => {});
       }
 
       const orch = useOrchestrationStore.getState();
