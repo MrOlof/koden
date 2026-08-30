@@ -47,10 +47,31 @@ Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.s
   `authorize_spawn_cwd_blocks_symlink_escape`, `pnpm build` green with size
   budgets. Ceiling: `koden` is undefined inside WSL shells (the Windows pipe
   is unreachable there and `build_wsl` does not plant the env).
-- Nothing was runtime-verified in the GUI by the agents (a live instance was
-  running; dev boots rewrite the global hooks). First manual pass: launcher on
-  boot, connect to a host, New worktree Space, kill and relaunch with an agent
-  running to see a resume card and restored scrollback, `koden ping` from a tab.
+- Runtime-verified 2026-08-30 evening on HQ with an isolated test build
+  (`--config` identifier `app.mrolof.koden.test`, driven over WebView2 CDP on
+  port 9223, screenshots in the session scratchpad): launcher on boot after the
+  wizard with every section populated (ssh hosts read from `~/.ssh/config`);
+  Connect to `docker` gave a real bash on docker-server, the rc bundle landed in
+  `~/.koden/shell` with its hash marker, and `cd /srv` moved the status-bar
+  breadcrumb (OSC 7 through ssh); New worktree Space created
+  `.koden/worktrees/parity-test` on `feat/parity-test` with `.koden/.gitignore`
+  and a junctioned `node_modules`; `koden ping` / `terminal list` / `terminal
+  read` answered from the instance; Claude Code ran in the worktree tab with
+  working/attention/done tracked; after `taskkill /F` + relaunch the resume
+  card appeared and the pre-crash buffer came back behind a `[restored]`
+  separator (proved by `koden terminal read`, 56 lines).
+- Gaps found in that pass: (1) the resume journal writer hardcodes
+  `claude_session_id: None`, so Resume is always Tier-1 "Reopen"; the
+  `user-turn` bus line already carries the hook payload with `session_id`, so
+  capture is a bridge + `LiveSession` change. (2) Picking a local/WSL launcher
+  item while an ssh Space is active switches that Space's env in place (the
+  "docker" Space became local); env changes should switch to or create a Space
+  of that env, not mutate the current one. (3) Cosmetic: the fresh shell scrolls
+  the viewport to its prompt, so restored lines sit above the fold.
+- CI: the first push failed on Linux clippy dead-code (Windows-only pipe
+  constants) and the 540 kB startup budget (+3.37 kB); fixed by cfg-gating and
+  lazy-loading the worktree dialogs + LauncherPane (536.9 kB). A Windows-path
+  resolver test then failed on the Linux leg; cfg-gated.
 
 ## Ceilings named in the packages
 
