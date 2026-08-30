@@ -17,6 +17,8 @@ import {
   submitToLeaf,
   whenSessionReady,
 } from "@/modules/terminal/lib/useTerminalSession";
+import { useWorkspaceEnvStore } from "@/modules/workspace";
+import { spaceEnv } from "./envSwitch";
 import {
   loadScrollbackSnapshots,
   type RestorableLeaf,
@@ -190,15 +192,20 @@ export function useSpacesBoot({
           );
         }
 
-        const active =
-          activeId && spaces.some((s) => s.id === activeId)
-            ? activeId
-            : spaces[0].id;
+        const activeMeta =
+          spaces.find((s) => s.id === activeId) ?? spaces[0];
+        const active = activeMeta.id;
+        const activeEnv = spaceEnv(activeMeta);
         setActiveSpaceForNewTabs(active);
+        // Every PTY reads the env at spawn, so the restored Space's env must
+        // be live before replaceTabs warms its first tab.
+        useWorkspaceEnvStore.getState().setEnv(activeEnv);
 
         // Active space must never be empty, else its tab list shows nothing.
         if (!restored.some((t) => t.spaceId === active)) {
-          restored.push(freshTerminalTab(active, launchCwd ?? home, allocId));
+          const cwd =
+            activeEnv.kind === "local" ? (launchCwd ?? home) : activeMeta.root;
+          restored.push(freshTerminalTab(active, cwd, allocId));
         }
 
         await Promise.allSettled(

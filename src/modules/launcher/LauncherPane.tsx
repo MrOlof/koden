@@ -1,7 +1,7 @@
 import { Kbd } from "@/components/ui/kbd";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Wordmark } from "@/components/Wordmark";
-import { IS_MAC, IS_WINDOWS } from "@/lib/platform";
+import { IS_WINDOWS, LOCAL_ENV_LABEL } from "@/lib/platform";
 import { useShortcutLabel } from "@/modules/shortcuts";
 import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
@@ -48,8 +48,6 @@ const ICONS: LauncherIcons = {
   folder: FolderOpenIcon,
   setup: RocketIcon,
 };
-
-const LOCAL_LABEL = IS_WINDOWS ? "Windows" : IS_MAC ? "macOS" : "Linux";
 
 /**
  * The "What do you want to do?" page: continue a Space, open a terminal or a
@@ -114,7 +112,7 @@ export function LauncherPane({
           activeSpaceId,
           distros,
           isWindows: IS_WINDOWS,
-          localLabel: LOCAL_LABEL,
+          localLabel: LOCAL_ENV_LABEL,
           localCwd,
           newTabShortcut,
           icons: ICONS,

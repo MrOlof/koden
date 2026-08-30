@@ -345,7 +345,6 @@ export default function App() {
     addTasksPane,
     closeActivePane,
     closePaneByLeaf,
-    resetWorkspace,
   } = useTabs(
     getDefaultFolder() || getLaunchDir()
       ? { cwd: getDefaultFolder() || getLaunchDir() }
@@ -382,49 +381,39 @@ export default function App() {
   // split/unsplit re-mount components but the leaf is still live.
   const liveLeavesRef = useRef<Set<number>>(new Set());
 
-  const clearWorkspaceState = useCallback(() => {
-    for (const id of liveLeavesRef.current) disposeSession(id);
-    searchAddons.current.clear();
-    terminalRefs.current.clear();
-    editorRefs.current.clear();
-    previewRefs.current.clear();
-    setActiveSearchAddon(null);
-    setActiveEditorHandle(null);
-  }, []);
-
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   const setWorkspaceEnv = useWorkspaceEnvStore((s) => s.setEnv);
-  const { home, launchCwd, launchCwdResolved, switchWorkspace } =
+  const { home, localHome, launchCwd, launchCwdResolved, switchToEnv } =
     useWorkspaceSwitcher({
       tabsRef,
-      workspaceEnv,
       setWorkspaceEnv,
-      resetWorkspace,
-      clearWorkspaceState,
+      setActiveSpaceForNewTabs,
+      newTab,
     });
 
-  // Absolute path of the shared hook bus, home-rooted so it's stable
-  // regardless of where `cm` cd's a session. EVERY Claude/Codex hook writes
-  // here (agent.rs bus_path_str / agent_codex.rs): user turns, subagent
+  // Absolute path of the shared hook bus, rooted in the LOCAL home (the hooks
+  // run on this machine) so it's stable regardless of where `cm` cd's a
+  // session or which env the active Space runs in. EVERY Claude/Codex hook
+  // writes here (agent.rs bus_path_str / agent_codex.rs): user turns, subagent
   // lifecycle, Director commands. Tailed always by AgentBusBridge (per-pane
   // turns/subagents) and, while a Director runs, by DirectorBusBridge.
-  const busPath = home ? `${home}/.koden/director-bus.jsonl` : null;
+  const busPath = localHome ? `${localHome}/.koden/director-bus.jsonl` : null;
 
   // Ensures ~/.koden exists and is authorized for Koden fs writes. Order
   // matters: authorize home first (it exists and canonicalizes), then create
   // the dir under it, then authorize the dir itself. Returns the dir or null.
   const ensureKodenDir = useCallback(async (): Promise<string | null> => {
-    if (!home) return null;
-    const dir = `${home}/.koden`;
+    if (!localHome) return null;
+    const dir = `${localHome}/.koden`;
     try {
-      await native.workspaceAuthorize(home);
+      await native.workspaceAuthorize(localHome);
       await native.createDir(dir).catch(() => {});
       await native.workspaceAuthorize(dir).catch(() => {});
       return dir;
     } catch {
       return null;
     }
-  }, [home]);
+  }, [localHome]);
 
   // Install the current Koden Claude Code hooks (+ create ~/.koden) on startup so
   // EVERY claude session gets status + per-turn capture — including one you start
@@ -2191,12 +2180,6 @@ export default function App() {
   const [launcherFocus, setLauncherFocus] =
     useState<LauncherFocusTarget | null>(null);
   const clearLauncherFocus = useCallback(() => setLauncherFocus(null), []);
-  // Set after a remote connect; the effect below decides whether the new
-  // Space still needs its first terminal.
-  const [remoteTabPending, setRemoteTabPending] = useState<{
-    spaceId: string;
-    cwd?: string;
-  } | null>(null);
 
   const showLauncherRemote = useCallback(() => {
     setLauncherFocus("remote");
@@ -2215,17 +2198,19 @@ export default function App() {
     [closeLauncherTab],
   );
 
+  // Another env means another Space; this Space keeps its env and its tabs.
   const handleLauncherNewTerminal = useCallback(
     (env: WorkspaceEnv) => {
       if (!sameEnv(env, workspaceEnv)) {
-        // Switching env resets the whole workspace, launcher included.
-        void switchWorkspace(env);
+        void switchToEnv(env).then((switched) => {
+          if (switched) closeLauncherTab();
+        });
         return;
       }
       newTab(launcherCwd ?? undefined);
       closeLauncherTab();
     },
-    [workspaceEnv, switchWorkspace, newTab, launcherCwd, closeLauncherTab],
+    [workspaceEnv, switchToEnv, newTab, launcherCwd, closeLauncherTab],
   );
 
   const handleOpenFolderAsSpace = useCallback(async () => {
@@ -2265,35 +2250,20 @@ export default function App() {
     void handleOpenFolderAsSpace();
   }, [handleOpenFolderAsSpace]);
 
+  // Reuses the Space for that host (and path) when one exists; a new host
+  // gets its Space only once the remote home resolved.
   const handleConnectRemote = useCallback(
     async (env: SshEnv) => {
-      const store = useSpaces.getState();
-      const prevSpaceId = store.activeId ?? DEFAULT_SPACE_ID;
-      const meta = store.create({
-        name: env.host,
-        root: env.path || null,
-        env,
-      });
-      setActiveSpaceForNewTabs(meta.id);
-      if (!sameEnv(env, useWorkspaceEnvStore.getState().env)) {
-        const connecting = toast.loading(`Connecting to ${env.host}…`);
-        try {
-          await switchWorkspace(env);
-        } finally {
-          toast.dismiss(connecting);
-        }
-        if (!sameEnv(env, useWorkspaceEnvStore.getState().env)) {
-          // The switch was refused (unsaved editor, unreachable host): take
-          // the Space back and stay put.
-          useSpaces.getState().remove(meta.id);
-          setActiveSpaceForNewTabs(prevSpaceId);
-          return;
-        }
+      const connecting = toast.loading(`Connecting to ${env.host}…`);
+      let switched = false;
+      try {
+        switched = await switchToEnv(env);
+      } finally {
+        toast.dismiss(connecting);
       }
-      useSpaces.getState().setActive(meta.id);
-      setRemoteTabPending({ spaceId: meta.id, cwd: env.path || undefined });
+      if (switched) closeLauncherTab();
     },
-    [setActiveSpaceForNewTabs, switchWorkspace],
+    [switchToEnv, closeLauncherTab],
   );
 
   // Boot: land on the launcher once spaces and prefs are in (default on). The
@@ -2314,22 +2284,9 @@ export default function App() {
   // A Space with no tabs shows the launcher; it is the way back to content.
   useEffect(() => {
     if (!spacesHydrated) return;
-    if (remoteTabPending?.spaceId === activeSpaceKey) return;
     if (tabs.some((t) => t.spaceId === activeSpaceKey)) return;
     openLauncherTab(activeSpaceKey);
-  }, [tabs, activeSpaceKey, spacesHydrated, remoteTabPending, openLauncherTab]);
-
-  // switchWorkspace resets the workspace to one fresh terminal when the env
-  // actually changes; only add one when the new Space came out of it empty.
-  useEffect(() => {
-    if (!remoteTabPending) return;
-    setRemoteTabPending(null);
-    const { spaceId, cwd } = remoteTabPending;
-    if (tabs.some((t) => t.spaceId === spaceId && t.kind === "terminal"))
-      return;
-    setActiveSpaceForNewTabs(spaceId);
-    newTab(cwd);
-  }, [remoteTabPending, tabs, newTab, setActiveSpaceForNewTabs]);
+  }, [tabs, activeSpaceKey, spacesHydrated, openLauncherTab]);
 
   const spaceSwitcher = (
     <SpaceSwitcher
@@ -2793,7 +2750,7 @@ export default function App() {
               filePath={activeFilePath}
               home={home}
               onCd={sendCd}
-              onWorkspaceChange={switchWorkspace}
+              onWorkspaceChange={switchToEnv}
               onOpenMini={openMini}
               hasComposer={hasComposer}
               privateActive={
