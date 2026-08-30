@@ -11,14 +11,16 @@ export function Wordmark({ className }: Props) {
   return (
     <span
       className={cn(
-        "inline-flex select-none items-baseline font-mono lowercase tracking-tight text-foreground",
+        "relative inline-flex select-none items-baseline font-mono lowercase tracking-tight text-foreground",
         className,
       )}
     >
       koden
+      {/* Out of flow so the mark's box is the word alone: anything centered on
+          it (the launcher icon) lines up with "koden", not "koden" + cursor. */}
       <span
         aria-hidden
-        className="koden-wordmark-cursor -ml-px text-primary"
+        className="koden-wordmark-cursor absolute left-full top-0 -ml-px text-primary"
       >
         {"▊"}
       </span>
