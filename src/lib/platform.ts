@@ -17,6 +17,9 @@ export const IS_WINDOWS = PLATFORM === "windows";
  * overlay title bar. */
 export const USE_CUSTOM_WINDOW_CONTROLS = !IS_MAC && PLATFORM !== "";
 
+/** How the local workspace env is named next to WSL distros and ssh hosts. */
+export const LOCAL_ENV_LABEL = IS_WINDOWS ? "Windows" : IS_MAC ? "macOS" : "Linux";
+
 export const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
 /** KeyBinding property name for the platform's primary modifier. */
 export const MOD_PROP: "meta" | "ctrl" = IS_MAC ? "meta" : "ctrl";
