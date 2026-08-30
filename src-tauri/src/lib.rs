@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    agent, agent_codex, brain, fs, git, history, net, pty, secrets, shell, ssh, usage, workspace,
+    agent, agent_codex, brain, cli, fs, git, history, net, pty, secrets, shell, ssh, usage, workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -174,6 +174,9 @@ pub fn run() {
             // lexical index, and serves gist/search to agents. Fail-open; never
             // blocks first paint (spawn returns immediately). ADR-006.
             brain::worker::spawn_brain_worker(app.handle().clone(), brain_seed_dir);
+            // `koden` CLI socket (modules/cli). Fail-open: PTYs only get the
+            // endpoint + token env when the listener actually came up.
+            cli::start(app.handle());
             Ok(())
         })
         .manage(pty::PtyState::default())
@@ -311,6 +314,7 @@ pub fn run() {
             history::history_commands,
             history::history_record,
             history::history_list,
+            cli::cli_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

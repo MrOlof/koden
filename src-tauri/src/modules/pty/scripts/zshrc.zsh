@@ -86,3 +86,9 @@ if [[ -z "$__KODEN_HOOKS_LOADED" ]]; then
   _koden_precmd
 fi
 :
+
+# `koden` CLI (modules/cli): defined only where Koden planted KODEN_EXE, so a
+# copy of this file on a remote host stays inert.
+if [[ -n "$KODEN_EXE" ]]; then
+  koden() { "$KODEN_EXE" cli "$@"; }
+fi

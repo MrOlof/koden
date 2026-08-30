@@ -10,6 +10,8 @@ export type SettingsTab =
   // persisted / deep-link contract. `brain` is the Koden Brain index tab.
   | "agents"
   | "brain"
+  // `cli` is the koden CLI permission matrix (modules/cli).
+  | "cli"
   | "about";
 
 export async function openSettingsWindow(tab?: SettingsTab): Promise<void> {

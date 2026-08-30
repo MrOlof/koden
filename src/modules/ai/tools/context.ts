@@ -128,10 +128,11 @@ export type ToolContext = {
   /** Active chat session id — used by tools that persist per-session state (todos). */
   getSessionId: () => string | null;
   // Workspace layout (create/arrange only — no close/delete surface, ADR-017).
-  /** Open a workspace tab; singleton kinds (library/brain) focus an existing one. */
+  /** Open a workspace tab; singleton kinds (library/brain) focus an existing one.
+   * `cwd` (terminal only, used by the koden CLI) overrides the inherited cwd. */
   openWorkspaceTab: (
     kind: LayoutTabKind,
-    opts?: { title?: string; path?: string },
+    opts?: { title?: string; path?: string; cwd?: string },
   ) => LayoutOpenTabResult;
   /** Split the active pane of the active tab; focus follows the new pane. */
   splitWorkspacePane: (
@@ -146,8 +147,9 @@ export type ToolContext = {
   // Spaces lane (list/create/switch only; no delete/rename, ADR-017 addendum).
   /** Every space with its tab count; exactly one is active. */
   listSpaces: () => SpaceInfo[];
-  /** Create a space via the UI's own path (first tab opens, space activates). */
-  createSpace: (name: string) => SpaceCreateResult;
+  /** Create a space via the UI's own path (first tab opens, space activates).
+   * `root` (koden CLI) overrides the inherited folder. */
+  createSpace: (name: string, root?: string) => SpaceCreateResult;
   /** Activate a space by id. False = the id no longer exists. */
   switchSpace: (id: string) => boolean;
   // Terminal targeting (ADR-017 addendum): list/read free, type free,

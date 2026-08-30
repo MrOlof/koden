@@ -113,6 +113,15 @@ fn apply_common(cmd: &mut CommandBuilder, cwd: Option<String>, blocks: bool) {
     if blocks {
         cmd.env("KODEN_BLOCKS", "1");
     }
+    // `koden` CLI (modules/cli): the shell scripts define `koden` only when
+    // KODEN_EXE is set; the token is planted only while the listener is up.
+    if let Some(exe) = crate::modules::cli::exe_for_pty() {
+        cmd.env(crate::modules::cli::ENV_EXE, exe);
+    }
+    if let Some((endpoint, token)) = crate::modules::cli::env_for_pty() {
+        cmd.env(crate::modules::cli::ENV_ENDPOINT, endpoint);
+        cmd.env(crate::modules::cli::ENV_TOKEN, token);
+    }
     for (key, value) in workspace::appimage_env_overrides() {
         match value {
             Some(v) => {

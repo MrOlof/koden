@@ -1535,3 +1535,44 @@ if (import.meta.env?.DEV && typeof window !== "undefined") {
   (window as unknown as { __kodenTerm?: unknown }).__kodenTerm =
     terminalDebugStats;
 }
+
+function tailLines(text: string, maxLines: number): string {
+  const lines = text.split(/\r?\n/);
+  const tail = lines.slice(-maxLines);
+  while (tail.length && tail[tail.length - 1] === "") tail.pop();
+  return tail.join("\n");
+}
+
+/**
+ * Last `maxLines` of any leaf's buffer for the koden CLI (modules/cli): the
+ * live or retained renderer slot first, else the dormant snapshot. `raw`
+ * keeps ANSI (SerializeAddon replay); otherwise plain text. Null when the
+ * leaf has no session at all.
+ */
+export function readLeafTail(
+  leafId: number,
+  maxLines: number,
+  raw: boolean,
+): string | null {
+  const s = sessions.get(leafId);
+  if (!s) return null;
+  const slot = getLiveSlotForLeaf(leafId);
+  if (slot) {
+    if (raw) {
+      return tailLines(
+        slot.serializeAddon.serialize({ scrollback: maxLines }),
+        maxLines,
+      );
+    }
+    const buf = slot.term.buffer.active;
+    const total = buf.length;
+    const lines: string[] = [];
+    for (let i = Math.max(0, total - maxLines); i < total; i++) {
+      lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+    }
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n");
+  }
+  if (!s.snapshot) return "";
+  return tailLines(raw ? s.snapshot : stripAnsi(s.snapshot), maxLines);
+}

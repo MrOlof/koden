@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_codex;
 pub mod brain;
+pub mod cli;
 pub mod fs;
 pub mod git;
 pub mod history;

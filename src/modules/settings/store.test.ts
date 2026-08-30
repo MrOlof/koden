@@ -38,3 +38,28 @@ describe("showLauncherOnStart preference", () => {
     expect(Object.keys(DEFAULT_PREFERENCES)).toContain("showLauncherOnStart");
   });
 });
+
+// modules/cli: the koden CLI ships enabled with every gate open; Settings >
+// CLI is the opt-out. Each key must ride the identity persistence contract so
+// a flip in the settings window reaches the main window's bridge.
+describe("cli preferences", () => {
+  it("default ON across the whole matrix", () => {
+    expect(DEFAULT_PREFERENCES.cliEnabled).toBe(true);
+    expect(DEFAULT_PREFERENCES.cliTerminalRead).toBe(true);
+    expect(DEFAULT_PREFERENCES.cliTerminalInput).toBe(true);
+    expect(DEFAULT_PREFERENCES.cliPanelControl).toBe(true);
+    expect(DEFAULT_PREFERENCES.cliNotify).toBe(true);
+  });
+
+  it("ride the standard key-per-field persistence contract", () => {
+    for (const k of [
+      "cliEnabled",
+      "cliTerminalRead",
+      "cliTerminalInput",
+      "cliPanelControl",
+      "cliNotify",
+    ]) {
+      expect(Object.keys(DEFAULT_PREFERENCES)).toContain(k);
+    }
+  });
+});

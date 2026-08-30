@@ -55,6 +55,7 @@ The themes below frame every scope decision.
 - [x] Inline search, link detection, true-color
 - [x] Private terminal tabs with AI-context redaction
 - [x] WSL bridge as workspace environment
+- [x] `koden` CLI inside every terminal (read / type / run panes, open tabs, split panes, spaces, notify) over a token-gated local socket, permissions in Settings > CLI
 
 ### Editor
 
