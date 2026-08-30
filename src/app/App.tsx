@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { installTestBus } from "@/dev/testBus";
 import { getLaunchDir } from "@/lib/launchDir";
+import { IS_WINDOWS } from "@/lib/platform";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { usePresence } from "@/lib/usePresence";
 import { useZoom } from "@/lib/useZoom";
@@ -58,6 +59,14 @@ import {
   type SearchInlineHandle,
   type SearchTarget,
 } from "@/modules/header";
+import {
+  folderBasename,
+  type LauncherFocusTarget,
+  LauncherPane,
+  normalizeFolderPath,
+  sameEnv,
+  type SshEnv,
+} from "@/modules/launcher";
 import { OnboardingWizard } from "@/modules/onboarding/OnboardingWizard";
 import {
   AGENT_ROLES,
@@ -139,10 +148,11 @@ import {
 } from "@/modules/terminal";
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
-import { useWorkspaceEnvStore } from "@/modules/workspace";
+import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
 import { hydrateDocs } from "@/modules/workspace-docs";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { SearchAddon } from "@xterm/addon-search";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -308,6 +318,7 @@ export default function App() {
     newBoardTab,
     newTasksTab,
     openLibraryTab,
+    openLauncherTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,
@@ -614,6 +625,9 @@ export default function App() {
   // A configured default folder wins over the launch dir / OS home as the base
   // the explorer roots at and new terminals open in (Settings → General).
   const defaultFolder = usePreferencesStore((s) => s.defaultFolder);
+  const showLauncherOnStart = usePreferencesStore(
+    (s) => s.showLauncherOnStart,
+  );
   // Default accent colors for newly created note/task panes (Settings → General).
   const paneColorNotes = usePreferencesStore((s) => s.paneColorNotes);
   const paneColorTask = usePreferencesStore((s) => s.paneColorTask);
@@ -676,6 +690,10 @@ export default function App() {
     tabs,
     defaultFolder.trim() || launchCwd || home,
   );
+
+  // Where the launcher's "Terminal here" opens: the same base a fresh tab
+  // falls back to when no terminal has been active yet.
+  const launcherCwd = defaultFolder.trim() || launchCwd || home;
 
   useWindowTitle(activeTab, explorerRoot);
 
@@ -882,6 +900,21 @@ export default function App() {
   const openNewTab = useCallback(() => {
     newTab(inheritedCwdForNewTab());
   }, [newTab, inheritedCwdForNewTab]);
+
+  const activeSpaceKey = activeSpaceId ?? DEFAULT_SPACE_ID;
+
+  const showLauncher = useCallback(() => {
+    openLauncherTab();
+  }, [openLauncherTab]);
+
+  // Picking a launcher action closes it. closeTab refuses the last tab of a
+  // Space, so a Space with nothing else keeps showing the launcher.
+  const closeLauncherTab = useCallback(() => {
+    const t = tabsRef.current.find(
+      (x) => x.kind === "launcher" && x.spaceId === activeSpaceKey,
+    );
+    if (t) closeTab(t.id);
+  }, [closeTab, activeSpaceKey]);
 
   const openNewPrivateTab = useCallback(() => {
     newPrivateTab(inheritedCwdForNewTab());
@@ -1450,6 +1483,7 @@ export default function App() {
     () => ({
       "commandPalette.open": () => openCommandPalette("commands"),
       "commandPalette.content": () => openCommandPalette("content"),
+      "launcher.show": showLauncher,
       "tab.new": openNewTab,
       "tab.newBlock": openNewBlockTab,
       "tab.newPrivate": openNewPrivateTab,
@@ -1494,6 +1528,7 @@ export default function App() {
       cycleTab,
       cycleSpace,
       handleCloseTabOrPane,
+      showLauncher,
       openNewTab,
       openNewBlockTab,
       openNewPrivateTab,
@@ -2113,12 +2148,156 @@ export default function App() {
     [setActiveId],
   );
 
+  const [launcherFocus, setLauncherFocus] =
+    useState<LauncherFocusTarget | null>(null);
+  const clearLauncherFocus = useCallback(() => setLauncherFocus(null), []);
+  // Set after a remote connect; the effect below decides whether the new
+  // Space still needs its first terminal.
+  const [remoteTabPending, setRemoteTabPending] = useState<{
+    spaceId: string;
+    cwd?: string;
+  } | null>(null);
+
+  const showLauncherRemote = useCallback(() => {
+    setLauncherFocus("remote");
+    openLauncherTab();
+  }, [openLauncherTab]);
+
+  const openSetupGuide = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("koden:open-onboarding"));
+  }, []);
+
+  const handleLauncherSwitchSpace = useCallback(
+    (spaceId: string) => {
+      useSpaces.getState().setActive(spaceId);
+      closeLauncherTab();
+    },
+    [closeLauncherTab],
+  );
+
+  const handleLauncherNewTerminal = useCallback(
+    (env: WorkspaceEnv) => {
+      if (!sameEnv(env, workspaceEnv)) {
+        // Switching env resets the whole workspace, launcher included.
+        void switchWorkspace(env);
+        return;
+      }
+      newTab(launcherCwd ?? undefined);
+      closeLauncherTab();
+    },
+    [workspaceEnv, switchWorkspace, newTab, launcherCwd, closeLauncherTab],
+  );
+
+  const handleOpenFolderAsSpace = useCallback(async () => {
+    const start = explorerRoot ?? home ?? undefined;
+    let picked: string | null;
+    try {
+      picked = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Open folder as a new Space",
+        defaultPath:
+          start && IS_WINDOWS ? start.replace(/\//g, "\\") : start,
+      });
+    } catch (e) {
+      toast.error(`Could not open the folder picker: ${String(e)}`);
+      return;
+    }
+    if (typeof picked !== "string" || !picked) return;
+    const root = normalizeFolderPath(picked);
+    const { create, setActive } = useSpaces.getState();
+    const meta = create({ name: folderBasename(root), root, env: workspaceEnv });
+    void native.workspaceAuthorize(root).catch(() => {});
+    setActiveSpaceForNewTabs(meta.id);
+    newTab(root);
+    closeLauncherTab();
+    setActive(meta.id);
+  }, [
+    explorerRoot,
+    home,
+    workspaceEnv,
+    newTab,
+    setActiveSpaceForNewTabs,
+    closeLauncherTab,
+  ]);
+
+  const openFolderAsSpace = useCallback(() => {
+    void handleOpenFolderAsSpace();
+  }, [handleOpenFolderAsSpace]);
+
+  const handleConnectRemote = useCallback(
+    async (env: SshEnv) => {
+      const store = useSpaces.getState();
+      const prevSpaceId = store.activeId ?? DEFAULT_SPACE_ID;
+      const meta = store.create({
+        name: env.host,
+        root: env.path || null,
+        env,
+      });
+      setActiveSpaceForNewTabs(meta.id);
+      if (!sameEnv(env, useWorkspaceEnvStore.getState().env)) {
+        const connecting = toast.loading(`Connecting to ${env.host}…`);
+        try {
+          await switchWorkspace(env);
+        } finally {
+          toast.dismiss(connecting);
+        }
+        if (!sameEnv(env, useWorkspaceEnvStore.getState().env)) {
+          // The switch was refused (unsaved editor, unreachable host): take
+          // the Space back and stay put.
+          useSpaces.getState().remove(meta.id);
+          setActiveSpaceForNewTabs(prevSpaceId);
+          return;
+        }
+      }
+      useSpaces.getState().setActive(meta.id);
+      setRemoteTabPending({ spaceId: meta.id, cwd: env.path || undefined });
+    },
+    [setActiveSpaceForNewTabs, switchWorkspace],
+  );
+
+  // Boot: land on the launcher once spaces and prefs are in (default on). The
+  // restored tabs stay cold behind it, so nothing spawns until you choose.
+  const bootLauncherDone = useRef(false);
+  useEffect(() => {
+    if (bootLauncherDone.current || !spacesHydrated || !prefsHydrated) return;
+    bootLauncherDone.current = true;
+    if (showLauncherOnStart) openLauncherTab(activeSpaceKey);
+  }, [
+    spacesHydrated,
+    prefsHydrated,
+    showLauncherOnStart,
+    activeSpaceKey,
+    openLauncherTab,
+  ]);
+
+  // A Space with no tabs shows the launcher; it is the way back to content.
+  useEffect(() => {
+    if (!spacesHydrated) return;
+    if (remoteTabPending?.spaceId === activeSpaceKey) return;
+    if (tabs.some((t) => t.spaceId === activeSpaceKey)) return;
+    openLauncherTab(activeSpaceKey);
+  }, [tabs, activeSpaceKey, spacesHydrated, remoteTabPending, openLauncherTab]);
+
+  // switchWorkspace resets the workspace to one fresh terminal when the env
+  // actually changes; only add one when the new Space came out of it empty.
+  useEffect(() => {
+    if (!remoteTabPending) return;
+    setRemoteTabPending(null);
+    const { spaceId, cwd } = remoteTabPending;
+    if (tabs.some((t) => t.spaceId === spaceId && t.kind === "terminal"))
+      return;
+    setActiveSpaceForNewTabs(spaceId);
+    newTab(cwd);
+  }, [remoteTabPending, tabs, newTab, setActiveSpaceForNewTabs]);
+
   const spaceSwitcher = (
     <SpaceSwitcher
       open={switcherOpen}
       onOpenChange={setSwitcherOpen}
       tabs={tabs}
       onNewSpace={() => void handleNewSpace()}
+      onOpenFolder={openFolderAsSpace}
       onDeleteSpace={handleDeleteSpace}
       onNewTabInSpace={handleNewTabInSpace}
       onJumpTab={jumpToTab}
@@ -2172,6 +2351,9 @@ export default function App() {
             openSpacesOverview: () => setSwitcherOpen(true),
             newSpace: () => void handleNewSpace(),
             switchSpace: (id) => useSpaces.getState().setActive(id),
+            openLauncher: showLauncher,
+            openFolderAsSpace,
+            connectRemote: showLauncherRemote,
           })
         : [],
     [
@@ -2204,6 +2386,9 @@ export default function App() {
       openLibrary,
       openOrchestrationTab,
       toggleLayoutMode,
+      showLauncher,
+      openFolderAsSpace,
+      showLauncherRemote,
     ],
   );
 
@@ -2312,6 +2497,7 @@ export default function App() {
               onNewBoard={() => newBoardTab()}
               onNewTasks={() => newTasksTab()}
               onOpenDirector={openDirector}
+              onOpenLauncher={showLauncher}
               onClose={handleClose}
               onDuplicate={duplicateTab}
               onCloseOthers={closeOthersInSpace}
@@ -2335,7 +2521,7 @@ export default function App() {
             />
           )}
 
-          <OnboardingWizard />
+          <OnboardingWizard onFinished={showLauncher} />
 
           <main className="zoom-content flex min-h-0 flex-1 flex-row">
             {/* Sidebar mode: a slim always-visible activity rail (Files |
@@ -2454,6 +2640,7 @@ export default function App() {
                           onNewEditor={() => setNewEditorOpen(true)}
                           onNewPreview={() => openPreviewTab("")}
                           onOpenDirector={openDirector}
+                          onOpenLauncher={showLauncher}
                           spaces={spaces}
                           onMoveToSpace={handleMoveTab}
                         />
@@ -2513,6 +2700,18 @@ export default function App() {
                       onSetMarkdownView={setMarkdownView}
                       onActivateAgent={onActivateAgent}
                       onSpawnTerminalAgent={handleSpawnTerminalAgent}
+                      launcher={
+                        <LauncherPane
+                          localCwd={launcherCwd}
+                          initialFocus={launcherFocus}
+                          onFocusHandled={clearLauncherFocus}
+                          onSwitchSpace={handleLauncherSwitchSpace}
+                          onNewTerminal={handleLauncherNewTerminal}
+                          onOpenFolder={openFolderAsSpace}
+                          onConnectRemote={handleConnectRemote}
+                          onOpenSetup={openSetupGuide}
+                        />
+                      }
                     />
                   </div>
 

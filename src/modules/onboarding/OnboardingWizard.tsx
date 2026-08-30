@@ -104,7 +104,12 @@ const STEPS: StepMeta[] = [
  * localStorage completion key + an unconfigured workspace so existing users are
  * never re-prompted.
  */
-export function OnboardingWizard() {
+export function OnboardingWizard({
+  onFinished,
+}: {
+  /** Fires when the wizard closes from Done (also the end of "Skip setup"). */
+  onFinished?: () => void;
+}) {
   const [show, setShow] = useState(false);
   const [step, setStep] = useState(0);
 
@@ -236,6 +241,7 @@ export function OnboardingWizard() {
   const finish = () => {
     localStorage.setItem(DONE_KEY, "1");
     setShow(false);
+    onFinished?.();
   };
 
   const next = () => setStep((s) => Math.min(STEPS.length - 1, s + 1));

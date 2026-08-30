@@ -10,12 +10,15 @@ import {
   BookOpen01Icon,
   Cancel01Icon,
   CheckListIcon,
+  CloudServerIcon,
   CommandLineIcon,
   DashboardSquare01Icon,
   FileEditIcon,
   FileSearchIcon,
+  FolderOpenIcon,
   Globe02Icon,
   HierarchySquare01Icon,
+  Home01Icon,
   IncognitoIcon,
   InformationCircleIcon,
   KanbanIcon,
@@ -87,6 +90,12 @@ export type CommandPaletteActionContext = {
   openSpacesOverview: () => void;
   newSpace: () => void;
   switchSpace: (id: string) => void;
+  /** The launcher page ("New tab: choose"). */
+  openLauncher: () => void;
+  /** Native folder picker; the folder becomes a new Space. */
+  openFolderAsSpace: () => void;
+  /** The launcher with its remote-host form focused. */
+  connectRemote: () => void;
 };
 
 const noop = () => {};
@@ -181,6 +190,22 @@ export function createCommandItems(
       icon: DashboardSquare01Icon,
       run: ctx.newSpace,
     },
+    {
+      id: "space.openFolder",
+      title: "Open folder as a new Space…",
+      group: "Spaces",
+      keywords: ["open", "folder", "directory", "project", "space", "workspace"],
+      icon: FolderOpenIcon,
+      run: ctx.openFolderAsSpace,
+    },
+    {
+      id: "workspace.connectRemote",
+      title: "Connect to a remote host…",
+      group: "Spaces",
+      keywords: ["ssh", "remote", "host", "connect", "server", "workspace"],
+      icon: CloudServerIcon,
+      run: ctx.connectRemote,
+    },
     ...ctx.spaces.map((sp) => ({
       id: `spaces.switch.${sp.id}`,
       title: `Switch to ${sp.name}`,
@@ -191,6 +216,15 @@ export function createCommandItems(
         sp.id === ctx.activeSpaceId ? "Current space" : undefined,
       run: () => ctx.switchSpace(sp.id),
     })),
+    {
+      id: "launcher.show",
+      title: "New tab: choose…",
+      group: "Tabs",
+      keywords: ["launcher", "start", "welcome", "home", "new tab", "choose"],
+      icon: Home01Icon,
+      shortcutId: "launcher.show",
+      run: ctx.openLauncher,
+    },
     {
       id: "tab.new",
       title: "New terminal",
