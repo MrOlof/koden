@@ -278,6 +278,8 @@ upgrade rejected-for-now.
 - Status color convention: **amber** = needs-input/waiting, **blue** = working,
   **green** = done/idle, **red** = error.
 
+**2026-08-30 (Kosta-directed, 5 parallel worktree agents): CATE PARITY MERGED ON MAIN** (`c52052b`..`3788cdc`, WP5 CLI pending): ssh WorkspaceEnv through the system OpenSSH client + host picker + local-fs gate (WP1), worktree Spaces with `git_worktree_*` (WP4), the launcher tab "What do you want to do?" incl. open-folder-as-Space and remote connect (WP2), resume cards for the dormant `brain/resume` journal + scrollback restore across launches in `koden-scrollback.json` (WP3). Research: `cate-deep-dive-2026-08-30.md`; decision + ceilings: `decisions/ADR-022-cate-parity-remote-launcher-resume-worktrees-cli.md`. Gates green on main (vitest 587, cargo lib 516, clippy 0). NOT pushed, NOT runtime-verified in the GUI.
+
 ## Important files / docs
 - `TERAX.md` — base Terax architecture (two-process Tauri model, PTY, AI subsystem); read first. `CLAUDE.md` and `AGENTS.md` both just point here.
 - `WORKSPACE.md` — the definitive spec of what the fork adds (orchestration spine, Agent Dock, Topology, Flow Inspector, Director, persistence).
