@@ -2714,7 +2714,6 @@ export default function App() {
                       onSpawnTerminalAgent={handleSpawnTerminalAgent}
                       launcher={
                         <LauncherPane
-                          localCwd={launcherCwd}
                           initialFocus={launcherFocus}
                           onFocusHandled={clearLauncherFocus}
                           onSwitchSpace={handleLauncherSwitchSpace}
@@ -2722,6 +2721,9 @@ export default function App() {
                           onOpenFolder={openFolderAsSpace}
                           onConnectRemote={handleConnectRemote}
                           onOpenSetup={openSetupGuide}
+                          onNewEditor={() => setNewEditorOpen(true)}
+                          onNewNote={() => newNotesTab()}
+                          home={localHome}
                           extraSections={recovered.sections}
                         />
                       }

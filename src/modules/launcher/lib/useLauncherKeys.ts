@@ -1,8 +1,12 @@
 import { type RefObject, useEffect, useRef } from "react";
 
-// Elements carrying `data-launcher-stop` are what the arrow keys walk between;
-// buttons and text inputs both work.
+// Elements carrying `data-launcher-stop` are what the arrow keys walk between:
+// the rows, in document order (resume cards, START, RECENT). The connect form
+// and the footer are reached with Tab only.
 const LAUNCHER_STOP_ATTR = "data-launcher-stop";
+
+// Node.DOCUMENT_POSITION_FOLLOWING; the DOM global is absent in the test runtime.
+const POSITION_FOLLOWING = 4;
 
 export type LauncherNavKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
@@ -36,14 +40,27 @@ export function stepIndex(
   }
 }
 
-/** Index of `target` among `stops`, or i + 0.5 when it sits between stops. */
-function locateStop(stops: readonly Node[], target: Node): number {
+/** The two DOM calls stop location needs; DOM Nodes satisfy it. */
+export type StopNode = {
+  contains(other: StopNode | null): boolean;
+  compareDocumentPosition(other: StopNode): number;
+};
+
+/**
+ * Index of `target` among `stops`, or i + 0.5 when it sits between stops
+ * (the expanded connect form lies between the last START row and the first
+ * RECENT row, so Down from it reaches RECENT and Up returns to START).
+ */
+export function locateStop(
+  stops: readonly StopNode[],
+  target: StopNode,
+): number {
   const exact = stops.findIndex((el) => el === target || el.contains(target));
   if (exact >= 0) return exact;
   let last = -1;
   for (let i = 0; i < stops.length; i++) {
     const rel = stops[i].compareDocumentPosition(target);
-    if (rel & Node.DOCUMENT_POSITION_FOLLOWING) last = i;
+    if (rel & POSITION_FOLLOWING) last = i;
   }
   return last + 0.5;
 }
@@ -57,8 +74,10 @@ function isTextField(el: EventTarget | null): boolean {
 }
 
 type Options = {
-  /** Focus the first stop on mount (default true). */
+  /** Focus a stop on mount (default true). */
   focusFirst?: boolean;
+  /** Selector for the stop to land on at mount; falls back to the first stop. */
+  initialStop?: string;
 };
 
 function stopsIn(root: HTMLElement): HTMLElement[] {
@@ -70,16 +89,22 @@ function stopsIn(root: HTMLElement): HTMLElement[] {
 /** Arrow / Home / End navigation across the launcher's stops. */
 export function useLauncherKeys(
   ref: RefObject<HTMLElement | null>,
-  { focusFirst = true }: Options = {},
+  { focusFirst = true, initialStop }: Options = {},
 ) {
-  // Read once: the option only decides the mount-time focus, and must not
-  // pull focus back to the first row when it flips later.
-  const focusFirstAtMount = useRef(focusFirst);
+  // Read once: the options only decide the mount-time focus, and must not
+  // pull focus back to a row when they change later.
+  const mountFocus = useRef({ focusFirst, initialStop });
 
   useEffect(() => {
     const root = ref.current;
-    if (!root || !focusFirstAtMount.current) return;
-    const raf = requestAnimationFrame(() => stopsIn(root)[0]?.focus());
+    const { focusFirst: wanted, initialStop: selector } = mountFocus.current;
+    if (!root || !wanted) return;
+    const raf = requestAnimationFrame(() => {
+      const preferred = selector
+        ? root.querySelector<HTMLElement>(selector)
+        : null;
+      (preferred ?? stopsIn(root)[0])?.focus();
+    });
     return () => cancelAnimationFrame(raf);
   }, [ref]);
 
@@ -97,7 +122,8 @@ export function useLauncherKeys(
       if (isTextField(target) && (e.key === "Home" || e.key === "End")) return;
       const list = stops();
       if (list.length === 0) return;
-      const next = list[stepIndex(locateStop(list, target), list.length, e.key)];
+      const next =
+        list[stepIndex(locateStop(list, target), list.length, e.key)];
       if (!next) return;
       e.preventDefault();
       next.focus();

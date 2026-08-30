@@ -4,6 +4,7 @@ import { ArrowRight02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type FormEvent,
+  type KeyboardEvent,
   type RefObject,
   useEffect,
   useRef,
@@ -22,13 +23,20 @@ type Props = {
   hosts: SshHost[] | null;
   onConnect: (env: SshEnv) => Promise<void> | void;
   hostInputRef?: RefObject<HTMLInputElement | null>;
+  /** Esc anywhere in the form. */
+  onCancel?: () => void;
 };
 
 /**
  * Inline "connect to a remote host" form. Free text always works; known ssh
  * config hosts appear as chips under the field. Enter in either field submits.
  */
-export function RemoteConnectForm({ hosts, onConnect, hostInputRef }: Props) {
+export function RemoteConnectForm({
+  hosts,
+  onConnect,
+  hostInputRef,
+  onCancel,
+}: Props) {
   const [host, setHost] = useState("");
   const [path, setPath] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -64,26 +72,36 @@ export function RemoteConnectForm({ hosts, onConnect, hostInputRef }: Props) {
     }
   };
 
+  const onKeyDown = (e: KeyboardEvent<HTMLFormElement>) => {
+    if (e.key !== "Escape" || !onCancel || busy) return;
+    e.preventDefault();
+    onCancel();
+  };
+
   return (
-    <form onSubmit={(e) => void submit(e)} className="flex flex-col gap-2 px-3">
+    <form
+      onSubmit={(e) => void submit(e)}
+      onKeyDown={onKeyDown}
+      aria-label="Connect to a remote host"
+      className="flex flex-col gap-2 rounded-md border border-border/40 p-3"
+    >
+      <Input
+        ref={hostInputRef}
+        value={host}
+        onChange={(e) => {
+          setHost(e.target.value);
+          if (error) setError(null);
+        }}
+        placeholder="user@host or an ssh config alias"
+        aria-label="Remote host"
+        aria-invalid={error ? true : undefined}
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
+        disabled={busy}
+        className="h-8 w-full font-mono text-xs"
+      />
       <div className="flex items-center gap-2">
-        <Input
-          ref={hostInputRef}
-          data-launcher-stop=""
-          value={host}
-          onChange={(e) => {
-            setHost(e.target.value);
-            if (error) setError(null);
-          }}
-          placeholder="user@host or an ssh config alias"
-          aria-label="Remote host"
-          aria-invalid={error ? true : undefined}
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          disabled={busy}
-          className="h-8 min-w-0 flex-1 font-mono text-xs"
-        />
         <Input
           ref={pathRef}
           value={path}
@@ -94,9 +112,14 @@ export function RemoteConnectForm({ hosts, onConnect, hostInputRef }: Props) {
           autoCorrect="off"
           spellCheck={false}
           disabled={busy}
-          className="h-8 w-52 font-mono text-xs"
+          className="h-8 min-w-0 flex-1 font-mono text-xs"
         />
-        <Button type="submit" size="sm" disabled={busy} className="h-8">
+        <Button
+          type="submit"
+          size="sm"
+          disabled={busy}
+          className="h-8 shrink-0"
+        >
           {busy ? "Connecting…" : "Connect"}
           {busy ? null : (
             <HugeiconsIcon icon={ArrowRight02Icon} size={14} strokeWidth={2} />
