@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  isSshWorkspace,
+  SSH_LOCAL_FS_UNAVAILABLE,
+} from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 
 type ReadResult =
@@ -73,6 +77,11 @@ export function useDocument({ path, onDirtyChange }: Options) {
     let cancelled = false;
     setDoc({ status: "loading" });
     setDirty(false);
+
+    if (isSshWorkspace(currentWorkspaceEnv())) {
+      setDoc({ status: "error", message: SSH_LOCAL_FS_UNAVAILABLE });
+      return;
+    }
 
     invoke<ReadResult>("fs_read_file", { path, workspace: currentWorkspaceEnv() })
       .then((res) => {

@@ -1,4 +1,4 @@
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, isSshWorkspace } from "@/modules/workspace";
 import {
   type Completion,
   startCompletion,
@@ -36,7 +36,7 @@ export async function pathCompletions(
   const dirPart = slash >= 0 ? token.slice(0, slash + 1) : "";
   const base = slash >= 0 ? token.slice(slash + 1) : token;
   const dir = resolveDir(dirPart, cwd);
-  if (!dir) return null;
+  if (!dir || isSshWorkspace(currentWorkspaceEnv())) return null;
 
   let entries: DirEntry[];
   try {

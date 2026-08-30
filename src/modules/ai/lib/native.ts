@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, type SshHost } from "@/modules/workspace";
 
 export type ReadResult =
   | { kind: "text"; content: string; size: number }
@@ -126,6 +126,8 @@ export type GitDiscardEntry = {
 
 export const native = {
   workspaceCurrentDir: () => invoke<string>("workspace_current_dir"),
+  sshListHosts: () => invoke<SshHost[]>("ssh_list_hosts"),
+  sshHome: (host: string) => invoke<string>("ssh_home", { host }),
   workspaceAuthorize: (path: string) =>
     invoke<string>("workspace_authorize", {
       path,

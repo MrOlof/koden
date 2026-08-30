@@ -22,7 +22,11 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  isSshWorkspace,
+  SSH_LOCAL_FS_UNAVAILABLE,
+} from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { segmentsFromCwd } from "./lib/pathUtils";
 
@@ -186,6 +190,11 @@ function CurrentSegmentDropdown({
 
   const load = useCallback(async () => {
     setError(null);
+    if (isSshWorkspace(currentWorkspaceEnv())) {
+      setError(SSH_LOCAL_FS_UNAVAILABLE);
+      setChildren([]);
+      return;
+    }
     try {
       const dirs = await invoke<string[]>("list_subdirs", {
         path,

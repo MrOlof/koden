@@ -21,6 +21,9 @@ export async function openPty(
   handlers: PtyHandlers,
   cwd?: string,
   blocks?: boolean,
+  /** SSH envs only: key (typically the space id) of a tmux session to attach
+   * to on the host so the shell outlives the client. */
+  sshTmux?: string,
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
   const onData = new Channel<ArrayBuffer>();
@@ -47,6 +50,7 @@ export async function openPty(
     cwd: cwd ?? null,
     workspace: currentWorkspaceEnv(),
     blocks: blocks ?? false,
+    sshTmux: sshTmux ?? null,
     onData,
     onExit,
   });

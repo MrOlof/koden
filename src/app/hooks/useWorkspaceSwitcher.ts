@@ -3,6 +3,7 @@ import { homeDir } from "@tauri-apps/api/path";
 import { native } from "@/modules/ai/lib/native";
 import type { Tab } from "@/modules/tabs";
 import {
+  getSshHome,
   getWslHome,
   LOCAL_WORKSPACE,
   type WorkspaceEnv,
@@ -76,6 +77,9 @@ export function useWorkspaceSwitcher({
       try {
         if (env.kind === "wsl") {
           nextHome = await getWslHome(env.distro);
+        } else if (env.kind === "ssh") {
+          nextHome =
+            env.path.trim() !== "" ? env.path : await getSshHome(env.host);
         } else {
           nextHome = (await homeDir()).replace(/\\/g, "/");
         }
@@ -84,8 +88,17 @@ export function useWorkspaceSwitcher({
         return;
       }
 
+      // An ssh env picked without a path settles on the remote home, so the
+      // Space that persists it reconnects to the same place.
+      const nextEnv: WorkspaceEnv =
+        env.kind === "local"
+          ? LOCAL_WORKSPACE
+          : env.kind === "ssh"
+            ? { kind: "ssh", host: env.host, path: nextHome ?? "" }
+            : env;
+
       clearWorkspaceState();
-      setWorkspaceEnv(env.kind === "local" ? LOCAL_WORKSPACE : env);
+      setWorkspaceEnv(nextEnv);
       setHome(nextHome);
       setLaunchCwd(nextHome);
       if (nextHome) {
