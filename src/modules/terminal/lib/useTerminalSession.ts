@@ -2,6 +2,7 @@ import { clipboardWriteText } from "@/lib/clipboard";
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { revealInFinder } from "@/modules/explorer/lib/contextActions";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { activeSpaceTmuxKey } from "@/modules/spaces/lib/tmuxKey";
 import { readTerminalTokens, resolveCssColorToHex } from "@/styles/tokens";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -693,6 +694,7 @@ async function openPtyForSession(
     },
     cwd,
     s.blocks,
+    activeSpaceTmuxKey(),
   );
   // Only resize if the bound dims changed during the spawn: a same-size
   // ResizePseudoConsole during conhost warmup is a known ConPTY trigger for

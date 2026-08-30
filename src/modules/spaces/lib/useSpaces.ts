@@ -16,6 +16,7 @@ type CreateInput = {
   env?: WorkspaceEnv;
   color?: number;
   worktree?: SpaceWorktree;
+  sshTmux?: boolean;
 };
 
 type State = {
@@ -33,6 +34,7 @@ type State = {
   create: (input: CreateInput) => SpaceMeta;
   rename: (id: string, name: string) => void;
   setColor: (id: string, color: number | undefined) => void;
+  setSshTmux: (id: string, on: boolean) => void;
   reorder: (orderedIds: string[]) => void;
   remove: (id: string) => string | null;
   setActive: (id: string) => void;
@@ -57,6 +59,7 @@ export const useSpaces = create<State>((set, get) => ({
       env: input.env ?? LOCAL_WORKSPACE,
       ...(input.color != null ? { color: input.color } : {}),
       ...(input.worktree ? { worktree: input.worktree } : {}),
+      ...(input.sshTmux ? { sshTmux: true } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -77,6 +80,16 @@ export const useSpaces = create<State>((set, get) => ({
   setColor: (id, color) => {
     const spaces = get().spaces.map((s) =>
       s.id === id ? { ...s, color, updatedAt: Date.now() } : s,
+    );
+    set({ spaces });
+    void saveSpacesList(spaces);
+  },
+
+  setSshTmux: (id, on) => {
+    const spaces = get().spaces.map((s) =>
+      s.id === id && (s.sshTmux ?? false) !== on
+        ? { ...s, sshTmux: on, updatedAt: Date.now() }
+        : s,
     );
     set({ spaces });
     void saveSpacesList(spaces);

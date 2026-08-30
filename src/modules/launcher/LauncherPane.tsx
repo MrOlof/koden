@@ -28,7 +28,10 @@ import {
   type StartIcons,
 } from "./lib/launcherItems";
 import { useLauncherKeys } from "./lib/useLauncherKeys";
-import { RemoteConnectForm } from "./RemoteConnectForm";
+import {
+  RemoteConnectForm,
+  type RemoteConnectOptions,
+} from "./RemoteConnectForm";
 
 export type LauncherFocusTarget = "remote";
 
@@ -39,7 +42,10 @@ type Props = {
   onSwitchSpace: (spaceId: string) => void;
   onNewTerminal: (env: WorkspaceEnv) => void;
   onOpenFolder: () => void;
-  onConnectRemote: (env: SshEnv) => Promise<void> | void;
+  onConnectRemote: (
+    env: SshEnv,
+    options: RemoteConnectOptions,
+  ) => Promise<void> | void;
   onOpenSetup: () => void;
   onNewEditor?: () => void;
   onNewNote?: () => void;

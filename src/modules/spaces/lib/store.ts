@@ -16,6 +16,9 @@ export type SpaceMeta = {
   color?: number;
   /** Set when the Space root is a git worktree Koden created. */
   worktree?: SpaceWorktree;
+  /** ssh Spaces only: run each terminal inside a tmux session on the host
+   * (named after the Space id) so it survives the client. */
+  sshTmux?: boolean;
   createdAt: number;
   updatedAt: number;
 };

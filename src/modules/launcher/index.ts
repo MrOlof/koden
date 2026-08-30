@@ -1,7 +1,10 @@
 export type { LauncherFocusTarget } from "./LauncherPane";
 export { LauncherPane } from "./LauncherPaneLazy";
 export { LauncherSection, LauncherSectionTitle } from "./LauncherSection";
-export { RemoteConnectForm } from "./RemoteConnectForm";
+export {
+  RemoteConnectForm,
+  type RemoteConnectOptions,
+} from "./RemoteConnectForm";
 export {
   buildStartPage,
   envBadgeLabel,

@@ -39,6 +39,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
 import { InlineRename } from "./components/InlineRename";
+import { spaceEnv } from "./lib/envSwitch";
 import { accentFor } from "./lib/spaceColor";
 import type { SpaceMeta } from "./lib/store";
 import { useSpaces } from "./lib/useSpaces";
@@ -426,6 +427,14 @@ function SpaceRow({
             className="max-w-24 shrink-0 truncate rounded-[3px] border border-border/60 px-1 font-mono text-[9px] leading-4 text-muted-foreground/70"
           >
             {envBadge}
+          </span>
+        )}
+        {!editing && space.sshTmux && spaceEnv(space).kind === "ssh" && (
+          <span
+            title="Terminals run inside a tmux session on the host"
+            className="shrink-0 rounded-[3px] border border-border/60 px-1 font-mono text-[9px] leading-4 text-muted-foreground/70"
+          >
+            tmux
           </span>
         )}
         {!editing && (

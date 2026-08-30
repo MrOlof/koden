@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { ArrowRight02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -18,10 +19,18 @@ import {
   validateHost,
 } from "./lib/launcherItems";
 
+export type RemoteConnectOptions = {
+  /** Run the remote shell inside a tmux session named after the Space. */
+  sshTmux: boolean;
+};
+
 type Props = {
   /** Hosts from ~/.ssh/config; null while loading, [] when unavailable. */
   hosts: SshHost[] | null;
-  onConnect: (env: SshEnv) => Promise<void> | void;
+  onConnect: (
+    env: SshEnv,
+    options: RemoteConnectOptions,
+  ) => Promise<void> | void;
   hostInputRef?: RefObject<HTMLInputElement | null>;
   /** Esc anywhere in the form. */
   onCancel?: () => void;
@@ -39,6 +48,7 @@ export function RemoteConnectForm({
 }: Props) {
   const [host, setHost] = useState("");
   const [path, setPath] = useState("");
+  const [tmux, setTmux] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pathRef = useRef<HTMLInputElement>(null);
@@ -64,7 +74,10 @@ export function RemoteConnectForm({
     setError(null);
     setBusy(true);
     try {
-      await onConnect({ kind: "ssh", host: host.trim(), path: path.trim() });
+      await onConnect(
+        { kind: "ssh", host: host.trim(), path: path.trim() },
+        { sshTmux: tmux },
+      );
     } catch (err) {
       if (alive.current) setError(String(err));
     } finally {
@@ -126,6 +139,27 @@ export function RemoteConnectForm({
           )}
         </Button>
       </div>
+      <label
+        htmlFor="remote-connect-tmux"
+        className="flex cursor-pointer items-start gap-2 pt-0.5"
+      >
+        <Checkbox
+          id="remote-connect-tmux"
+          checked={tmux}
+          onCheckedChange={(v) => setTmux(v === true)}
+          disabled={busy}
+          className="mt-px size-3.5"
+        />
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="text-[11.5px] leading-tight text-foreground/90">
+            Keep the session alive on the host (tmux)
+          </span>
+          <span className="text-[10.5px] leading-snug text-muted-foreground/60">
+            Reattach the same session from any device. Prompt tracking and
+            agent status are limited inside tmux.
+          </span>
+        </span>
+      </label>
       {error ? (
         <p role="alert" className="text-[11px] text-destructive">
           {error}
