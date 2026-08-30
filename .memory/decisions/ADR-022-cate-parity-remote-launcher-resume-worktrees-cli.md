@@ -63,10 +63,9 @@ Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.s
 - Gaps found in that pass: (1) the resume journal writer hardcodes
   `claude_session_id: None`, so Resume is always Tier-1 "Reopen"; the
   `user-turn` bus line already carries the hook payload with `session_id`, so
-  capture is a bridge + `LiveSession` change. (2) Picking a local/WSL launcher
-  item while an ssh Space is active switches that Space's env in place (the
-  "docker" Space became local); env changes should switch to or create a Space
-  of that env, not mutate the current one. (3) Cosmetic: the fresh shell scrolls
+  capture is a bridge + `LiveSession` change. (2) FIXED `d8ff7bd`: picking a local/WSL launcher item while an ssh Space was
+  active used to switch that Space's env in place; env now follows the Space
+  (`spaces/lib/envSwitch.ts`, `useWorkspaceSwitcher.switchToEnv`). (3) Cosmetic: the fresh shell scrolls
   the viewport to its prompt, so restored lines sit above the fold.
 - CI: the first push failed on Linux clippy dead-code (Windows-only pipe
   constants) and the 540 kB startup budget (+3.37 kB); fixed by cfg-gating and
@@ -84,5 +83,8 @@ Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.s
 - resume: `brain_dismiss_recovered` appends its `exited` marker from the
   command thread rather than the worker (documented single-writer deviation);
   boot auto-resume reads the recovered list once.
-- launcher: switching to a local/WSL item whose env differs resets every
-  Space's tabs (existing env-switch behaviour).
+- launcher: (fixed 2026-08-30 evening, `d8ff7bd`) env is now a property of the
+  Space; choosing another env switches to the most recently used Space of that
+  env or creates one, and no Space's tabs are disposed. Residual: a dirty
+  editor in a hidden local Space with autosave on logs a `require_local_fs`
+  error while an ssh Space is active; per-tab env for file IO is the real fix.
