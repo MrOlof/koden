@@ -5,6 +5,7 @@ mod job;
 mod retry_detect;
 mod session;
 pub(crate) mod shell_init;
+mod shell_ssh;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -54,6 +55,7 @@ pub async fn pty_open(
     cwd: Option<String>,
     workspace: Option<WorkspaceEnv>,
     blocks: Option<bool>,
+    ssh_tmux: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
 ) -> Result<u32, String> {
@@ -65,8 +67,10 @@ pub async fn pty_open(
     })?;
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
-        session::spawn(id, app, cols, rows, cwd, workspace, blocks, on_data, on_exit)
-            .map(|(s, _)| s)
+        session::spawn(
+            id, app, cols, rows, cwd, workspace, blocks, ssh_tmux, on_data, on_exit,
+        )
+        .map(|(s, _)| s)
     })
     .await
     .map_err(|e| {
