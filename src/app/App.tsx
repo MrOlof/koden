@@ -42,8 +42,10 @@ import type {
 import {
   BrainActivityBridge,
   brainBuildGist,
+  RecoveredPanesBanner,
   requestBrainView,
   resolveProjectForCwd,
+  useRecoveredPanes,
 } from "@/modules/brain";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import {
@@ -444,6 +446,14 @@ export default function App() {
     activeId,
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
     enabled: spacesHydrated,
+  });
+
+  // "Resume where you left off" cards for agent panes journaled by the previous
+  // session (brain crash-resume); Resume reopens a terminal in the pane's cwd.
+  const recovered = useRecoveredPanes({
+    enabled: spacesHydrated,
+    home,
+    openTerminal: newAgentTab,
   });
 
   const prevSpaceRef = useRef(activeSpaceId);
@@ -2486,6 +2496,12 @@ export default function App() {
               )}
               <ResizablePanel id="workspace" defaultSize="78%" minSize="30%">
                 <div className="flex h-full min-h-0 flex-col">
+                  <RecoveredPanesBanner
+                    cards={recovered.cards}
+                    onResume={recovered.resume}
+                    onDismiss={recovered.dismiss}
+                    onDismissAll={recovered.dismissAll}
+                  />
                   <div className="relative min-h-0 flex-1">
                     <WorkspaceSurface
                       tabs={tabs}

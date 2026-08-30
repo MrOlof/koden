@@ -2213,7 +2213,7 @@ fn rel_path(root: &std::path::Path, path: &std::path::Path) -> String {
 
 /// The brain-private data dir (`<app_local>/koden/brain/resume`) for the P4
 /// journals — alongside `index.sqlite`, NOT the frontend's `~/.koden` agent bus.
-fn resume_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+pub(crate) fn resume_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path()
         .app_local_data_dir()
         .ok()

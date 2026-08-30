@@ -790,6 +790,64 @@ pub fn brain_recovered_panes(state: State<BrainState>) -> Vec<crate::modules::br
     state.recovered.read().map(|r| r.clone()).unwrap_or_default()
 }
 
+/// Relaunch plan for one recovered pane (by its `brain_recovered_panes` key):
+/// Tier-2 `<base_launch> --resume <id>` only when a session id was genuinely
+/// captured, else Tier-1 (plain relaunch in the cwd). `None` for an unknown key
+/// (already dismissed, or never recovered). Pure in-memory: sync.
+#[tauri::command]
+pub fn brain_resume_plan(
+    state: State<BrainState>,
+    pane_key: String,
+    base_launch: String,
+) -> Option<crate::modules::brain::resume::ResumePlan> {
+    let panes = state.recovered.read().ok()?;
+    panes
+        .iter()
+        .find(|p| p.key == pane_key)
+        .map(|p| crate::modules::brain::resume::resume_command(p, &base_launch))
+}
+
+/// Dismiss a recovered pane: drop it from this boot's list and append a synthetic
+/// `exited` record to its journal so the next boot folds it as a clean finish (no
+/// card). Append-only, so nothing is ever lost: a live agent journaling under the
+/// same key simply supersedes the marker with its next real event. Returns false
+/// for an unknown key.
+#[tauri::command]
+pub fn brain_dismiss_recovered(app: tauri::AppHandle, state: State<BrainState>, pane_key: String) -> bool {
+    use crate::modules::brain::resume::{record_event, ResumeRecord, SessionKey};
+    let removed = {
+        let Ok(mut panes) = state.recovered.write() else {
+            return false;
+        };
+        let Some(pos) = panes.iter().position(|p| p.key == pane_key) else {
+            return false;
+        };
+        panes.remove(pos)
+    };
+    let Some(key) = SessionKey::parse(&removed.key) else {
+        return true;
+    };
+    let Some(dir) = crate::modules::brain::worker::resume_dir(&app) else {
+        return true;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let rec = ResumeRecord {
+        ts,
+        kind: "exited".to_string(),
+        agent: removed.agent,
+        cwd: removed.cwd,
+        project: removed.project,
+        claude_session_id: None,
+    };
+    if let Err(e) = record_event(&dir, &key, &rec) {
+        log::debug!("brain: resume dismiss marker failed ({e})");
+    }
+    true
+}
+
 /// Record one submitted user prompt against its pty session (ADR-020 session
 /// activity). Fired by the frontend AgentBusBridge beside its turn-store fan-out;
 /// enqueue-only (sync, microseconds — the pure in-memory command class). The

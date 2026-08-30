@@ -19,6 +19,8 @@ pub struct RecoveredPane {
     pub cwd: String,
     pub project: Option<String>,
     pub claude_session_id: Option<String>,
+    /// Epoch-ms of the last journaled signal ("last activity" on the card).
+    pub last_ts: i64,
 }
 
 /// Recover every still-open pane from `<resume_dir>/*.jsonl`. A journal whose last
@@ -73,6 +75,7 @@ fn fold_journal(path: &Path, content: &str) -> Option<RecoveredPane> {
         cwd: rec.cwd,
         project: rec.project,
         claude_session_id: rec.claude_session_id,
+        last_ts: rec.ts,
     })
 }
 

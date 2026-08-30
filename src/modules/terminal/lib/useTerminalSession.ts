@@ -62,6 +62,7 @@ import {
   refreshLeafSlot,
   releaseSlot,
   setSlotFocused,
+  snapshotLeafForRestore,
 } from "./rendererPool";
 
 type Callbacks = {
@@ -199,6 +200,19 @@ export function submitToLeaf(leafId: number, text: string): void {
 
 export function interruptLeaf(leafId: number): void {
   sessions.get(leafId)?.pty?.write("\x03");
+}
+
+// Scrollback for the cross-launch restore: the live grid (bound or retained
+// slot) serialized read-only. Null when the leaf has no grid right now (never
+// rendered, or its slot was stolen: that frozen snapshot may hold alt-screen
+// state and is never newer than the last live capture anyway), so the
+// persistence layer keeps what it already holds instead of overwriting it.
+export function captureLeafForRestore(
+  leafId: number,
+  cap: number,
+): string | null {
+  if (!sessions.has(leafId)) return null;
+  return snapshotLeafForRestore(leafId, cap);
 }
 
 export function leafCwd(leafId: number): string | null {

@@ -17,9 +17,12 @@ export {
 export { usePaneTitleStore } from "./lib/paneTitles";
 // Dev/test harness buffer-read seams (see src/dev/testBus.ts).
 export { readLeafBuffer, serializeLeaf } from "./lib/rendererPool";
+// Cross-launch scrollback restore seams (spaces persistence / boot).
+export { preloadRestoredBuffer } from "./lib/rendererPool";
 export { useTerminalFileDrop } from "./lib/useTerminalFileDrop";
 export {
   addTurnForLeaf,
+  captureLeafForRestore,
   clearFocusedTerminal,
   disposeSession,
   getCommandMarksForLeaf,

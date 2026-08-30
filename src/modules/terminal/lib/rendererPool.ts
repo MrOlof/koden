@@ -18,6 +18,7 @@ import {
   terminalLineNavigationSequence,
   terminalWordNavigationSequence,
 } from "./keymap";
+import { replayFirstBind } from "./restoreReplay";
 
 // ponytail: 64 lets an 8x8 grid give every leaf its own slot so it avoids LRU
 // snapshot eviction churn. The pool grows lazily (slots created on demand), so
@@ -174,6 +175,45 @@ export function readLeafBuffer(leafId: number): string | null {
     lines.push(buf.getLine(i)?.translateToString(true) ?? "");
   }
   return lines.join("\n").replace(/\n+$/, "");
+}
+
+// Cross-launch scrollback restore. A snapshot is a read-only copy of the
+// normal buffer (alt-screen and mode state excluded, so a restored terminal
+// never wakes up inside a dead TUI or with app-cursor mode on). Persisted by
+// the Space save, handed back via preloadRestoredBuffer on the next launch and
+// consumed by that leaf's FIRST bind, before any PTY byte reaches the grid.
+const pendingRestores = new Map<number, string>();
+
+export function snapshotLeafForRestore(
+  leafId: number,
+  cap: number,
+): string | null {
+  const slot = slots.find(
+    (s) => s.currentLeafId === leafId || s.retainedLeafId === leafId,
+  );
+  if (!slot || cap <= 0) return null;
+  try {
+    return slot.serializeAddon.serialize({
+      scrollback: cap,
+      excludeModes: true,
+      excludeAltBuffer: true,
+    });
+  } catch (e) {
+    console.warn("[koden] restore snapshot failed:", e);
+    return null;
+  }
+}
+
+export function preloadRestoredBuffer(leafId: number, text: string): void {
+  if (text) pendingRestores.set(leafId, text);
+}
+
+export function discardRestoredBuffer(leafId: number): void {
+  pendingRestores.delete(leafId);
+}
+
+export function hasRestoredBuffer(leafId: number): boolean {
+  return pendingRestores.has(leafId);
 }
 
 function getRecycler(): HTMLDivElement {
@@ -509,21 +549,16 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
       slot.term.resize(p.cols, p.rows);
     }
 
-    if (p.snapshot) {
-      try {
-        slot.term.write(p.snapshot);
-      } catch (e) {
-        console.warn("[koden] snapshot replay failed:", e);
-      }
-    }
-    if (p.altScreen) {
-      // TUI output is incremental cursor-positioned updates that can't be
-      // replayed on top of a stale snapshot; the SIGWINCH kick below makes
+    const restored = pendingRestores.get(p.leafId) ?? null;
+    pendingRestores.delete(p.leafId);
+    replayFirstBind(slot.term, {
+      restored,
+      snapshot: p.snapshot,
+      // In alt-screen the ring is dropped and the SIGWINCH kick below makes
       // the TUI redraw from scratch instead.
-      p.drainRing(() => {});
-    } else {
-      p.drainRing((bytes) => slot.term.write(bytes));
-    }
+      altScreen: p.altScreen,
+      drainRing: p.drainRing,
+    });
     try {
       slot.term.write("\x1b[?25h");
     } catch {}
@@ -1063,6 +1098,7 @@ export function refreshLeafSlot(leafId: number): void {
 }
 
 export function disposeLeafSlot(leafId: number): void {
+  pendingRestores.delete(leafId);
   const slot = slots.find(
     (s) => s.currentLeafId === leafId || s.retainedLeafId === leafId,
   );

@@ -53,6 +53,7 @@ mod tests {
             cwd: "/work/proj".into(),
             project: Some("p".into()),
             claude_session_id: sid.map(String::from),
+            last_ts: 0,
         }
     }
 

@@ -1,11 +1,22 @@
 import { useCallback, useEffect, useRef } from "react";
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { Tab } from "@/modules/tabs";
 import { usePaneTitleStore } from "@/modules/terminal/lib/paneTitles";
+import { captureLeafForRestore } from "@/modules/terminal/lib/useTerminalSession";
+import {
+  clearScrollbackSnapshots,
+  leafRestoreKey,
+  saveScrollbackSnapshots,
+} from "./scrollbackStore";
 import { isSerializableTab, serializeTabs } from "./serialize";
 import { saveState } from "./store";
 import { useSpaces } from "./useSpaces";
 
 const DEBOUNCE_MS = 3000;
+// Scrollback capture is a buffer copy per live terminal and PTY output never
+// touches React state, so it runs on its own slow cadence plus every close
+// path (hidden window, unload, unmount); unchanged buffers cost no IPC.
+const SCROLLBACK_INTERVAL_MS = 8000;
 
 type Snapshot = { tabs: Tab[]; activeId: number; activeSpaceId: string };
 
@@ -27,6 +38,7 @@ export function useSpacePersistence({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef<Snapshot>({ tabs, activeId, activeSpaceId });
   latest.current = { tabs, activeId, activeSpaceId };
+  const scrollbackOff = useRef(false);
 
   // Seed each space's last-known active index from disk so the first flush
   // preserves it for spaces the user never opens (empty json forces one write
@@ -51,10 +63,14 @@ export function useSpacePersistence({
     for (const [spaceId, group] of groups) {
       // Persist only unlocked per-pane titles/colors; locked panes (Director,
       // agents) are recreated on boot, not restored from disk.
-      const serialized = serializeTabs(group, (leafId) => {
-        const e = usePaneTitleStore.getState().titles[leafId];
-        return e && !e.locked ? { label: e.label, color: e.color } : undefined;
-      });
+      const serialized = serializeTabs(
+        group,
+        (leafId) => {
+          const e = usePaneTitleStore.getState().titles[leafId];
+          return e && !e.locked ? { label: e.label, color: e.color } : undefined;
+        },
+        leafRestoreKey,
+      );
       const prev = last.current.get(spaceId);
       let activeTabIndex = prev?.activeTabIndex ?? 0;
       if (spaceId === snap.activeSpaceId) {
@@ -76,6 +92,22 @@ export function useSpacePersistence({
     }
   }, []);
 
+  const flushScrollback = useCallback((snap: Snapshot) => {
+    const cap = usePreferencesStore.getState().terminalScrollbackRestoreLines;
+    if (cap <= 0) {
+      // Off wipes what an earlier setting left on disk, once.
+      if (!scrollbackOff.current) {
+        scrollbackOff.current = true;
+        void clearScrollbackSnapshots().catch(() => {});
+      }
+      return;
+    }
+    scrollbackOff.current = false;
+    void saveScrollbackSnapshots(snap.tabs, (leafId) =>
+      captureLeafForRestore(leafId, cap),
+    );
+  }, []);
+
   useEffect(() => {
     if (!enabled) return;
     const snap: Snapshot = { tabs, activeId, activeSpaceId };
@@ -91,18 +123,31 @@ export function useSpacePersistence({
 
   useEffect(() => {
     if (!enabled) return;
-    const onHidden = () => {
-      if (document.visibilityState === "hidden") flush(latest.current);
+    const id = setInterval(
+      () => flushScrollback(latest.current),
+      SCROLLBACK_INTERVAL_MS,
+    );
+    return () => clearInterval(id);
+  }, [enabled, flushScrollback]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const flushAll = () => {
+      flush(latest.current);
+      flushScrollback(latest.current);
     };
-    const onLeave = () => flush(latest.current);
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") flushAll();
+    };
+    const onBlur = () => flush(latest.current);
     document.addEventListener("visibilitychange", onHidden);
-    window.addEventListener("blur", onLeave);
-    window.addEventListener("beforeunload", onLeave);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("beforeunload", flushAll);
     return () => {
       document.removeEventListener("visibilitychange", onHidden);
-      window.removeEventListener("blur", onLeave);
-      window.removeEventListener("beforeunload", onLeave);
-      flush(latest.current);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("beforeunload", flushAll);
+      flushAll();
     };
-  }, [enabled, flush]);
+  }, [enabled, flush, flushScrollback]);
 }

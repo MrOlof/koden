@@ -293,11 +293,38 @@ export type RecoveredPane = {
   cwd: string;
   project: string | null;
   claude_session_id: string | null;
+  /** Epoch-ms of the last journaled signal. */
+  last_ts: number;
 };
 
 /** Panes recoverable from the previous session — drives the resume cards. */
 export function brainRecoveredPanes(): Promise<RecoveredPane[]> {
   return invoke<RecoveredPane[]>("brain_recovered_panes", {});
+}
+
+/** How to relaunch a recovered pane. Mirrors the Rust `ResumePlan` enum
+ *  (`#[serde(tag = "tier", rename_all = "lowercase")]`). Tier-2 carries the
+ *  full command (`<base> --resume <id>`), emitted ONLY when a session id was
+ *  genuinely captured; Tier-1 is a plain relaunch in the recovered cwd. */
+export type ResumePlan =
+  | { tier: "tier2"; command: string }
+  | { tier: "tier1"; cwd: string };
+
+/** Relaunch plan for one recovered pane; null for an unknown/dismissed key. */
+export function brainResumePlan(
+  paneKey: string,
+  baseLaunch: string,
+): Promise<ResumePlan | null> {
+  return invoke<ResumePlan | null>("brain_resume_plan", {
+    paneKey,
+    baseLaunch,
+  });
+}
+
+/** Dismiss a recovered pane for good: dropped from this boot's list and marked
+ *  as cleanly exited in its journal (append-only), so it never comes back. */
+export function brainDismissRecovered(paneKey: string): Promise<boolean> {
+  return invoke<boolean>("brain_dismiss_recovered", { paneKey });
 }
 
 /** Record one submitted user prompt against its pty (ADR-020 session activity).
