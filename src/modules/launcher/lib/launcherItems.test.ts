@@ -2,26 +2,33 @@ import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import type { IconSvgElement } from "@hugeicons/react";
 import { describe, expect, it, vi } from "vitest";
 import {
-  buildLauncherSections,
+  buildStartPage,
   envBadgeLabel,
   filterHosts,
   folderBasename,
   hostHint,
-  type LauncherIcons,
   normalizeFolderPath,
+  RECENT_EMPTY,
   RECENT_SPACES_CAP,
   recentSpaces,
   sameEnv,
   shortenRoot,
+  START_ITEM_IDS,
+  type StartIcons,
   validateHost,
 } from "./launcherItems";
 
-const icon: IconSvgElement = [];
-const icons: LauncherIcons = {
-  terminal: icon,
-  wsl: icon,
-  folder: icon,
-  setup: icon,
+const icon = (name: string): IconSvgElement =>
+  [["path", { d: name }]] as unknown as IconSvgElement;
+const icons: StartIcons = {
+  openFolder: icon("openFolder"),
+  remote: icon("remote"),
+  terminal: icon("terminal"),
+  wsl: icon("wsl"),
+  editor: icon("editor"),
+  note: icon("note"),
+  folder: icon("folder"),
+  server: icon("server"),
 };
 
 function space(over: Partial<SpaceMeta> & { id: string }): SpaceMeta {
@@ -39,7 +46,9 @@ describe("envBadgeLabel", () => {
   it("labels each env kind and hides local unless a label is given", () => {
     expect(envBadgeLabel({ kind: "local" })).toBeNull();
     expect(envBadgeLabel({ kind: "local" }, "Windows")).toBe("Windows");
-    expect(envBadgeLabel({ kind: "wsl", distro: "Ubuntu" })).toBe("WSL: Ubuntu");
+    expect(envBadgeLabel({ kind: "wsl", distro: "Ubuntu" })).toBe(
+      "WSL: Ubuntu",
+    );
     expect(envBadgeLabel({ kind: "ssh", host: "lab", path: "" })).toBe(
       "ssh: lab",
     );
@@ -69,15 +78,43 @@ describe("sameEnv", () => {
 });
 
 describe("paths", () => {
-  it("shortens a root to its last two segments on either separator", () => {
-    expect(shortenRoot("C:\\Users\\me\\Products\\koden")).toBe("Products/koden");
-    expect(shortenRoot("/home/me")).toBe("home/me");
-    expect(shortenRoot("/")).toBe("/");
+  it("keeps the last two segments of a deep root on either separator", () => {
+    expect(shortenRoot("C:\\Users\\me\\Products\\koden")).toBe(
+      "…/Products/koden",
+    );
+    expect(shortenRoot("/srv/app/current/site")).toBe("…/current/site");
     expect(shortenRoot(null)).toBeNull();
   });
 
+  it("leaves a short root whole in canonical form", () => {
+    expect(shortenRoot("/home/me")).toBe("/home/me");
+    expect(shortenRoot("C:\\Users\\")).toBe("C:/Users");
+    expect(shortenRoot("/")).toBe("/");
+  });
+
+  it("folds the home folder to ~ and keeps at most two segments after it", () => {
+    const home = "C:/Users/me";
+    expect(shortenRoot("C:\\Users\\me", home)).toBe("~");
+    expect(shortenRoot("C:\\Users\\me\\Products", home)).toBe("~/Products");
+    expect(shortenRoot("C:\\Users\\me\\Products\\koden", home)).toBe(
+      "~/Products/koden",
+    );
+    expect(shortenRoot("C:/Users/me/a/b/c", home)).toBe("~/…/b/c");
+    expect(shortenRoot("/home/me/src/koden/app", "/home/me")).toBe(
+      "~/…/koden/app",
+    );
+  });
+
+  it("matches home case-insensitively only on Windows drives", () => {
+    expect(shortenRoot("c:/users/me/x", "C:/Users/me")).toBe("~/x");
+    expect(shortenRoot("/home/ME/x", "/home/me")).toBe("…/ME/x");
+    expect(shortenRoot("/home/melon/x", "/home/me")).toBe("…/melon/x");
+  });
+
   it("normalizes a picked folder to forward slashes without a trailing slash", () => {
-    expect(normalizeFolderPath("C:\\Users\\me\\proj\\")).toBe("C:/Users/me/proj");
+    expect(normalizeFolderPath("C:\\Users\\me\\proj\\")).toBe(
+      "C:/Users/me/proj",
+    );
     expect(normalizeFolderPath("/home/me/proj/")).toBe("/home/me/proj");
     expect(normalizeFolderPath("C:\\")).toBe("C:/");
     expect(normalizeFolderPath("/")).toBe("/");
@@ -154,7 +191,7 @@ describe("hosts", () => {
   });
 });
 
-describe("buildLauncherSections", () => {
+describe("buildStartPage", () => {
   const spaces = [
     space({ id: "active", name: "Active", updatedAt: 5 }),
     space({
@@ -172,12 +209,20 @@ describe("buildLauncherSections", () => {
       env: { kind: "ssh", host: "vps", path: "" },
       updatedAt: 7,
     }),
+    space({
+      id: "local",
+      name: "koden",
+      root: "C:/Users/me/Products/koden",
+      updatedAt: 8,
+    }),
   ];
   const handlers = () => ({
     switchSpace: vi.fn(),
     newTerminal: vi.fn(),
     openFolder: vi.fn(),
-    openSetup: vi.fn(),
+    connectRemote: vi.fn(),
+    newEditor: vi.fn(),
+    newNote: vi.fn(),
   });
   const input = {
     spaces,
@@ -187,56 +232,55 @@ describe("buildLauncherSections", () => {
       { name: "Debian", default: false, running: false },
     ],
     isWindows: true,
-    localLabel: "Windows",
-    localCwd: "C:/Users/me",
-    newTabShortcut: "Ctrl+T",
+    home: "C:/Users/me",
+    newTerminalShortcut: "Ctrl T",
+    newEditorShortcut: "Ctrl E",
     icons,
   };
 
-  it("orders the sections continue, new terminal, open, set up", () => {
-    const sections = buildLauncherSections(input, handlers());
-    expect(sections.map((s) => s.id)).toEqual([
-      "continue",
-      "new-terminal",
-      "open-folder",
-      "setup",
-    ]);
-  });
-
-  it("lists recent spaces with root, env badge and accent, wired to switchSpace", () => {
-    const on = handlers();
-    const [cont] = buildLauncherSections(input, on);
-    expect(cont.items.map((i) => i.label)).toEqual(["Homelab", "vps"]);
-    expect(cont.items[0]).toMatchObject({
-      description: "me/lab",
-      badge: "WSL: Ubuntu",
-    });
-    expect(cont.items[0].accent).not.toBe("var(--primary)");
-    expect(cont.items[1]).toMatchObject({
-      description: null,
-      badge: "ssh: vps",
-      accent: "var(--primary)",
-    });
-    cont.items[1].onSelect();
-    expect(on.switchSpace).toHaveBeenCalledWith("ssh");
-  });
-
-  it("offers a local terminal plus one item per WSL distro on Windows", () => {
-    const on = handlers();
-    const [, term] = buildLauncherSections(input, on);
-    expect(term.items.map((i) => i.id)).toEqual([
-      "terminal:local",
+  it("orders START: open folder, remote, terminal, WSL distros, editor, note", () => {
+    const { start } = buildStartPage(input, handlers());
+    expect(start.items.map((i) => i.id)).toEqual([
+      START_ITEM_IDS.openFolder,
+      START_ITEM_IDS.connectRemote,
+      START_ITEM_IDS.newTerminal,
       "terminal:wsl:Ubuntu",
       "terminal:wsl:Debian",
+      START_ITEM_IDS.newEditor,
+      START_ITEM_IDS.newNote,
     ]);
-    expect(term.items[0]).toMatchObject({
-      description: "C:/Users/me",
-      hint: "Ctrl+T",
-    });
-    expect(term.items[1].badge).toBe("running");
-    expect(term.items[2].badge).toBeNull();
-    term.items[0].onSelect();
-    term.items[2].onSelect();
+    expect(start.items.map((i) => i.label)).toEqual([
+      "Open folder…",
+      "Connect to remote…",
+      "New terminal",
+      "Terminal in Ubuntu",
+      "Terminal in Debian",
+      "New editor",
+      "New note",
+    ]);
+  });
+
+  it("shows the live bindings as keycap hints, never a fixed key", () => {
+    const { start } = buildStartPage(input, handlers());
+    const byId = new Map(start.items.map((i) => [i.id, i]));
+    expect(byId.get(START_ITEM_IDS.newTerminal)?.shortcut).toBe("Ctrl T");
+    expect(byId.get(START_ITEM_IDS.newEditor)?.shortcut).toBe("Ctrl E");
+    expect(byId.get(START_ITEM_IDS.openFolder)?.shortcut).toBeUndefined();
+    const rebound = buildStartPage(
+      { ...input, newTerminalShortcut: "Ctrl Shift T" },
+      handlers(),
+    );
+    expect(rebound.start.items[2].shortcut).toBe("Ctrl Shift T");
+  });
+
+  it("marks WSL rows with a badge and routes them to the distro env", () => {
+    const on = handlers();
+    const { start } = buildStartPage(input, on);
+    const wslRows = start.items.filter((i) => i.id.startsWith("terminal:wsl:"));
+    expect(wslRows.every((i) => i.badge === "WSL")).toBe(true);
+    expect(wslRows.every((i) => i.icon === icons.wsl)).toBe(true);
+    start.items[2].onSelect();
+    wslRows[1].onSelect();
     expect(on.newTerminal).toHaveBeenNthCalledWith(1, { kind: "local" });
     expect(on.newTerminal).toHaveBeenNthCalledWith(2, {
       kind: "wsl",
@@ -245,28 +289,83 @@ describe("buildLauncherSections", () => {
   });
 
   it("never lists WSL distros off Windows", () => {
-    const [, term] = buildLauncherSections(
-      { ...input, isWindows: false, localLabel: "macOS" },
+    const { start } = buildStartPage(
+      { ...input, isWindows: false },
       handlers(),
     );
-    expect(term.items.map((i) => i.id)).toEqual(["terminal:local"]);
+    expect(start.items.some((i) => i.id.startsWith("terminal:wsl:"))).toBe(
+      false,
+    );
   });
 
-  it("routes open folder and setup to their handlers", () => {
+  it("omits the editor and note rows when the shell offers no handler", () => {
     const on = handlers();
-    const [, , open, setup] = buildLauncherSections(input, on);
-    open.items[0].onSelect();
-    setup.items[0].onSelect();
-    expect(on.openFolder).toHaveBeenCalledOnce();
-    expect(on.openSetup).toHaveBeenCalledOnce();
+    const { start } = buildStartPage(input, {
+      ...on,
+      newEditor: undefined,
+      newNote: undefined,
+    });
+    expect(start.items.map((i) => i.id)).not.toContain(
+      START_ITEM_IDS.newEditor,
+    );
+    expect(start.items.map((i) => i.id)).not.toContain(START_ITEM_IDS.newNote);
   });
 
-  it("keeps an empty-state line for Continue when there is nothing to continue", () => {
-    const [cont] = buildLauncherSections(
+  it("routes open folder, remote, editor and note to their handlers", () => {
+    const on = handlers();
+    const { start } = buildStartPage(input, on);
+    const byId = new Map(start.items.map((i) => [i.id, i]));
+    byId.get(START_ITEM_IDS.openFolder)?.onSelect();
+    byId.get(START_ITEM_IDS.connectRemote)?.onSelect();
+    byId.get(START_ITEM_IDS.newEditor)?.onSelect();
+    byId.get(START_ITEM_IDS.newNote)?.onSelect();
+    expect(on.openFolder).toHaveBeenCalledOnce();
+    expect(on.connectRemote).toHaveBeenCalledOnce();
+    expect(on.newEditor).toHaveBeenCalledOnce();
+    expect(on.newNote).toHaveBeenCalledOnce();
+  });
+
+  it("lists recent spaces newest first with env icon, badge and short path", () => {
+    const on = handlers();
+    const { recent } = buildStartPage(input, on);
+    expect(recent.items.map((i) => i.label)).toEqual([
+      "Homelab",
+      "koden",
+      "vps",
+    ]);
+    expect(recent.items[0]).toMatchObject({
+      description: "…/me/lab",
+      badge: "WSL: Ubuntu",
+      icon: icons.wsl,
+    });
+    expect(recent.items[1]).toMatchObject({
+      description: "~/Products/koden",
+      badge: null,
+      icon: icons.folder,
+    });
+    expect(recent.items[2]).toMatchObject({
+      description: null,
+      badge: "ssh: vps",
+      icon: icons.server,
+    });
+    recent.items[2].onSelect();
+    expect(on.switchSpace).toHaveBeenCalledWith("ssh");
+  });
+
+  it("caps recent at the shared limit", () => {
+    const many = Array.from({ length: 12 }, (_, i) =>
+      space({ id: `s${i}`, updatedAt: i }),
+    );
+    const { recent } = buildStartPage({ ...input, spaces: many }, handlers());
+    expect(recent.items).toHaveLength(RECENT_SPACES_CAP);
+  });
+
+  it("keeps an empty-state line for Recent when there is nothing to reopen", () => {
+    const { recent } = buildStartPage(
       { ...input, spaces: [spaces[0]] },
       handlers(),
     );
-    expect(cont.items).toEqual([]);
-    expect(cont.empty).toBeTruthy();
+    expect(recent.items).toEqual([]);
+    expect(recent.empty).toBe(RECENT_EMPTY);
   });
 });

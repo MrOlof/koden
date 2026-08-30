@@ -1,26 +1,31 @@
-import { Kbd } from "@/components/ui/kbd";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Wordmark } from "@/components/Wordmark";
-import { IS_WINDOWS, LOCAL_ENV_LABEL } from "@/lib/platform";
-import { useShortcutLabel } from "@/modules/shortcuts";
+import { IS_WINDOWS } from "@/lib/platform";
+import { type ShortcutId, useShortcutLabel } from "@/modules/shortcuts";
 import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
 import {
+  CloudServerIcon,
   ComputerTerminal02Icon,
+  Folder01Icon,
   FolderOpenIcon,
-  RocketIcon,
+  Note01Icon,
+  PencilEdit02Icon,
+  ServerStack03Icon,
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { KeyTokens } from "./KeyTokens";
 import { LauncherSection, LauncherSectionTitle } from "./LauncherSection";
 import {
-  buildLauncherSections,
-  LAUNCHER_SECTION_IDS,
-  type LauncherIcons,
+  buildStartPage,
   type LauncherSectionModel,
   type SshEnv,
   type SshHost,
+  START_ITEM_IDS,
+  type StartIcons,
 } from "./lib/launcherItems";
 import { useLauncherKeys } from "./lib/useLauncherKeys";
 import { RemoteConnectForm } from "./RemoteConnectForm";
@@ -28,8 +33,6 @@ import { RemoteConnectForm } from "./RemoteConnectForm";
 export type LauncherFocusTarget = "remote";
 
 type Props = {
-  /** Where "Terminal here" opens; shown under the item. */
-  localCwd: string | null;
   /** Land focus somewhere specific on mount (the palette's connect command). */
   initialFocus?: LauncherFocusTarget | null;
   onFocusHandled?: () => void;
@@ -38,24 +41,43 @@ type Props = {
   onOpenFolder: () => void;
   onConnectRemote: (env: SshEnv) => Promise<void> | void;
   onOpenSetup: () => void;
-  /** Extra list sections, rendered right after "Continue". */
+  onNewEditor?: () => void;
+  onNewNote?: () => void;
+  /** Local home; recent paths under it read as `~/…`. */
+  home?: string | null;
+  /** Extra list sections (resume cards), rendered above the two columns. */
   extraSections?: LauncherSectionModel[];
 };
 
-const ICONS: LauncherIcons = {
+const ICONS: StartIcons = {
+  openFolder: FolderOpenIcon,
+  remote: CloudServerIcon,
   terminal: ComputerTerminal02Icon,
   wsl: TerminalIcon,
-  folder: FolderOpenIcon,
-  setup: RocketIcon,
+  editor: PencilEdit02Icon,
+  note: Note01Icon,
+  folder: Folder01Icon,
+  server: ServerStack03Icon,
 };
 
+const SHORTCUT_ROWS: { id: ShortcutId; label: string }[] = [
+  { id: "tab.new", label: "New terminal" },
+  { id: "tab.newEditor", label: "New editor" },
+  { id: "commandPalette.open", label: "Command palette" },
+  { id: "sidebar.toggle", label: "Toggle sidebar" },
+  { id: "launcher.show", label: "Start page" },
+  { id: "ai.toggle", label: "Ask the Librarian" },
+];
+
+const CONNECT_ROW_SELECTOR = `[data-launcher-item="${START_ITEM_IDS.connectRemote}"]`;
+const FIRST_START_ROW_SELECTOR = `[data-launcher-item="${START_ITEM_IDS.openFolder}"]`;
+
 /**
- * The "What do you want to do?" page: continue a Space, open a terminal or a
- * folder, connect to a remote host, or run setup. Lives in a `launcher` tab
- * (never persisted) and is also the content of any Space with no tabs.
+ * The start page: brand, resume cards, START and RECENT columns, the live
+ * shortcut sheet and the version. Lives in a `launcher` tab (never persisted)
+ * and is also the content of any Space with no tabs.
  */
 export function LauncherPane({
-  localCwd,
   initialFocus = null,
   onFocusHandled,
   onSwitchSpace,
@@ -63,6 +85,9 @@ export function LauncherPane({
   onOpenFolder,
   onConnectRemote,
   onOpenSetup,
+  onNewEditor,
+  onNewNote,
+  home = null,
   extraSections,
 }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -71,19 +96,32 @@ export function LauncherPane({
   const activeSpaceId = useSpaces((s) => s.activeId);
   const distros = useWorkspaceEnvStore((s) => s.distros);
   const refreshDistros = useWorkspaceEnvStore((s) => s.refreshDistros);
-  const newTabShortcut = useShortcutLabel("tab.new");
+  const newTerminalShortcut = useShortcutLabel("tab.new");
+  const newEditorShortcut = useShortcutLabel("tab.newEditor");
   const [hosts, setHosts] = useState<SshHost[] | null>(null);
+  const [remoteOpen, setRemoteOpen] = useState(initialFocus === "remote");
+  const [version, setVersion] = useState("");
 
-  useLauncherKeys(rootRef, { focusFirst: initialFocus === null });
+  useLauncherKeys(rootRef, {
+    focusFirst: initialFocus === null,
+    initialStop: FIRST_START_ROW_SELECTOR,
+  });
 
   useEffect(() => {
     if (initialFocus !== "remote") return;
+    setRemoteOpen(true);
     const raf = requestAnimationFrame(() => {
       hostInputRef.current?.focus();
       onFocusHandled?.();
     });
     return () => cancelAnimationFrame(raf);
   }, [initialFocus, onFocusHandled]);
+
+  useEffect(() => {
+    if (!remoteOpen) return;
+    const raf = requestAnimationFrame(() => hostInputRef.current?.focus());
+    return () => cancelAnimationFrame(raf);
+  }, [remoteOpen]);
 
   useEffect(() => {
     if (IS_WINDOWS) void refreshDistros();
@@ -104,106 +142,142 @@ export function LauncherPane({
     };
   }, []);
 
-  const sections = useMemo(
+  useEffect(() => {
+    let alive = true;
+    getVersion()
+      .then((v) => {
+        if (alive) setVersion(v);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const toggleRemote = useCallback(() => setRemoteOpen((v) => !v), []);
+
+  const closeRemote = useCallback(() => {
+    setRemoteOpen(false);
+    rootRef.current?.querySelector<HTMLElement>(CONNECT_ROW_SELECTOR)?.focus();
+  }, []);
+
+  const page = useMemo(
     () =>
-      buildLauncherSections(
+      buildStartPage(
         {
           spaces,
           activeSpaceId,
           distros,
           isWindows: IS_WINDOWS,
-          localLabel: LOCAL_ENV_LABEL,
-          localCwd,
-          newTabShortcut,
+          home,
+          newTerminalShortcut,
+          newEditorShortcut,
           icons: ICONS,
         },
         {
           switchSpace: onSwitchSpace,
           newTerminal: onNewTerminal,
           openFolder: onOpenFolder,
-          openSetup: onOpenSetup,
+          connectRemote: toggleRemote,
+          newEditor: onNewEditor,
+          newNote: onNewNote,
         },
       ),
     [
       spaces,
       activeSpaceId,
       distros,
-      localCwd,
-      newTabShortcut,
+      home,
+      newTerminalShortcut,
+      newEditorShortcut,
       onSwitchSpace,
       onNewTerminal,
       onOpenFolder,
-      onOpenSetup,
+      toggleRemote,
+      onNewEditor,
+      onNewNote,
     ],
   );
 
-  // Extra sections slot in right after Continue; the remote form sits just
-  // before Set up so every list stays one arrow-key sequence.
-  const continueSection = sections.find(
-    (s) => s.id === LAUNCHER_SECTION_IDS.continue,
-  );
-  const setupSection = sections.find(
-    (s) => s.id === LAUNCHER_SECTION_IDS.setup,
-  );
-  const middle = sections.filter(
-    (s) => s !== continueSection && s !== setupSection,
-  );
-
   return (
-    <ScrollArea className="h-full">
-      <div
-        ref={rootRef}
-        className="koden-panel-in mx-auto flex w-full max-w-2xl flex-col gap-7 px-6 pt-10 pb-12"
-      >
-        <header className="flex flex-col gap-2 px-3">
-          <Wordmark className="text-[13px] text-muted-foreground" />
-          <h1 className="text-[22px] font-medium leading-tight tracking-tight text-foreground">
-            What do you want to do?
-          </h1>
-          <p className="text-xs text-muted-foreground">
-            Pick up a Space, open a terminal or a folder, or connect somewhere
-            new.
-          </p>
-        </header>
-
-        {continueSection ? <LauncherSection section={continueSection} /> : null}
-        {extraSections?.map((s) => (
-          <LauncherSection key={s.id} section={s} />
-        ))}
-        {middle.map((s) => (
-          <LauncherSection key={s.id} section={s} />
-        ))}
-
-        <section
-          aria-label="Connect to a remote host"
-          className="flex flex-col gap-2"
+    // Size containment gives the page a container to center against
+    // (100cqh) and to query for the two-column breakpoint; the Radix viewport
+    // wraps content in a table box, so a percentage min-height would not.
+    <ScrollArea className="h-full [container-type:size]">
+      <div className="flex min-h-[100cqh] flex-col justify-center px-6 py-10">
+        <div
+          ref={rootRef}
+          className="koden-panel-in mx-auto flex w-full max-w-[720px] flex-col gap-10"
         >
-          <LauncherSectionTitle>Connect to a remote host</LauncherSectionTitle>
-          <RemoteConnectForm
-            hosts={hosts}
-            onConnect={onConnectRemote}
-            hostInputRef={hostInputRef}
-          />
-        </section>
+          <header className="flex flex-col items-center gap-3 text-center">
+            <img
+              src="/logo.png"
+              alt=""
+              className="size-10 select-none"
+              draggable={false}
+            />
+            <Wordmark className="text-[26px] leading-none" />
+            <p className="text-[11.5px] text-muted-foreground/70">
+              A terminal-first AI workspace.
+            </p>
+          </header>
 
-        {setupSection ? <LauncherSection section={setupSection} /> : null}
+          {extraSections?.map((s) => (
+            <LauncherSection key={s.id} section={s} />
+          ))}
 
-        <footer className="flex items-center gap-3 px-3 text-[10.5px] text-muted-foreground/50">
-          <span className="flex items-center gap-1">
-            <Kbd className="h-4 min-w-4 px-1 text-[10px]">↑</Kbd>
-            <Kbd className="h-4 min-w-4 px-1 text-[10px]">↓</Kbd>
-            move
-          </span>
-          <span className="flex items-center gap-1">
-            <Kbd className="h-4 min-w-4 px-1 text-[10px]">↵</Kbd>
-            open
-          </span>
-          <span className="flex items-center gap-1">
-            <Kbd className="h-4 min-w-4 px-1 text-[10px]">Tab</Kbd>
-            form fields
-          </span>
-        </footer>
+          <div className="grid grid-cols-1 gap-x-12 gap-y-8 @min-[560px]:grid-cols-2">
+            <div className="flex min-w-0 flex-col gap-3">
+              <LauncherSection section={page.start} />
+              {remoteOpen ? (
+                <RemoteConnectForm
+                  hosts={hosts}
+                  onConnect={onConnectRemote}
+                  hostInputRef={hostInputRef}
+                  onCancel={closeRemote}
+                />
+              ) : null}
+            </div>
+            <LauncherSection section={page.recent} className="min-w-0" />
+          </div>
+
+          <section
+            aria-label="Keyboard shortcuts"
+            className="flex flex-col gap-1.5"
+          >
+            <LauncherSectionTitle>Keyboard shortcuts</LauncherSectionTitle>
+            <ul className="grid grid-cols-1 gap-x-12 @min-[560px]:grid-cols-2">
+              {SHORTCUT_ROWS.map((row) => (
+                <ShortcutRow key={row.id} id={row.id} label={row.label} />
+              ))}
+            </ul>
+          </section>
+
+          <footer className="flex items-center justify-center gap-2 font-mono text-[10.5px] text-muted-foreground/40">
+            <span>{version ? `koden v${version}` : "koden"}</span>
+            <span aria-hidden>·</span>
+            <button
+              type="button"
+              onClick={onOpenSetup}
+              className="rounded-sm outline-none transition-colors hover:text-muted-foreground focus-visible:text-muted-foreground focus-visible:ring-1 focus-visible:ring-primary/40"
+            >
+              Setup guide
+            </button>
+          </footer>
+        </div>
       </div>
     </ScrollArea>
+  );
+}
+
+function ShortcutRow({ id, label }: { id: ShortcutId; label: string }) {
+  const binding = useShortcutLabel(id);
+  return (
+    <li className="flex h-7 items-center justify-between gap-3 px-2.5">
+      <span className="truncate text-[12px] text-muted-foreground">
+        {label}
+      </span>
+      <KeyTokens label={binding} />
+    </li>
   );
 }

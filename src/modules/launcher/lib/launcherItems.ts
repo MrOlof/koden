@@ -1,4 +1,3 @@
-import { accentFor } from "@/modules/spaces/lib/spaceColor";
 import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import type { WorkspaceEnv, WslDistro } from "@/modules/workspace";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -15,13 +14,15 @@ export type SshEnv = Extract<WorkspaceEnv, { kind: "ssh" }>;
 export type LauncherItemModel = {
   id: string;
   label: string;
-  /** Muted second line (e.g. a shortened path). */
+  /** Muted mono text on the right (a shortened path, a cwd). */
   description?: string | null;
-  /** Right-aligned muted text (e.g. a shortcut or "2 panes"). */
+  /** Right-aligned muted text (e.g. "2 min ago" or "2 panes"). */
   hint?: string | null;
-  /** Small pill after the label (e.g. "WSL: Ubuntu"). */
+  /** Right-aligned key tokens ("Ctrl T"), rendered as keycaps. */
+  shortcut?: string | null;
+  /** Small pill after the label (e.g. "WSL", "ssh: lab"). */
   badge?: string | null;
-  /** CSS color for the leading dot; omitted = no dot. */
+  /** CSS color for a leading dot when the item has no icon. */
   accent?: string | null;
   /** hugeicons element; omitted = no icon. */
   icon?: IconSvgElement;
@@ -61,22 +62,55 @@ export function sameEnv(a: WorkspaceEnv, b: WorkspaceEnv): boolean {
   return true;
 }
 
-/** Last two path segments, the same shortening the space switcher uses. */
-export function shortenRoot(root: string | null | undefined): string | null {
+function segmentsOf(path: string): string[] {
+  return path.split(/[\\/]/).filter(Boolean);
+}
+
+function isDriveLetter(seg: string | undefined): boolean {
+  return seg !== undefined && /^[A-Za-z]:$/.test(seg);
+}
+
+function startsWithSegments(path: string[], prefix: string[]): boolean {
+  if (prefix.length === 0 || prefix.length > path.length) return false;
+  // Windows paths compare case-insensitively (C:/Users vs c:/users).
+  const fold = isDriveLetter(prefix[0])
+    ? (s: string) => s.toLowerCase()
+    : (s: string) => s;
+  return prefix.every((seg, i) => fold(seg) === fold(path[i]));
+}
+
+/**
+ * `~/…/last/two`: a root under `home` folds home to `~`, a deep path keeps
+ * its last two segments, and a short path stays whole.
+ */
+export function shortenRoot(
+  root: string | null | undefined,
+  home: string | null = null,
+): string | null {
   if (!root) return null;
-  const segs = root.split(/[\\/]/).filter(Boolean);
-  return segs.slice(-2).join("/") || root;
+  const segs = segmentsOf(root);
+  const homeSegs = home ? segmentsOf(home) : [];
+  if (startsWithSegments(segs, homeSegs)) {
+    const rel = segs.slice(homeSegs.length);
+    if (rel.length === 0) return "~";
+    if (rel.length <= 2) return `~/${rel.join("/")}`;
+    return `~/…/${rel.slice(-2).join("/")}`;
+  }
+  if (segs.length <= 2) return normalizeFolderPath(root);
+  return `…/${segs.slice(-2).join("/")}`;
 }
 
 /** Canonical forward-slash form without a trailing separator ("C:/" keeps its). */
 export function normalizeFolderPath(path: string): string {
   const fwd = path.trim().replace(/\\/g, "/");
   const stripped = fwd.replace(/\/+$/, "");
-  return /^[A-Za-z]:$/.test(stripped) || stripped === "" ? `${stripped}/` : stripped;
+  return /^[A-Za-z]:$/.test(stripped) || stripped === ""
+    ? `${stripped}/`
+    : stripped;
 }
 
 export function folderBasename(path: string): string {
-  const segs = path.split(/[\\/]/).filter(Boolean);
+  const segs = segmentsOf(path);
   return segs.length ? segs[segs.length - 1] : path;
 }
 
@@ -124,114 +158,155 @@ export function validateHost(raw: string): string | null {
   return null;
 }
 
-export type LauncherIcons = {
+export type StartIcons = {
+  openFolder: IconSvgElement;
+  remote: IconSvgElement;
   terminal: IconSvgElement;
   wsl: IconSvgElement;
+  editor: IconSvgElement;
+  note: IconSvgElement;
+  /** Recent Space rows: local folder, ssh host. */
   folder: IconSvgElement;
-  setup: IconSvgElement;
+  server: IconSvgElement;
 };
 
-export type LauncherBuildInput = {
+export type StartPageInput = {
   spaces: readonly SpaceMeta[];
   activeSpaceId: string | null;
   distros: readonly WslDistro[];
   isWindows: boolean;
-  /** Badge for local Spaces ("Windows", "macOS", "Linux"). */
-  localLabel: string;
-  /** Where "Terminal here" opens; null hides the description. */
-  localCwd: string | null;
-  newTabShortcut?: string | null;
-  icons: LauncherIcons;
+  /** Local home, folded to `~` in recent paths; null leaves paths as-is. */
+  home: string | null;
+  newTerminalShortcut?: string | null;
+  newEditorShortcut?: string | null;
+  icons: StartIcons;
 };
 
-export type LauncherHandlers = {
+export type StartPageHandlers = {
   switchSpace: (id: string) => void;
   newTerminal: (env: WorkspaceEnv) => void;
   openFolder: () => void;
-  openSetup: () => void;
+  /** Expands the inline remote form under the START column. */
+  connectRemote: () => void;
+  /** Rows are omitted when the shell does not provide these. */
+  newEditor?: () => void;
+  newNote?: () => void;
 };
 
-export const LAUNCHER_SECTION_IDS = {
-  continue: "continue",
-  newTerminal: "new-terminal",
-  openFolder: "open-folder",
-  setup: "setup",
+export type StartPageModel = {
+  start: LauncherSectionModel;
+  recent: LauncherSectionModel;
+};
+
+export const START_SECTION_IDS = {
+  start: "start",
+  recent: "recent",
 } as const;
 
-export function buildLauncherSections(
-  input: LauncherBuildInput,
-  on: LauncherHandlers,
-): LauncherSectionModel[] {
-  const recent = recentSpaces(input.spaces, input.activeSpaceId);
-  const continueSection: LauncherSectionModel = {
-    id: LAUNCHER_SECTION_IDS.continue,
-    title: "Continue",
-    empty: "No other Spaces yet. Open a folder to start one.",
-    items: recent.map((s) => ({
-      id: `space:${s.id}`,
-      label: s.name,
-      description: shortenRoot(s.root),
-      badge: envBadgeLabel(s.env, input.localLabel),
-      accent: accentFor(s),
-      onSelect: () => on.switchSpace(s.id),
-    })),
-  };
+export const START_ITEM_IDS = {
+  openFolder: "open-folder",
+  connectRemote: "connect-remote",
+  newTerminal: "terminal:local",
+  newEditor: "new-editor",
+  newNote: "new-note",
+} as const;
 
-  const terminalItems: LauncherItemModel[] = [
+export const RECENT_EMPTY = "No recent Spaces yet.";
+
+function envIcon(
+  env: WorkspaceEnv | undefined,
+  icons: StartIcons,
+): IconSvgElement {
+  switch (env?.kind) {
+    case "wsl":
+      return icons.wsl;
+    case "ssh":
+      return icons.server;
+    default:
+      return icons.folder;
+  }
+}
+
+export function buildStartPage(
+  input: StartPageInput,
+  on: StartPageHandlers,
+): StartPageModel {
+  const { icons } = input;
+  const startItems: LauncherItemModel[] = [
     {
-      id: "terminal:local",
-      label: "Terminal here",
-      description: input.localCwd,
-      hint: input.newTabShortcut ?? null,
-      icon: input.icons.terminal,
+      id: START_ITEM_IDS.openFolder,
+      label: "Open folder…",
+      icon: icons.openFolder,
+      onSelect: on.openFolder,
+    },
+    {
+      id: START_ITEM_IDS.connectRemote,
+      label: "Connect to remote…",
+      icon: icons.remote,
+      onSelect: on.connectRemote,
+    },
+    {
+      id: START_ITEM_IDS.newTerminal,
+      label: "New terminal",
+      shortcut: input.newTerminalShortcut ?? null,
+      icon: icons.terminal,
       onSelect: () => on.newTerminal({ kind: "local" }),
     },
   ];
   if (input.isWindows) {
     for (const d of input.distros) {
-      terminalItems.push({
+      startItems.push({
         id: `terminal:wsl:${d.name}`,
-        label: d.name,
-        description: d.default ? "Default WSL distro" : "WSL distro",
-        badge: d.running ? "running" : null,
-        icon: input.icons.wsl,
+        label: `Terminal in ${d.name}`,
+        badge: "WSL",
+        icon: icons.wsl,
         onSelect: () => on.newTerminal({ kind: "wsl", distro: d.name }),
       });
     }
   }
+  if (on.newEditor) {
+    startItems.push({
+      id: START_ITEM_IDS.newEditor,
+      label: "New editor",
+      shortcut: input.newEditorShortcut ?? null,
+      icon: icons.editor,
+      onSelect: on.newEditor,
+    });
+  }
+  if (on.newNote) {
+    startItems.push({
+      id: START_ITEM_IDS.newNote,
+      label: "New note",
+      icon: icons.note,
+      onSelect: on.newNote,
+    });
+  }
 
-  return [
-    continueSection,
-    {
-      id: LAUNCHER_SECTION_IDS.newTerminal,
-      title: "New terminal",
-      items: terminalItems,
+  const recent = recentSpaces(input.spaces, input.activeSpaceId);
+  return {
+    start: {
+      id: START_SECTION_IDS.start,
+      title: "Start",
+      items: startItems,
     },
-    {
-      id: LAUNCHER_SECTION_IDS.openFolder,
-      title: "Open",
-      items: [
-        {
-          id: "open-folder",
-          label: "Open folder as a new Space",
-          description: "Pick a folder; it becomes a Space with a terminal in it.",
-          icon: input.icons.folder,
-          onSelect: on.openFolder,
-        },
-      ],
+    recent: {
+      id: START_SECTION_IDS.recent,
+      title: "Recent",
+      empty: RECENT_EMPTY,
+      items: recent.map((s) => {
+        const kind = s.env?.kind ?? "local";
+        return {
+          id: `space:${s.id}`,
+          label: s.name,
+          description: shortenRoot(
+            s.root,
+            kind === "local" ? input.home : null,
+          ),
+          badge: envBadgeLabel(s.env),
+          icon: envIcon(s.env, icons),
+          onSelect: () => on.switchSpace(s.id),
+        };
+      }),
     },
-    {
-      id: LAUNCHER_SECTION_IDS.setup,
-      title: "Set up",
-      items: [
-        {
-          id: "setup-guide",
-          label: "Run the setup guide",
-          description: "Connect a model, choose a projects folder, enable the Librarian.",
-          icon: input.icons.setup,
-          onSelect: on.openSetup,
-        },
-      ],
-    },
-  ];
+  };
 }
