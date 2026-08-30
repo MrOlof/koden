@@ -6,6 +6,7 @@ import {
   getWslHome,
   LOCAL_WORKSPACE,
   type WorkspaceEnv,
+  workspaceScopeKey,
 } from "@/modules/workspace";
 
 type Params = {
@@ -57,13 +58,12 @@ export function useWorkspaceSwitcher({
 
   const switchWorkspace = useCallback(
     async (env: WorkspaceEnv) => {
-      if (
-        env.kind === workspaceEnv.kind &&
-        (env.kind === "local" ||
-          (workspaceEnv.kind === "wsl" && env.distro === workspaceEnv.distro))
-      ) {
-        return;
-      }
+      const same =
+        workspaceScopeKey(env) === workspaceScopeKey(workspaceEnv) &&
+        (env.kind !== "ssh" ||
+          workspaceEnv.kind !== "ssh" ||
+          env.path === workspaceEnv.path);
+      if (same) return;
       const dirty = tabsRef.current.some((t) => t.kind === "editor" && t.dirty);
       if (dirty) {
         window.alert(
