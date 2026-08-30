@@ -6,9 +6,18 @@ import {
 } from "@/modules/workspace";
 import type { SpaceMeta } from "./store";
 
+export type EnvSwitchOptions = {
+  /** ssh targets only: the tmux flag the resolved Space should carry. A
+   * created Space starts with it, a reused one is updated to it. */
+  sshTmux?: boolean;
+};
+
 export type EnvSwitch =
-  | { action: "switch"; id: string }
-  | { action: "create"; meta: { name: string; env: WorkspaceEnv } };
+  | { action: "switch"; id: string; sshTmux?: boolean }
+  | {
+      action: "create";
+      meta: { name: string; env: WorkspaceEnv; sshTmux?: boolean };
+    };
 
 /** Spaces files written before `env` existed are local. */
 export function spaceEnv(space: SpaceMeta): WorkspaceEnv {
@@ -43,19 +52,28 @@ export function resolveEnvSwitch(
   spaces: readonly SpaceMeta[],
   activeId: string | null,
   localLabel = "Local",
+  options: EnvSwitchOptions = {},
 ): EnvSwitch {
+  const tmux =
+    targetEnv.kind === "ssh" && options.sshTmux !== undefined
+      ? { sshTmux: options.sshTmux }
+      : {};
   const active = spaces.find((s) => s.id === activeId);
   if (active && spaceMatchesEnv(active, targetEnv)) {
-    return { action: "switch", id: active.id };
+    return { action: "switch", id: active.id, ...tmux };
   }
   let best: SpaceMeta | null = null;
   for (const s of spaces) {
     if (!spaceMatchesEnv(s, targetEnv)) continue;
     if (!best || s.updatedAt > best.updatedAt) best = s;
   }
-  if (best) return { action: "switch", id: best.id };
+  if (best) return { action: "switch", id: best.id, ...tmux };
   return {
     action: "create",
-    meta: { name: spaceNameForEnv(targetEnv, localLabel), env: targetEnv },
+    meta: {
+      name: spaceNameForEnv(targetEnv, localLabel),
+      env: targetEnv,
+      ...tmux,
+    },
   };
 }

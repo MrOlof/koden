@@ -112,4 +112,30 @@ describe("resolveEnvSwitch", () => {
     expect(r.action).toBe("switch");
     expect(r.action === "switch" && r.id).not.toBe("docker");
   });
+
+  it("carries the tmux flag to the Space it lands on, ssh only", () => {
+    const lab: WorkspaceEnv = { kind: "ssh", host: "lab", path: "" };
+    expect(
+      resolveEnvSwitch(lab, spaces, "win-new", "Windows", { sshTmux: true }),
+    ).toEqual({
+      action: "create",
+      meta: { name: "lab", env: lab, sshTmux: true },
+    });
+    expect(
+      resolveEnvSwitch(DOCKER, spaces, "win-new", "Windows", { sshTmux: true }),
+    ).toEqual({ action: "switch", id: "docker", sshTmux: true });
+    expect(
+      resolveEnvSwitch(DOCKER, spaces, "docker", "Windows", { sshTmux: false }),
+    ).toEqual({ action: "switch", id: "docker", sshTmux: false });
+    expect(
+      resolveEnvSwitch(UBUNTU, spaces, "win-new", "Windows", { sshTmux: true }),
+    ).toEqual({
+      action: "create",
+      meta: { name: "WSL: Ubuntu", env: UBUNTU },
+    });
+    expect(resolveEnvSwitch(DOCKER, spaces, "win-new", "Windows", {})).toEqual({
+      action: "switch",
+      id: "docker",
+    });
+  });
 });

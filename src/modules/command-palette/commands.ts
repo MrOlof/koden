@@ -95,6 +95,10 @@ export type CommandPaletteActionContext = {
   newWorktreeSpace: () => void;
   removeWorktreeSpace: () => void;
   activeSpaceIsWorktree: boolean;
+  activeSpaceIsSsh: boolean;
+  /** Whether the active (ssh) Space runs its terminals inside tmux. */
+  activeSpaceTmux: boolean;
+  toggleSpaceTmux: () => void;
   /** The launcher page ("New tab: choose"). */
   openLauncher: () => void;
   /** Native folder picker; the folder becomes a new Space. */
@@ -212,6 +216,20 @@ export function createCommandItems(
             keywords: ["worktree", "branch", "git", "space", "delete", "remove"],
             icon: FolderRemoveIcon,
             run: ctx.removeWorktreeSpace,
+          },
+        ]
+      : []),
+    ...(ctx.activeSpaceIsSsh
+      ? [
+          {
+            id: "space.toggleTmux",
+            title: ctx.activeSpaceTmux
+              ? "Stop using tmux for this Space"
+              : "Keep this Space's sessions in tmux",
+            group: "Spaces" as const,
+            keywords: ["tmux", "ssh", "remote", "session", "persist", "attach"],
+            icon: CloudServerIcon,
+            run: ctx.toggleSpaceTmux,
           },
         ]
       : []),

@@ -68,6 +68,7 @@ import {
   type LauncherFocusTarget,
   LauncherPane,
   normalizeFolderPath,
+  type RemoteConnectOptions,
   sameEnv,
   type SshEnv,
 } from "@/modules/launcher";
@@ -116,6 +117,7 @@ import {
   useSpaces,
   useSpacesBoot,
 } from "@/modules/spaces";
+import { spaceEnv } from "@/modules/spaces/lib/envSwitch";
 import { StatusBar } from "@/modules/statusbar";
 import {
   GridDialog,
@@ -2253,11 +2255,11 @@ export default function App() {
   // Reuses the Space for that host (and path) when one exists; a new host
   // gets its Space only once the remote home resolved.
   const handleConnectRemote = useCallback(
-    async (env: SshEnv) => {
+    async (env: SshEnv, options: RemoteConnectOptions) => {
       const connecting = toast.loading(`Connecting to ${env.host}…`);
       let switched = false;
       try {
-        switched = await switchToEnv(env);
+        switched = await switchToEnv(env, { sshTmux: options.sshTmux });
       } finally {
         toast.dismiss(connecting);
       }
@@ -2265,6 +2267,19 @@ export default function App() {
     },
     [switchToEnv, closeLauncherTab],
   );
+
+  // tmux is a property of the Space; terminals already running keep the
+  // shell they have.
+  const toggleSpaceTmux = useCallback(() => {
+    const { spaces, activeId, setSshTmux } = useSpaces.getState();
+    const active = spaces.find((s) => s.id === activeId);
+    if (!active || spaceEnv(active).kind !== "ssh") return;
+    const on = !(active.sshTmux ?? false);
+    setSshTmux(active.id, on);
+    toast(on ? `tmux on for ${active.name}` : `tmux off for ${active.name}`, {
+      description: "Applies to new terminal tabs in this Space.",
+    });
+  }, []);
 
   // Boot: land on the launcher once spaces and prefs are in (default on). The
   // restored tabs stay cold behind it, so nothing spawns until you choose.
@@ -2356,6 +2371,13 @@ export default function App() {
             activeSpaceIsWorktree: spaces.some(
               (s) => s.id === activeSpaceId && s.worktree != null,
             ),
+            activeSpaceIsSsh: spaces.some(
+              (s) => s.id === activeSpaceId && spaceEnv(s).kind === "ssh",
+            ),
+            activeSpaceTmux: spaces.some(
+              (s) => s.id === activeSpaceId && s.sshTmux === true,
+            ),
+            toggleSpaceTmux,
             openLauncher: showLauncher,
             openFolderAsSpace,
             connectRemote: showLauncherRemote,
@@ -2395,6 +2417,7 @@ export default function App() {
       showLauncher,
       openFolderAsSpace,
       showLauncherRemote,
+      toggleSpaceTmux,
     ],
   );
 

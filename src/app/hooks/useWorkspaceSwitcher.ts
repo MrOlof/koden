@@ -5,6 +5,7 @@ import { LOCAL_ENV_LABEL } from "@/lib/platform";
 import { native } from "@/modules/ai/lib/native";
 import {
   envEquals,
+  type EnvSwitchOptions,
   resolveEnvSwitch,
   spaceEnv,
   spaceNameForEnv,
@@ -113,10 +114,21 @@ export function useWorkspaceSwitcher({
 
   /** Go to a Space of `env`; resolves true when the active Space changed. */
   const switchToEnv = useCallback(
-    async (env: WorkspaceEnv): Promise<boolean> => {
-      const { spaces, activeId, create, setActive } = useSpaces.getState();
-      const plan = resolveEnvSwitch(env, spaces, activeId, LOCAL_ENV_LABEL);
+    async (
+      env: WorkspaceEnv,
+      options: EnvSwitchOptions = {},
+    ): Promise<boolean> => {
+      const { spaces, activeId, create, setActive, setSshTmux } =
+        useSpaces.getState();
+      const plan = resolveEnvSwitch(
+        env,
+        spaces,
+        activeId,
+        LOCAL_ENV_LABEL,
+        options,
+      );
       if (plan.action === "switch") {
+        if (plan.sshTmux !== undefined) setSshTmux(plan.id, plan.sshTmux);
         if (plan.id === activeId) return false;
         const target = spaces.find((s) => s.id === plan.id);
         if (!target) return false;
@@ -148,7 +160,12 @@ export function useWorkspaceSwitcher({
           : env.kind === "local"
             ? LOCAL_WORKSPACE
             : env;
-      const meta = create({ name: plan.meta.name, root, env: nextEnv });
+      const meta = create({
+        name: plan.meta.name,
+        root,
+        env: nextEnv,
+        sshTmux: plan.meta.sshTmux,
+      });
       void applyEnv(nextEnv);
       setActiveSpaceForNewTabs(meta.id);
       newTab(root);
