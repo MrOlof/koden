@@ -28,6 +28,9 @@ export type SerializedNode =
       title?: string;
       /** Custom per-pane accent color (from usePaneTitleStore). */
       color?: string;
+      /** Restart-stable identity for the leaf's scrollback snapshot
+       * (koden-scrollback.json). Absent in files written before restore. */
+      key?: string;
     }
   | { kind: "split"; dir: SplitDir; children: SerializedNode[] };
 
@@ -44,6 +47,12 @@ export type PaneTitleSeeder = (
   title: string | undefined,
   color: string | undefined,
 ) => void;
+
+/** Reads (minting if needed) a leaf's restart-stable restore key. */
+export type LeafKeyReader = (leafId: number) => string | undefined;
+
+/** Re-binds a persisted restore key to the freshly allocated leaf id. */
+export type LeafKeySeeder = (leafId: number, key: string) => void;
 
 export type SerializedTab =
   | {
@@ -78,9 +87,11 @@ function serializeNode(
   node: PaneNode,
   activeLeafId: number,
   getTitle?: PaneTitleReader,
+  getKey?: LeafKeyReader,
 ): SerializedNode {
   if (isLeaf(node)) {
     const t = getTitle?.(node.id);
+    const k = getKey?.(node.id);
     return {
       kind: "leaf",
       ...(node.cwd !== undefined && { cwd: node.cwd }),
@@ -89,13 +100,14 @@ function serializeNode(
       ...(node.docId !== undefined && { docId: node.docId }),
       ...(t?.label && { title: t.label }),
       ...(t?.color && { color: t.color }),
+      ...(k && { key: k }),
     };
   }
   return {
     kind: "split",
     dir: node.dir,
     children: node.children.map((c) =>
-      serializeNode(c, activeLeafId, getTitle),
+      serializeNode(c, activeLeafId, getTitle, getKey),
     ),
   };
 }
@@ -124,13 +136,14 @@ export function isSerializableTab(tab: Tab): boolean {
 function serializeTab(
   tab: Tab,
   getTitle?: PaneTitleReader,
+  getKey?: LeafKeyReader,
 ): SerializedTab | null {
   if (!isSerializableTab(tab)) return null;
   switch (tab.kind) {
     case "terminal":
       return {
         kind: "terminal",
-        tree: serializeNode(tab.paneTree, tab.activeLeafId, getTitle),
+        tree: serializeNode(tab.paneTree, tab.activeLeafId, getTitle, getKey),
         ...(tab.blocks && { blocks: true }),
         ...(tab.customTitle !== undefined && { customTitle: tab.customTitle }),
       };
@@ -161,10 +174,11 @@ function serializeTab(
 export function serializeTabs(
   tabs: Tab[],
   getTitle?: PaneTitleReader,
+  getKey?: LeafKeyReader,
 ): SerializedTab[] {
   const out: SerializedTab[] = [];
   for (const tab of tabs) {
-    const s = serializeTab(tab, getTitle);
+    const s = serializeTab(tab, getTitle, getKey);
     if (s) out.push(s);
   }
   return out;
@@ -181,12 +195,15 @@ function hydrateNode(
   allocId: () => number,
   acc: { activeLeafId: number | null },
   seedTitle?: PaneTitleSeeder,
+  seedKey?: LeafKeySeeder,
 ): PaneNode {
   if (node.kind === "leaf") {
     const id = allocId();
     if (node.active && acc.activeLeafId === null) acc.activeLeafId = id;
     if (seedTitle && (node.title || node.color))
       seedTitle(id, node.title, node.color);
+    if (seedKey && typeof node.key === "string" && node.key)
+      seedKey(id, node.key);
     return {
       kind: "leaf",
       id,
@@ -196,7 +213,7 @@ function hydrateNode(
     };
   }
   const children = node.children.map((c) =>
-    hydrateNode(c, allocId, acc, seedTitle),
+    hydrateNode(c, allocId, acc, seedTitle, seedKey),
   );
   if (children.length === 0) return { kind: "leaf", id: allocId() };
   if (children.length === 1) return children[0];
@@ -207,9 +224,10 @@ function hydrateTree(
   tree: SerializedNode,
   allocId: () => number,
   seedTitle?: PaneTitleSeeder,
+  seedKey?: LeafKeySeeder,
 ): HydratedTree {
   const acc: { activeLeafId: number | null } = { activeLeafId: null };
-  const paneTree = hydrateNode(tree, allocId, acc, seedTitle);
+  const paneTree = hydrateNode(tree, allocId, acc, seedTitle, seedKey);
   const leaves = collectLeaves(paneTree);
   const activeLeafId = acc.activeLeafId ?? leaves[0]?.id ?? allocId();
   const firstLeafCwd =
@@ -227,6 +245,7 @@ function hydrateTab(
   spaceId: string,
   allocId: () => number,
   seedTitle?: PaneTitleSeeder,
+  seedKey?: LeafKeySeeder,
 ): Tab | null {
   switch (s.kind) {
     case "terminal": {
@@ -234,6 +253,7 @@ function hydrateTab(
         s.tree,
         allocId,
         seedTitle,
+        seedKey,
       );
       const title =
         s.customTitle ??
@@ -354,12 +374,13 @@ export function hydrateTabs(
   spaceId: string,
   allocId: () => number,
   seedTitle?: PaneTitleSeeder,
+  seedKey?: LeafKeySeeder,
 ): Tab[] {
   if (!Array.isArray(serialized)) return [];
   const out: Tab[] = [];
   for (const s of serialized) {
     try {
-      const tab = hydrateTab(s, spaceId, allocId, seedTitle);
+      const tab = hydrateTab(s, spaceId, allocId, seedTitle, seedKey);
       if (tab) out.push(tab);
     } catch {
       // Skip corrupted entries rather than failing the whole restore.

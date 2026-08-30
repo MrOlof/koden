@@ -21,6 +21,14 @@ impl SessionKey {
         SessionKey(blake3::hash(material.as_bytes()).to_hex().to_string())
     }
 
+    /// Re-hydrate a key handed back by the UI (a `RecoveredPane.key`). Only the exact
+    /// blake3 hex shape is accepted: the string becomes a journal filename, so
+    /// anything else (separators, `..`, a wrong length) is rejected outright.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let ok = raw.len() == 64 && raw.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        ok.then(|| SessionKey(raw.to_string()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -34,6 +42,23 @@ impl SessionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_accepts_only_the_exact_hex_shape() {
+        let derived = SessionKey::derive("/work/proj", "claude", None);
+        assert_eq!(SessionKey::parse(derived.as_str()), Some(derived.clone()));
+        for bad in [
+            "",
+            "abc",
+            "../../etc/passwd",
+            &format!("{}.jsonl", derived.as_str()),
+            &derived.as_str().to_uppercase(),
+            &"g".repeat(64),
+            &"a".repeat(65),
+        ] {
+            assert_eq!(SessionKey::parse(bad), None, "{bad:?} must be rejected");
+        }
+    }
 
     #[test]
     fn derive_is_stable_for_same_inputs() {

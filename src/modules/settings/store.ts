@@ -124,6 +124,18 @@ export type Preferences = {
   terminalLineHeight: number;
   terminalFontSize: number;
   terminalScrollback: number;
+  /**
+   * Scrollback lines snapshotted per terminal on Space save and replayed into
+   * the fresh terminal on the next launch (Cate-style restore). 0 = off; the
+   * snapshots live in `koden-scrollback.json`, never in the layout file.
+   */
+  terminalScrollbackRestoreLines: number;
+  /**
+   * On boot, type the `claude --resume <id>` plan into a restored terminal
+   * whose recovered pane matches (same cwd, session id captured) instead of
+   * showing a resume card. Default OFF: resuming is a deliberate act.
+   */
+  autoResumeAgents: boolean;
   lastWslDistro: string | null;
   zoomLevel: number;
   agentNotifications: boolean;
@@ -203,6 +215,8 @@ const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_LINE_HEIGHT = "terminalLineHeight";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
+const KEY_TERMINAL_SCROLLBACK_RESTORE_LINES = "terminalScrollbackRestoreLines";
+const KEY_AUTO_RESUME_AGENTS = "autoResumeAgents";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
@@ -236,6 +250,12 @@ export const TERMINAL_SCROLLBACK_MIN = 200;
 export const TERMINAL_SCROLLBACK_MAX = 50_000;
 export const TERMINAL_SCROLLBACK_PRESETS = [
   500, 1000, 2000, 5000, 10_000, 25_000,
+] as const;
+
+export const TERMINAL_SCROLLBACK_RESTORE_DEFAULT = 2000;
+/** 0 = restore off. */
+export const TERMINAL_SCROLLBACK_RESTORE_PRESETS = [
+  0, 500, 1000, 2000, 5000,
 ] as const;
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -288,6 +308,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalLineHeight: TERMINAL_LINE_HEIGHT_DEFAULT,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
+  terminalScrollbackRestoreLines: TERMINAL_SCROLLBACK_RESTORE_DEFAULT,
+  autoResumeAgents: false,
   lastWslDistro: null,
   zoomLevel: 1.0,
   agentNotifications: true,
@@ -466,6 +488,13 @@ export async function loadPreferences(): Promise<Preferences> {
       get<number>(KEY_TERMINAL_SCROLLBACK) ??
         DEFAULT_PREFERENCES.terminalScrollback,
     ),
+    terminalScrollbackRestoreLines: clampScrollbackRestoreLines(
+      get<number>(KEY_TERMINAL_SCROLLBACK_RESTORE_LINES) ??
+        DEFAULT_PREFERENCES.terminalScrollbackRestoreLines,
+    ),
+    autoResumeAgents:
+      get<boolean>(KEY_AUTO_RESUME_AGENTS) ??
+      DEFAULT_PREFERENCES.autoResumeAgents,
     lastWslDistro:
       get<string | null>(KEY_LAST_WSL_DISTRO) ??
       DEFAULT_PREFERENCES.lastWslDistro,
@@ -784,6 +813,25 @@ function clampScrollback(value: number): number {
 
 export async function setTerminalScrollback(value: number): Promise<void> {
   await writePref(KEY_TERMINAL_SCROLLBACK, clampScrollback(value));
+}
+
+// 0 is a real value here (restore off), unlike the live scrollback floor.
+export function clampScrollbackRestoreLines(value: number): number {
+  if (!Number.isFinite(value)) return TERMINAL_SCROLLBACK_RESTORE_DEFAULT;
+  return Math.min(TERMINAL_SCROLLBACK_MAX, Math.max(0, Math.round(value)));
+}
+
+export async function setTerminalScrollbackRestoreLines(
+  value: number,
+): Promise<void> {
+  await writePref(
+    KEY_TERMINAL_SCROLLBACK_RESTORE_LINES,
+    clampScrollbackRestoreLines(value),
+  );
+}
+
+export async function setAutoResumeAgents(value: boolean): Promise<void> {
+  await writePref(KEY_AUTO_RESUME_AGENTS, value);
 }
 
 export async function setLastWslDistro(value: string | null): Promise<void> {

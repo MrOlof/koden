@@ -18,6 +18,8 @@ import {
   TERMINAL_FONT_SIZES,
   TERMINAL_LINE_HEIGHTS,
   TERMINAL_SCROLLBACK_PRESETS,
+  TERMINAL_SCROLLBACK_RESTORE_PRESETS,
+  setAutoResumeAgents,
   setCommandMinimapEnabled,
   setLinkTypes,
   setSmartLinksEnabled,
@@ -27,6 +29,7 @@ import {
   setTerminalLetterSpacing,
   setTerminalLineHeight,
   setTerminalScrollback,
+  setTerminalScrollbackRestoreLines,
   setTerminalWebglEnabled,
 } from "@/modules/settings/store";
 import { Switch } from "@/components/ui/switch";
@@ -65,6 +68,10 @@ export function TerminalSection() {
   const terminalLineHeight = usePreferencesStore((s) => s.terminalLineHeight);
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
+  const restoreLines = usePreferencesStore(
+    (s) => s.terminalScrollbackRestoreLines,
+  );
+  const autoResumeAgents = usePreferencesStore((s) => s.autoResumeAgents);
 
   // Detected Nerd Fonts join the two bundled fonts in the quick-pick. Probed
   // once on mount; the free-text field below still accepts anything else.
@@ -288,6 +295,39 @@ export function TerminalSection() {
               ))}
             </SelectContent>
           </Select>
+        </SettingRow>
+        <SettingRow
+          title="Restore scrollback on launch"
+          description="Snapshot each terminal's recent output when the layout saves and replay it into the restored terminal next launch. Private terminals are never saved."
+        >
+          <Select
+            value={String(restoreLines)}
+            onValueChange={(v) => void setTerminalScrollbackRestoreLines(Number(v))}
+          >
+            <SelectTrigger size="sm" className="h-8 w-36 text-[12px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TERMINAL_SCROLLBACK_RESTORE_PRESETS.map((lines) => (
+                <SelectItem
+                  key={lines}
+                  value={String(lines)}
+                  className="text-[12px]"
+                >
+                  {lines === 0 ? "Off" : `${lines.toLocaleString()} lines`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="Auto-resume agents"
+          description="On launch, resume a Claude Code session in its restored terminal automatically (when a session id was captured) instead of showing a resume card."
+        >
+          <Switch
+            checked={autoResumeAgents}
+            onCheckedChange={(v) => void setAutoResumeAgents(v)}
+          />
         </SettingRow>
       </div>
     </div>
