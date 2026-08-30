@@ -72,6 +72,17 @@ Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.s
   active used to switch that Space's env in place; env now follows the Space
   (`spaces/lib/envSwitch.ts`, `useWorkspaceSwitcher.switchToEnv`). (3) Cosmetic: the fresh shell scrolls
   the viewport to its prompt, so restored lines sit above the fold.
+- Retest of both fixes (isolated build, same evening): Connect reused the
+  existing `docker` Space, "Terminal here" from it switched to the last-used
+  local Space and the `docker` Space stayed ssh; the journal captured
+  `working`/`finished` with the id and the card offered "Resume · 7b216378",
+  which typed `claude --resume <id>`. Claude Code then answered "No
+  conversation found with session ID": this machine runs with "Transcript
+  saving is off (inherited)", so no session is ever on disk. Capture is right;
+  resume needs transcript saving on. One new bug fixed on the spot: an ssh
+  Space whose restored tab carried a Windows cwd refused to spawn ("remote
+  path must be absolute"); `shell_ssh::remote_cwd_or` now falls back to the
+  Space's remote path (empty = home) for any non-POSIX cwd.
 - CI: the first push failed on Linux clippy dead-code (Windows-only pipe
   constants) and the 540 kB startup budget (+3.37 kB); fixed by cfg-gating and
   lazy-loading the worktree dialogs + LauncherPane (536.9 kB). A Windows-path

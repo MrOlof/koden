@@ -218,6 +218,16 @@ pub fn remote_command(path: &str, tmux_session: Option<&str>) -> Result<String, 
     Ok(format!("sh -c '{script}'"))
 }
 
+/// A tab restored from a local session can carry a Windows cwd into an ssh
+/// Space; anything that is not a POSIX absolute or `~` path falls back to the
+/// Space's remote path (empty = remote home) instead of refusing to spawn.
+pub fn remote_cwd_or<'a>(cwd: Option<&'a str>, env_path: &'a str) -> &'a str {
+    match cwd.map(str::trim) {
+        Some(c) if c == "~" || c.starts_with("~/") || c.starts_with('/') => c,
+        _ => env_path,
+    }
+}
+
 pub fn build(
     cwd: Option<String>,
     env_path: &str,
@@ -226,11 +236,7 @@ pub fn build(
 ) -> Result<CommandBuilder, String> {
     ssh::validate_ssh_host(host)?;
     let bin = ssh::resolve_ssh_binary().ok_or_else(|| ssh::SSH_BINARY_MISSING.to_string())?;
-    let path = cwd
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(env_path);
+    let path = remote_cwd_or(cwd.as_deref(), env_path);
     let session = tmux_key.map(tmux_session_name);
     let remote = remote_command(path, session.as_deref())?;
     if let Err(e) = ensure_installed(host) {
@@ -332,6 +338,16 @@ mod tests {
         assert!(remote_command("/tmp/new\nline", None).is_err());
         assert!(remote_command("relative/path", None).is_err());
         assert!(remote_command("~user/x", None).is_err());
+    }
+
+    #[test]
+    fn remote_cwd_falls_back_to_env_path_for_non_posix_cwd() {
+        assert_eq!(remote_cwd_or(Some("/srv/app"), "/home/k"), "/srv/app");
+        assert_eq!(remote_cwd_or(Some("~/src"), "/home/k"), "~/src");
+        assert_eq!(remote_cwd_or(Some("C:/Users/k/repo"), "/home/k"), "/home/k");
+        assert_eq!(remote_cwd_or(Some(r"C:\Users\k"), ""), "");
+        assert_eq!(remote_cwd_or(Some("  "), "/home/k"), "/home/k");
+        assert_eq!(remote_cwd_or(None, "~"), "~");
     }
 
     #[test]
