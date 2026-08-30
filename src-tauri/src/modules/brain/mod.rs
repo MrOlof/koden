@@ -74,6 +74,9 @@ pub struct LiveSession {
     pub project: Option<ProjectId>,
     pub agent: Option<String>,
     pub cwd: Option<String>,
+    /// Claude `session_id` captured from the UserPromptSubmit hook (Tier-2
+    /// resume); every later journal record for this pane carries it.
+    pub claude_session_id: Option<String>,
 }
 
 /// Managed Tauri state. `default()` is cheap + infallible (only allocates locks),

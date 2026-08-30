@@ -852,10 +852,19 @@ pub fn brain_dismiss_recovered(app: tauri::AppHandle, state: State<BrainState>, 
 /// activity). Fired by the frontend AgentBusBridge beside its turn-store fan-out;
 /// enqueue-only (sync, microseconds — the pure in-memory command class). The
 /// worker filters, truncates, REDACTS at ingest, resolves pty → project, and
-/// writes the activity row on the single writer thread.
+/// writes the activity row on the single writer thread. `session_id` (the hook
+/// payload's Claude session id, Tier-2 resume) is allowlisted here at the IPC
+/// boundary and dropped, not sanitized, on a mismatch: it ends up spliced into a
+/// relaunch command line.
 #[tauri::command]
-pub fn brain_record_turn(state: State<BrainState>, pty_id: u32, prompt: String) -> Result<(), String> {
-    enqueue(&state, BrainEvent::Turn { pty_id, prompt })
+pub fn brain_record_turn(
+    state: State<BrainState>,
+    pty_id: u32,
+    prompt: String,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let session_id = session_id.filter(|s| crate::modules::brain::resume::valid_session_id(s));
+    enqueue(&state, BrainEvent::Turn { pty_id, prompt, session_id })
 }
 
 /// Run a blocking read-only store call on the blocking pool (mirrors

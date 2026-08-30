@@ -92,6 +92,19 @@ export function isResumable(p: RecoveredPane): boolean {
   return p.agent === "claude" && !!p.claude_session_id;
 }
 
+/** The card's one-line meta: agent, the short session id (or an explicit
+ * "no session id", so a Tier-1 card says why it can only reopen), last activity. */
+export function cardMeta(card: ResumeCardModel): string {
+  return [card.agentLabel, card.sessionShort ?? "no session id", card.lastActivity]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Button label: Tier-2 resumes the captured session, Tier-1 only reopens. */
+export function resumeActionLabel(card: ResumeCardModel): "Resume" | "Reopen" {
+  return card.resumable ? "Resume" : "Reopen";
+}
+
 export function buildResumeCards(
   panes: RecoveredPane[],
   opts: { now: number; home?: string | null; hidden?: ReadonlySet<string> },

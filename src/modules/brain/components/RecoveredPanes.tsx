@@ -2,7 +2,11 @@ import { Cancel01Icon, PlayIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { AgentIcon } from "@/modules/agents/lib/agentIcon";
-import type { ResumeCardModel } from "../lib/resumeCards";
+import {
+  cardMeta,
+  resumeActionLabel,
+  type ResumeCardModel,
+} from "../lib/resumeCards";
 
 type Props = {
   cards: ResumeCardModel[];
@@ -63,13 +67,7 @@ function ResumeCard({
   onResume: (key: string) => void;
   onDismiss: (key: string) => void;
 }) {
-  const meta = [
-    card.agentLabel,
-    card.sessionShort ?? "no session id",
-    card.lastActivity,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const meta = cardMeta(card);
   return (
     <div
       className="flex shrink-0 items-center gap-2 rounded-md border border-border/50 bg-background/60 py-1 pr-1 pl-2"
@@ -93,7 +91,7 @@ function ResumeCard({
         }
       >
         <HugeiconsIcon icon={PlayIcon} />
-        {card.resumable ? "Resume" : "Reopen"}
+        {resumeActionLabel(card)}
       </Button>
       <Button
         size="icon-xs"

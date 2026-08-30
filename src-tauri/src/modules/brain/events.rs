@@ -49,8 +49,14 @@ pub enum BrainEvent {
     /// from the UserPromptSubmit hook bus line via `brain_record_turn`. The worker
     /// pre-filters (empty / slash-command-only), truncates, REDACTS at ingest, and
     /// resolves pty → cwd → project exactly like [`BrainEvent::Agent`] before the
-    /// single writer stores it as a `turn` activity row.
-    Turn { pty_id: u32, prompt: String },
+    /// single writer stores it as a `turn` activity row. `session_id` is the
+    /// payload's Claude session id (already allowlisted by the command): the
+    /// Tier-2 resume capture, independent of whether the prompt text is kept.
+    Turn {
+        pty_id: u32,
+        prompt: String,
+        session_id: Option<String>,
+    },
     /// Periodic self-tick: flush WAL, reconcile ledger (P4), retry degraded store.
     Tick,
     /// Webview/command-initiated reindex (e.g. a wizard "rescan", or `None` =

@@ -300,7 +300,12 @@ fn brain_loop(app: AppHandle, launch_dir: Option<String>) {
                     }
                 }
             }
-            BrainEvent::Turn { pty_id, prompt } => {
+            BrainEvent::Turn { pty_id, prompt, session_id } => {
+                // Tier-2 resume capture first: the id is kept even when the prompt
+                // text below is filtered out (a "/clear" still names the session).
+                if let Some(id) = session_id.as_deref() {
+                    note_session_id(&app, pty_id, id);
+                }
                 // ADR-020 turn ingest: pre-filter → truncate → REDACT (the ingest
                 // gate — prompt text never lands raw), then resolve pty → project
                 // and store on this single writer. Unresolvable/filtered turns drop.
@@ -2242,12 +2247,15 @@ fn handle_agent(
     // session and reuse them for every later signal — otherwise each kind would
     // hash a DIFFERENT SessionKey and 'exited' would never reach the 'started'
     // journal (stale recovery card forever; Tier-2 never fires).
-    let (remembered_cwd, remembered_agent) = brain
+    let (remembered_cwd, remembered_agent, remembered_sid) = brain
         .sessions
         .read()
         .ok()
-        .and_then(|s| s.get(&pty_id).map(|x| (x.cwd.clone(), x.agent.clone())))
-        .unwrap_or((None, None));
+        .and_then(|s| {
+            s.get(&pty_id)
+                .map(|x| (x.cwd.clone(), x.agent.clone(), x.claude_session_id.clone()))
+        })
+        .unwrap_or((None, None, None));
     let live_cwd = app.try_state::<PtyState>().and_then(|pty| pty.session_cwd(pty_id));
     let cwd = live_cwd.or(remembered_cwd);
     let effective_agent = agent.clone().or(remembered_agent);
@@ -2258,6 +2266,10 @@ fn handle_agent(
 
     // Journal the lifecycle event (fail-open). pane_uuid is None until P4-a wires a
     // restart-stable uuid; the key falls back to cwd+agent (spec-sanctioned).
+    // The captured Claude session id rides on every record after capture, so the
+    // boot fold sees it whatever order the signals landed in. A `started` is a
+    // new session: an id left over from a previous one in this pane is never
+    // carried onto it (its own id arrives with its first prompt).
     if let (Some(cwd_s), Some(rdir)) = (cwd.as_ref(), resume_dir(app)) {
         let key = resume::SessionKey::derive(cwd_s, effective_agent.as_deref().unwrap_or(""), None);
         let rec = resume::ResumeRecord {
@@ -2266,7 +2278,7 @@ fn handle_agent(
             agent: effective_agent.clone(),
             cwd: cwd_s.clone(),
             project: project.clone(),
-            claude_session_id: None,
+            claude_session_id: if kind == "started" { None } else { remembered_sid },
         };
         if let Err(e) = resume::record_event(&rdir, &key, &rec) {
             log::debug!("brain: resume journal write failed ({e})");
@@ -2282,7 +2294,10 @@ fn handle_agent(
     match kind {
         "started" => {
             if let Ok(mut sessions) = brain.sessions.write() {
-                sessions.insert(pty_id, LiveSession { project, agent: effective_agent, cwd });
+                sessions.insert(
+                    pty_id,
+                    LiveSession { project, agent: effective_agent, cwd, claude_session_id: None },
+                );
             }
         }
         "exited" => {
@@ -2293,6 +2308,74 @@ fn handle_agent(
         _ => {} // working / attention / finished — status only, not tracked in P0
     }
     resolved
+}
+
+/// Tier-2 resume capture (ADR-022 gap 1): remember the Claude session id on the
+/// pane's live session and journal it once, so a crash from here on relaunches
+/// with `claude --resume <id>`. Only a pty with a live session (its `started`
+/// signal seen) is journaled: without that cwd + agent the record could not land
+/// under the `started` line's key. A turn racing ahead of `started` is dropped;
+/// the next prompt carries the id again. Re-journaling an unchanged id is skipped
+/// (every lifecycle record already carries it from the session).
+fn note_session_id(app: &AppHandle, pty_id: u32, id: &str) {
+    let Some(brain) = app.try_state::<BrainState>() else {
+        return;
+    };
+    let live = {
+        let Ok(mut sessions) = brain.sessions.write() else {
+            return;
+        };
+        let Some(s) = sessions.get_mut(&pty_id) else {
+            return;
+        };
+        if s.claude_session_id.as_deref() == Some(id) {
+            return;
+        }
+        s.claude_session_id = Some(id.to_string());
+        s.clone()
+    };
+    let Some(rdir) = resume_dir(app) else {
+        return;
+    };
+    // Same cwd resolution as `handle_agent`, so the key is byte-identical.
+    let live_cwd = app.try_state::<PtyState>().and_then(|pty| pty.session_cwd(pty_id));
+    let Some(cwd) = live_cwd.or(live.cwd) else {
+        return;
+    };
+    let Some((key, rec)) =
+        session_id_record(&cwd, live.agent.as_deref(), live.project.as_deref(), id, now_epoch_ms())
+    else {
+        return;
+    };
+    if let Err(e) = resume::record_event(&rdir, &key, &rec) {
+        log::debug!("brain: resume session-id journal write failed ({e})");
+    }
+}
+
+/// The journal line for a freshly captured session id: a `working` record under
+/// the SAME key as the pane's lifecycle records (cwd + agent, no pane uuid), so
+/// the boot fold picks the id up regardless of record order. `None` for an id
+/// outside the allowlist (never journaled, never spliced).
+pub(crate) fn session_id_record(
+    cwd: &str,
+    agent: Option<&str>,
+    project: Option<&str>,
+    id: &str,
+    ts: i64,
+) -> Option<(resume::SessionKey, resume::ResumeRecord)> {
+    if !resume::valid_session_id(id) {
+        return None;
+    }
+    let key = resume::SessionKey::derive(cwd, agent.unwrap_or(""), None);
+    let rec = resume::ResumeRecord {
+        ts,
+        kind: "working".to_string(),
+        agent: agent.map(String::from),
+        cwd: cwd.to_string(),
+        project: project.map(String::from),
+        claude_session_id: Some(id.to_string()),
+    };
+    Some((key, rec))
 }
 
 #[cfg(test)]
@@ -2821,6 +2904,25 @@ mod tests {
     /// ADR-020 ingest gate: trivial turns drop (empty / one-char / slash-command-
     /// only), long prompts truncate on a char boundary, and secret-shaped content
     /// is REDACTED at ingest — the stored payload never carries the raw token.
+    #[test]
+    fn session_id_record_lands_under_the_lifecycle_key() {
+        let id = "0198d2fc-3c4b-7a10-9f2e-1b2c3d4e5f60";
+        let (key, rec) = session_id_record("/work/proj", Some("claude"), Some("p"), id, 7).unwrap();
+        // Byte-identical to the key `handle_agent` derives for the same pane, so the
+        // record folds into the same journal as its `started` line.
+        assert_eq!(key, resume::SessionKey::derive("/work/proj", "claude", None));
+        assert_eq!(rec.kind, "working");
+        assert_eq!(rec.claude_session_id.as_deref(), Some(id));
+        assert_eq!((rec.cwd.as_str(), rec.agent.as_deref(), rec.project.as_deref(), rec.ts), ("/work/proj", Some("claude"), Some("p"), 7));
+        // An unknown agent still keys the same way handle_agent does (empty name).
+        let (k2, _) = session_id_record("/work/proj", None, None, id, 7).unwrap();
+        assert_eq!(k2, resume::SessionKey::derive("/work/proj", "", None));
+        // Off-allowlist ids are never journaled.
+        for bad in ["", "../x", "abc 123 def", "abcdefg", &"a".repeat(200)] {
+            assert!(session_id_record("/work/proj", Some("claude"), None, bad, 7).is_none(), "{bad:?}");
+        }
+    }
+
     #[test]
     fn clean_turn_text_filters_truncates_and_redacts() {
         // Drops: empty, whitespace, single keystroke, slash-command-only.

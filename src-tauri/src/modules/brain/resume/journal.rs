@@ -27,7 +27,9 @@ pub struct ResumeRecord {
     pub cwd: String,
     #[serde(default)]
     pub project: Option<String>,
-    /// Populated only if Tier-2 capture fires (§4.3); `None` under Tier-1.
+    /// The Claude `session_id` captured from the UserPromptSubmit hook (§4.3):
+    /// `None` on every record before capture, carried on every record after it.
+    /// The boot fold keeps the LAST non-None id across a journal.
     #[serde(default)]
     pub claude_session_id: Option<String>,
 }
