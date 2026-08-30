@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::modules::git::errors::{GitError, Result};
-use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
+use crate::modules::workspace::{
+    require_local_fs, resolve_path, WorkspaceEnv, WorkspaceRegistry,
+};
 
 #[derive(Clone, Debug)]
 pub struct ResolvedGitDirectory {
@@ -30,6 +32,7 @@ pub fn canonical_dir(
     path: &str,
     workspace: &WorkspaceEnv,
 ) -> Result<ResolvedGitDirectory> {
+    require_local_fs(workspace).map_err(GitError::Unsupported)?;
     let candidate = resolve_path(path, workspace);
     if !candidate.is_dir() {
         return Err(GitError::NotADirectory(path.to_string()));

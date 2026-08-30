@@ -54,7 +54,11 @@ pub fn build_command(
     cwd: Option<String>,
     workspace: WorkspaceEnv,
     blocks: bool,
+    ssh_tmux: Option<&str>,
 ) -> Result<CommandBuilder, String> {
+    if let WorkspaceEnv::Ssh { host, path } = &workspace {
+        return super::shell_ssh::build(cwd, path, host, ssh_tmux);
+    }
     #[cfg(unix)]
     {
         let _ = workspace;

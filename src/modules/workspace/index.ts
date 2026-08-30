@@ -1,10 +1,15 @@
 export {
   currentWorkspaceScopeKey,
   currentWorkspaceEnv,
+  getSshHome,
   getWslHome,
+  isSshWorkspace,
   LOCAL_WORKSPACE,
+  SSH_LOCAL_FS_UNAVAILABLE,
   useWorkspaceEnvStore,
+  workspaceEnvLabel,
   workspaceScopeKey,
+  type SshHost,
   type WorkspaceEnv,
   type WslDistro,
 } from "./env";

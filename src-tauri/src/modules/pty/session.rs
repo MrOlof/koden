@@ -117,9 +117,15 @@ pub fn spawn(
     cwd: Option<String>,
     workspace: WorkspaceEnv,
     blocks: bool,
+    ssh_tmux: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
 ) -> Result<(Arc<Session>, PtySize), String> {
+    // Built before the ConPTY lock: an SSH spawn may spend seconds pushing rc
+    // files to the host and must not stall every other tab meanwhile.
+    let session_cwd = cwd.clone();
+    let mut cmd = shell_init::build_command(cwd, workspace, blocks, ssh_tmux.as_deref())?;
+
     #[cfg(windows)]
     let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
 
@@ -132,8 +138,6 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let session_cwd = cwd.clone();
-    let mut cmd = shell_init::build_command(cwd, workspace, blocks)?;
     // Per-pane identity. Claude Code's hooks tag the shared bus file with this
     // so Koden can route user turns and subagent lifecycle back to THIS
     // terminal's node. The OSC 777 / terminalSequence path is honored only

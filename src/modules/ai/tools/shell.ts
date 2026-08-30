@@ -3,7 +3,12 @@ import { z } from "zod";
 import { native } from "../lib/native";
 import { checkShellCommand } from "../lib/security";
 import type { ToolContext } from "./context";
-import { currentWorkspaceEnv, workspaceScopeKey } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  isSshWorkspace,
+  SSH_LOCAL_FS_UNAVAILABLE,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 
 /**
  * Per-session lazy shell-session id. The agent gets one persistent shell per
@@ -40,6 +45,8 @@ export function buildShellTools(ctx: ToolContext) {
       execute: async ({ command, timeout_secs }) => {
         const safety = checkShellCommand(command);
         if (!safety.ok) return { error: safety.reason };
+        if (isSshWorkspace(currentWorkspaceEnv()))
+          return { error: SSH_LOCAL_FS_UNAVAILABLE };
         const sid = ctx.getSessionId();
         if (!sid) return { error: "no active chat session" };
         try {
@@ -77,6 +84,8 @@ export function buildShellTools(ctx: ToolContext) {
       execute: async ({ command, cwd }) => {
         const safety = checkShellCommand(command);
         if (!safety.ok) return { error: safety.reason };
+        if (isSshWorkspace(currentWorkspaceEnv()))
+          return { error: SSH_LOCAL_FS_UNAVAILABLE };
         const effectiveCwd = cwd ?? ctx.getCwd();
         try {
           const handle = await native.shellBgSpawn(command, effectiveCwd);

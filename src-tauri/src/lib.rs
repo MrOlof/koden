@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    agent, agent_codex, brain, fs, git, history, net, pty, secrets, shell, usage, workspace,
+    agent, agent_codex, brain, fs, git, history, net, pty, secrets, shell, ssh, usage, workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -282,6 +282,8 @@ pub fn run() {
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
+            ssh::ssh_list_hosts,
+            ssh::ssh_home,
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,

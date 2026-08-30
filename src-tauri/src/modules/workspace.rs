@@ -70,6 +70,19 @@ impl WorkspaceRegistry {
     }
 }
 
+pub const SSH_LOCAL_FS_UNAVAILABLE: &str =
+    "Files, git and search are not available for SSH workspaces yet";
+
+// Central gate for everything that would touch the local disk with a path
+// that belongs to the remote host. One helper, one-line call sites.
+pub fn require_local_fs(workspace: &WorkspaceEnv) -> Result<(), String> {
+    if workspace.is_ssh() {
+        Err(SSH_LOCAL_FS_UNAVAILABLE.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 // `None` means "use bootstrapped default". `Some` is canonicalized to defeat
 // symlink/`..` traversal and must sit under an authorized root.
 pub fn authorize_spawn_cwd(
@@ -77,6 +90,7 @@ pub fn authorize_spawn_cwd(
     cwd: Option<&str>,
     workspace: &WorkspaceEnv,
 ) -> Result<Option<PathBuf>, String> {
+    require_local_fs(workspace)?;
     let Some(cwd) = cwd.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -102,6 +116,11 @@ pub fn authorize_user_spawn_cwd(
     cwd: Option<&str>,
     workspace: &WorkspaceEnv,
 ) -> Result<Option<PathBuf>, String> {
+    // The cwd of an SSH tab lives on the host; the remote-command builder
+    // validates it and falls back to the remote $HOME when it is missing.
+    if workspace.is_ssh() {
+        return Ok(None);
+    }
     let Some(cwd) = cwd.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -129,6 +148,11 @@ pub async fn workspace_authorize(
     registry: tauri::State<'_, WorkspaceRegistry>,
 ) -> Result<String, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    // A remote path must never register a local root: on a Unix host
+    // `/home/<user>` may exist locally too and would be wrongly authorized.
+    if workspace.is_ssh() {
+        return Ok(path);
+    }
     let resolved = resolve_path(&path, &workspace);
     let canonical = registry.authorize(&resolved).map_err(|e| e.to_string())?;
     Ok(crate::modules::fs::to_canon(&canonical))
@@ -842,6 +866,49 @@ mod auth_tests {
         let err = authorize_spawn_cwd(&reg, Some(&s), &WorkspaceEnv::Local)
             .expect_err("symlink-escape must be rejected");
         assert!(err.contains("outside"), "got: {err}");
+    }
+
+    fn ssh_env() -> WorkspaceEnv {
+        WorkspaceEnv::Ssh {
+            host: "workbench".into(),
+            path: "/home/kosta".into(),
+        }
+    }
+
+    #[test]
+    fn require_local_fs_refuses_only_ssh() {
+        assert!(require_local_fs(&WorkspaceEnv::Local).is_ok());
+        assert!(require_local_fs(&WorkspaceEnv::Wsl {
+            distro: "Ubuntu".into()
+        })
+        .is_ok());
+        let err = require_local_fs(&ssh_env()).unwrap_err();
+        assert_eq!(err, SSH_LOCAL_FS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn authorize_spawn_cwd_refuses_ssh_even_without_cwd() {
+        let reg = WorkspaceRegistry::default();
+        let err = authorize_spawn_cwd(&reg, None, &ssh_env()).unwrap_err();
+        assert_eq!(err, SSH_LOCAL_FS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn authorize_user_spawn_cwd_skips_local_checks_for_ssh() {
+        let local = tempdir("sshspawn");
+        let reg = WorkspaceRegistry::default();
+        let s = local.to_string_lossy().into_owned();
+        let resolved = authorize_user_spawn_cwd(&reg, Some(&s), &ssh_env()).unwrap();
+        assert!(resolved.is_none());
+        assert!(!reg.is_authorized(&local));
+    }
+
+    #[test]
+    fn resolve_path_keeps_ssh_paths_verbatim() {
+        assert_eq!(
+            resolve_path("/srv/app", &ssh_env()),
+            PathBuf::from("/srv/app")
+        );
     }
 
     #[test]

@@ -3,7 +3,13 @@ import {
   type GitRepoInfo,
   type GitStatusSnapshot,
 } from "@/modules/ai/lib/native";
-import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  isSshWorkspace,
+  SSH_LOCAL_FS_UNAVAILABLE,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const AUTO_FETCH_THROTTLE_MS = 5 * 60_000;
@@ -217,6 +223,19 @@ export function useSourceControl(
           hasRepo: false,
           isLoading: false,
           localError: null,
+          busyAction: null,
+          lastRemoteError: null,
+        });
+        return;
+      }
+
+      if (isSshWorkspace(currentWorkspaceEnv())) {
+        setState({
+          repo: null,
+          status: null,
+          hasRepo: false,
+          isLoading: false,
+          localError: SSH_LOCAL_FS_UNAVAILABLE,
           busyAction: null,
           lastRemoteError: null,
         });

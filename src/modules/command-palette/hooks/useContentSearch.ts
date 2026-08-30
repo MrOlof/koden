@@ -1,4 +1,4 @@
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, isSshWorkspace } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback } from "react";
 import { type AsyncQueryState, useAsyncQuery } from "./useAsyncQuery";
@@ -27,7 +27,7 @@ export function useContentSearch(
 ): AsyncQueryState<ContentHit> {
   const run = useCallback(
     async (q: string): Promise<ContentHit[]> => {
-      if (!root) return [];
+      if (!root || isSshWorkspace(currentWorkspaceEnv())) return [];
       const res = await invoke<GrepResponse>("fs_grep_interactive", {
         pattern: q,
         root,

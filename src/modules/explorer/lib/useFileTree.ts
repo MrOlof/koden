@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  isSshWorkspace,
+  SSH_LOCAL_FS_UNAVAILABLE,
+} from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { listenFsChanged, watchAdd, watchRemove } from "./watch";
 
@@ -125,6 +129,13 @@ export function useFileTree(rootPath: string | null, options?: Options) {
   }, []);
 
   const fetchChildren = useCallback(async (path: string) => {
+    if (isSshWorkspace(currentWorkspaceEnv())) {
+      setNodes((s) => ({
+        ...s,
+        [path]: { status: "error", message: SSH_LOCAL_FS_UNAVAILABLE },
+      }));
+      return;
+    }
     if (nodesRef.current[path]?.status !== "loaded") {
       setNodes((s) => ({ ...s, [path]: { status: "loading" } }));
     }

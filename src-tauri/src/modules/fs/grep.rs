@@ -10,7 +10,7 @@ use ignore::{WalkBuilder, WalkState};
 use serde::Serialize;
 
 use super::to_canon;
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::workspace::{require_local_fs, resolve_path, WorkspaceEnv};
 
 const FILE_SIZE_CAP: u64 = 5 * 1024 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 200;
@@ -188,6 +188,7 @@ pub fn fs_grep(
         return Err("empty pattern".into());
     }
     let workspace = WorkspaceEnv::from_option(workspace);
+    require_local_fs(&workspace)?;
     let root_path = resolve_path(&root, &workspace);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
@@ -231,6 +232,7 @@ pub fn fs_grep_interactive(
     let my_gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
     let workspace = WorkspaceEnv::from_option(workspace);
+    require_local_fs(&workspace)?;
     let root_path = resolve_path(&root, &workspace);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
@@ -280,6 +282,7 @@ pub fn fs_glob(
         return Err("empty pattern".into());
     }
     let workspace = WorkspaceEnv::from_option(workspace);
+    require_local_fs(&workspace)?;
     let root_path = resolve_path(&root, &workspace);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
