@@ -105,3 +105,9 @@ function global:prompt {
     $global:LASTEXITCODE = $lec
     "$oscD$oscA$osc7${original}${oscB}"
 }
+
+# `koden` CLI (modules/cli): only where Koden planted KODEN_EXE, so a copy of
+# this profile on a remote host stays inert.
+if ($env:KODEN_EXE) {
+    function global:koden { & $env:KODEN_EXE cli @args | Write-Output }
+}

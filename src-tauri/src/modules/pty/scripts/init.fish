@@ -93,3 +93,11 @@ function __koden_preexec --on-event fish_preexec
     set -l cmd (string replace -ra '[\x00-\x1f\x7f]' ' ' -- "$argv")
     printf '\e]133;C;%s\e\\' (string sub -l 256 -- "$cmd")
 end
+
+# `koden` CLI (modules/cli): defined only where Koden planted KODEN_EXE, so a
+# copy of this file on a remote host stays inert.
+if set -q KODEN_EXE
+    function koden
+        "$KODEN_EXE" cli $argv
+    end
+end
