@@ -16,3 +16,15 @@ describe("memoryNotifications preference", () => {
     expect(Object.keys(DEFAULT_PREFERENCES)).toContain("memoryNotifications");
   });
 });
+
+// The launcher ("What do you want to do?") is the boot surface by default;
+// the General settings tab holds the opt-out.
+describe("showLauncherOnStart preference", () => {
+  it("defaults ON", () => {
+    expect(DEFAULT_PREFERENCES.showLauncherOnStart).toBe(true);
+  });
+
+  it("rides the standard key-per-field persistence contract", () => {
+    expect(Object.keys(DEFAULT_PREFERENCES)).toContain("showLauncherOnStart");
+  });
+});
