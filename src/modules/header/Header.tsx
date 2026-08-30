@@ -52,6 +52,8 @@ type Props = {
   onNewBoard: () => void;
   onNewTasks: () => void;
   onOpenDirector: () => void;
+  /** Open the launcher ("New tab: choose") in the active space. */
+  onOpenLauncher: () => void;
   onClose: (id: number) => void;
   /** Open a fresh tab in this tab's space, inheriting its cwd. */
   onDuplicate: (id: number) => void;
@@ -102,6 +104,7 @@ export function Header({
   onNewBoard,
   onNewTasks,
   onOpenDirector,
+  onOpenLauncher,
   onClose,
   onDuplicate,
   onCloseOthers,
@@ -221,6 +224,7 @@ export function Header({
             onNewBoard={onNewBoard}
             onNewTasks={onNewTasks}
             onOpenDirector={onOpenDirector}
+            onOpenLauncher={onOpenLauncher}
             onClose={onClose}
             onDuplicate={onDuplicate}
             onCloseOthers={onCloseOthers}

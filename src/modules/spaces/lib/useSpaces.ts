@@ -111,7 +111,12 @@ export const useSpaces = create<State>((set, get) => ({
 
   setActive: (id) => {
     if (get().activeId === id) return;
-    set({ activeId: id });
+    // updatedAt doubles as last-used: the launcher's Continue list sorts by it.
+    const spaces = get().spaces.map((s) =>
+      s.id === id ? { ...s, updatedAt: Date.now() } : s,
+    );
+    set({ activeId: id, spaces });
     void saveActiveId(id);
+    void saveSpacesList(spaces);
   },
 }));

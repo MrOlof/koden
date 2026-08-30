@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { BrainMapPane, BrainPane } from "@/modules/brain";
 import { AiDiffStack, EditorStack, GitDiffStack } from "@/modules/editor";
@@ -46,6 +46,8 @@ type Props = {
   onSetMarkdownView: EditorStackProps["onSetMarkdownView"];
   onActivateAgent: (tabId: number, leafId: number) => void;
   onSpawnTerminalAgent: (req: SpawnTerminalRequest) => void;
+  /** The launcher page, mounted only while a `launcher` tab is active. */
+  launcher: ReactNode;
 };
 
 /**
@@ -77,6 +79,7 @@ export function WorkspaceSurface({
   onSetMarkdownView,
   onActivateAgent,
   onSpawnTerminalAgent,
+  launcher,
 }: Props) {
   const kind = activeTab?.kind;
   const isTerminalTab = kind === "terminal";
@@ -95,6 +98,7 @@ export function WorkspaceSurface({
   const isBrainTab = kind === "brain";
   const isBrainMapTab = kind === "brain-map";
   const isLibraryTab = kind === "library";
+  const isLauncherTab = kind === "launcher";
 
   return (
     <div className="relative h-full min-h-0">
@@ -285,6 +289,15 @@ export function WorkspaceSurface({
         aria-hidden={!isLibraryTab}
       >
         {isLibraryTab ? <LibraryPane /> : null}
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0",
+          !isLauncherTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isLauncherTab}
+      >
+        {isLauncherTab ? launcher : null}
       </div>
     </div>
   );

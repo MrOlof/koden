@@ -21,6 +21,7 @@ export {
   type NotesTab,
   type BoardTab,
   type LibraryTab,
+  type LauncherTab,
   type OrchestrationTab,
   type OrchestrationView,
   type AiDiffStatus,

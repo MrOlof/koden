@@ -28,6 +28,7 @@ import {
   setPaneColorTerminal,
   setRestoreWindowState,
   setShowHidden,
+  setShowLauncherOnStart,
   setUsageGuardEnabled,
   setUsageGuardHardStop,
   setUsageGuardPausePct,
@@ -67,6 +68,9 @@ const USAGE_PAUSE_MAX = 100;
 export function GeneralSection() {
   const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
+  const showLauncherOnStart = usePreferencesStore(
+    (s) => s.showLauncherOnStart,
+  );
   const vimMode = usePreferencesStore((s) => s.vimMode);
   const editorAutoSave = usePreferencesStore((s) => s.editorAutoSave);
   const editorAutoSaveDelay = usePreferencesStore((s) => s.editorAutoSaveDelay);
@@ -395,6 +399,15 @@ export function GeneralSection() {
             <Switch
               checked={restoreWindowState}
               onCheckedChange={(v) => void setRestoreWindowState(v)}
+            />
+          </SettingRow>
+          <SettingRow
+            title="Open the launcher at startup"
+            description="Start each session on the launcher page: continue a Space, open a terminal or a folder, or connect to a remote host. Also reachable any time from the + menu and Ctrl/Cmd+N."
+          >
+            <Switch
+              checked={showLauncherOnStart}
+              onCheckedChange={(v) => void setShowLauncherOnStart(v)}
             />
           </SettingRow>
         </div>
