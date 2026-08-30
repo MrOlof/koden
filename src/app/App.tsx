@@ -47,6 +47,7 @@ import {
   requestBrainView,
   resolveProjectForCwd,
   useRecoveredPanes,
+  type OpenTerminalForResume,
 } from "@/modules/brain";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import {
@@ -458,14 +459,6 @@ export default function App() {
     activeId,
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
     enabled: spacesHydrated,
-  });
-
-  // "Resume where you left off" cards for agent panes journaled by the previous
-  // session (brain crash-resume); Resume reopens a terminal in the pane's cwd.
-  const recovered = useRecoveredPanes({
-    enabled: spacesHydrated,
-    home,
-    openTerminal: newAgentTab,
   });
 
   const prevSpaceRef = useRef(activeSpaceId);
@@ -930,6 +923,22 @@ export default function App() {
     );
     if (t) closeTab(t.id);
   }, [closeTab, activeSpaceKey]);
+
+  // "Resume where you left off" cards for agent panes journaled by the previous
+  // session (brain crash-resume); Resume reopens a terminal in the pane's cwd
+  // and dismisses the launcher if it was the surface the user picked from.
+  const openTerminalForResume = useCallback<OpenTerminalForResume>(
+    (cwd, title) => {
+      closeLauncherTab();
+      return newAgentTab(cwd, title);
+    },
+    [closeLauncherTab, newAgentTab],
+  );
+  const recovered = useRecoveredPanes({
+    enabled: spacesHydrated,
+    home,
+    openTerminal: openTerminalForResume,
+  });
 
   const openNewPrivateTab = useCallback(() => {
     newPrivateTab(inheritedCwdForNewTab());
@@ -2754,6 +2763,7 @@ export default function App() {
                           onOpenFolder={openFolderAsSpace}
                           onConnectRemote={handleConnectRemote}
                           onOpenSetup={openSetupGuide}
+                          extraSections={recovered.sections}
                         />
                       }
                     />

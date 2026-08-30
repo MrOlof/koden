@@ -44,6 +44,11 @@ export default defineConfig(async ({ mode }): Promise<UserConfig> => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  test: {
+    // Agent worktrees live under .claude/worktrees inside the repo; their
+    // half-built suites must never count against this tree.
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/src-tauri/target/**"],
+  },
   build: {
     target:
       process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome120" : "es2022",
