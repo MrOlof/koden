@@ -40,10 +40,13 @@ type Params = {
 // Prefs hydrate in one async set from DEFAULTS; restore and auto-resume must
 // read the stored values, not the defaults, so boot waits (bounded) for them.
 const PREFS_WAIT_MS = 3000;
-// A restored shell has to spawn, run its profile and print a prompt before the
-// resume command can be typed; the interactive launch paths use 4s, boot is
-// slower because every warmed tab spawns at once.
-const AUTO_RESUME_READY_MS = 15_000;
+// The visible tab resolves on its first OSC 7 prompt marker; a warmed HIDDEN
+// tab has no bound grid (its bytes sit in the DormantRing unparsed), so it
+// falls through to this timeout. Typing early is harmless (the console input
+// buffer holds keystrokes until the shell reads stdin), typing late is just
+// slow, and boot spawns every warmed shell at once, so this sits above the
+// interactive launch paths' 4s.
+const AUTO_RESUME_READY_MS = 6000;
 
 function uniqueCwds(tabs: Tab[]): string[] {
   const set = new Set<string>();
