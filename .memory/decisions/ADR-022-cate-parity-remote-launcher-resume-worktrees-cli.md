@@ -60,10 +60,15 @@ Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.s
   working/attention/done tracked; after `taskkill /F` + relaunch the resume
   card appeared and the pre-crash buffer came back behind a `[restored]`
   separator (proved by `koden terminal read`, 56 lines).
-- Gaps found in that pass: (1) the resume journal writer hardcodes
-  `claude_session_id: None`, so Resume is always Tier-1 "Reopen"; the
-  `user-turn` bus line already carries the hook payload with `session_id`, so
-  capture is a bridge + `LiveSession` change. (2) FIXED `d8ff7bd`: picking a local/WSL launcher item while an ssh Space was
+- Gaps found in that pass: (1) FIXED `5e706f7`: the resume journal writer
+  hardcoded `claude_session_id: None`, so Resume was always Tier-1 "Reopen".
+  Now `agentBusReader` lifts `session_id` off the `user-turn` hook payload,
+  `brain_record_turn` carries it (validated `[A-Za-z0-9._-]{8,128}` on both
+  sides), the worker stores it on `LiveSession` and journals a `working`
+  record with it, every later lifecycle record inherits it, and `fold_journal`
+  keeps the last non-None id since the latest `started`. Card shows "Resume" +
+  short id. Ceiling: a `Turn` racing ahead of the pane's `started` signal is
+  dropped; the next prompt re-delivers the id. (2) FIXED `d8ff7bd`: picking a local/WSL launcher item while an ssh Space was
   active used to switch that Space's env in place; env now follows the Space
   (`spaces/lib/envSwitch.ts`, `useWorkspaceSwitcher.switchToEnv`). (3) Cosmetic: the fresh shell scrolls
   the viewport to its prompt, so restored lines sit above the fold.
