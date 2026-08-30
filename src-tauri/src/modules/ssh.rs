@@ -521,6 +521,9 @@ Host docker
         assert_eq!(found, Some(PathBuf::from("/usr/bin/ssh")));
     }
 
+    // Backslash paths only join as Windows paths on Windows; the Unix leg would
+    // compare `D:\Win/System32/...` against the expected form.
+    #[cfg(windows)]
     #[test]
     fn resolver_falls_back_to_system32_openssh_on_windows() {
         let exists = exists_set(&[r"D:\Win\System32\OpenSSH\ssh.exe"]);
