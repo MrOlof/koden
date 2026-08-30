@@ -3,6 +3,9 @@ use serde::Serialize;
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub(crate) const NETWORK_TIMEOUT_SECS: u64 = 120;
 pub(crate) const MAX_TIMEOUT_SECS: u64 = 180;
+// A worktree add checks out a full tree; large repos need more than the
+// default budget but never the network one.
+pub(crate) const WORKTREE_TIMEOUT_SECS: u64 = 120;
 pub(crate) const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const MIN_GIT_VERSION: &str = "2.23";
@@ -113,6 +116,41 @@ pub struct GitPushResult {
     pub remote: Option<String>,
     pub branch: Option<String>,
     pub pushed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranches {
+    pub current: Option<String>,
+    pub local: Vec<String>,
+    pub remote: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktree {
+    pub path: String,
+    pub head: String,
+    pub branch: Option<String>,
+    pub is_main: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitLinkOutcome {
+    Linked,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLinkResult {
+    pub path: String,
+    pub outcome: GitLinkOutcome,
+    pub detail: Option<String>,
 }
 
 pub(crate) struct GitOutput {

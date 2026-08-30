@@ -29,6 +29,8 @@ import {
   ArrowRight01Icon,
   Cancel01Icon,
   Delete02Icon,
+  FolderRemoveIcon,
+  GitBranchIcon,
   PencilEdit02Icon,
   PlusSignIcon,
 } from "@hugeicons/core-free-icons";
@@ -46,6 +48,7 @@ type Props = {
   tabs: Tab[];
   onNewSpace: () => void;
   onDeleteSpace: (id: string) => void;
+  onRemoveWorktree: (id: string) => void;
   onNewTabInSpace: (spaceId: string) => void;
   onJumpTab: (id: number) => void;
   onCloseTab: (id: number) => void;
@@ -85,6 +88,7 @@ export function SpaceSwitcher({
   tabs,
   onNewSpace,
   onDeleteSpace,
+  onRemoveWorktree,
   onNewTabInSpace,
   onJumpTab,
   onCloseTab,
@@ -243,6 +247,10 @@ export function SpaceSwitcher({
                   }}
                   onCancelRename={() => setEditingId(null)}
                   onDelete={() => onDeleteSpace(sp.id)}
+                  onRemoveWorktree={() => {
+                    onOpenChange(false);
+                    onRemoveWorktree(sp.id);
+                  }}
                   onNewTab={() => onNewTabInSpace(sp.id)}
                   onJumpTab={onJumpTab}
                   onCloseTab={onCloseTab}
@@ -290,6 +298,7 @@ type SpaceRowProps = {
   onCommitRename: (name: string) => void;
   onCancelRename: () => void;
   onDelete: () => void;
+  onRemoveWorktree: () => void;
   onNewTab: () => void;
   onJumpTab: (id: number) => void;
   onCloseTab: (id: number) => void;
@@ -309,6 +318,7 @@ function SpaceRow({
   onCommitRename,
   onCancelRename,
   onDelete,
+  onRemoveWorktree,
   onNewTab,
   onJumpTab,
   onCloseTab,
@@ -387,6 +397,15 @@ function SpaceRow({
             {space.name}
           </span>
         )}
+        {!editing && space.worktree && (
+          <span
+            title={`Worktree on ${space.worktree.branch}`}
+            className="flex max-w-28 shrink-0 items-center gap-1 rounded-sm bg-muted/60 px-1 py-px font-mono text-[9.5px] text-muted-foreground"
+          >
+            <HugeiconsIcon icon={GitBranchIcon} size={10} strokeWidth={2} />
+            <span className="truncate">{space.worktree.branch}</span>
+          </span>
+        )}
         {!editing && (
           <>
             <span className="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/50 group-hover:hidden">
@@ -403,6 +422,14 @@ function SpaceRow({
                 label="New tab"
                 onClick={onNewTab}
               />
+              {space.worktree && (
+                <RowAction
+                  icon={FolderRemoveIcon}
+                  label="Remove worktree..."
+                  destructive
+                  onClick={onRemoveWorktree}
+                />
+              )}
               {canDelete && (
                 <RowAction
                   icon={Delete02Icon}

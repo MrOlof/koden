@@ -16,3 +16,13 @@ describe("memoryNotifications preference", () => {
     expect(Object.keys(DEFAULT_PREFERENCES)).toContain("memoryNotifications");
   });
 });
+
+describe("worktreeSymlinkPaths preference", () => {
+  it("defaults to node_modules so a new worktree never reinstalls", () => {
+    expect(DEFAULT_PREFERENCES.worktreeSymlinkPaths).toEqual(["node_modules"]);
+  });
+
+  it("rides the standard key-per-field persistence contract", () => {
+    expect(Object.keys(DEFAULT_PREFERENCES)).toContain("worktreeSymlinkPaths");
+  });
+});

@@ -90,6 +90,8 @@ export type Preferences = {
   explorerGitDecorations: boolean;
   /** Folder the explorer + new terminals open to. "" = launch dir / OS home. */
   defaultFolder: string;
+  /** Workspace-relative folders linked into every new worktree Space. */
+  worktreeSymlinkPaths: string[];
   /** Manual = per-type defaults below; automatic = a fresh generated color per new pane. */
   paneColorMode: PaneColorMode;
   /** Palette generated pane colors are drawn from when mode is automatic. */
@@ -181,6 +183,7 @@ const KEY_SHOW_HIDDEN = "showHidden";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_DEFAULT_FOLDER = "defaultFolder";
+const KEY_WORKTREE_SYMLINK_PATHS = "worktreeSymlinkPaths";
 const KEY_PANE_COLOR_MODE = "paneColorMode";
 const KEY_PANE_COLOR_PALETTE = "paneColorPalette";
 const KEY_PANE_COLOR_TERMINAL = "paneColorTerminal";
@@ -264,6 +267,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   showHidden: false,
   explorerGitDecorations: true,
   defaultFolder: "",
+  worktreeSymlinkPaths: ["node_modules"],
   paneColorMode: "manual",
   paneColorPalette: "vibrant",
   paneColorTerminal: "#9aa5b1",
@@ -404,6 +408,9 @@ export async function loadPreferences(): Promise<Preferences> {
       DEFAULT_PREFERENCES.explorerGitDecorations,
     defaultFolder:
       get<string>(KEY_DEFAULT_FOLDER) ?? DEFAULT_PREFERENCES.defaultFolder,
+    worktreeSymlinkPaths:
+      stringList(get<unknown>(KEY_WORKTREE_SYMLINK_PATHS)) ??
+      DEFAULT_PREFERENCES.worktreeSymlinkPaths,
     paneColorMode:
       get<PaneColorMode>(KEY_PANE_COLOR_MODE) ??
       DEFAULT_PREFERENCES.paneColorMode,
@@ -636,6 +643,15 @@ export async function setShowHidden(value: boolean): Promise<void> {
 
 export async function setExplorerGitDecorations(value: boolean): Promise<void> {
   await writePref(KEY_EXPLORER_GIT_DECORATIONS, value);
+}
+
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((v): v is string => typeof v === "string");
+}
+
+export async function setWorktreeSymlinkPaths(value: string[]): Promise<void> {
+  await writePref(KEY_WORKTREE_SYMLINK_PATHS, value);
 }
 
 export async function setDefaultFolder(value: string): Promise<void> {

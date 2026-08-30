@@ -14,6 +14,8 @@ import {
   DashboardSquare01Icon,
   FileEditIcon,
   FileSearchIcon,
+  FolderRemoveIcon,
+  GitBranchIcon,
   Globe02Icon,
   HierarchySquare01Icon,
   IncognitoIcon,
@@ -87,6 +89,9 @@ export type CommandPaletteActionContext = {
   openSpacesOverview: () => void;
   newSpace: () => void;
   switchSpace: (id: string) => void;
+  newWorktreeSpace: () => void;
+  removeWorktreeSpace: () => void;
+  activeSpaceIsWorktree: boolean;
 };
 
 const noop = () => {};
@@ -181,6 +186,26 @@ export function createCommandItems(
       icon: DashboardSquare01Icon,
       run: ctx.newSpace,
     },
+    {
+      id: "worktree.new",
+      title: "New worktree Space...",
+      group: "Spaces",
+      keywords: ["worktree", "branch", "checkout", "git", "space", "create"],
+      icon: GitBranchIcon,
+      run: ctx.newWorktreeSpace,
+    },
+    ...(ctx.activeSpaceIsWorktree
+      ? [
+          {
+            id: "worktree.remove",
+            title: "Remove worktree...",
+            group: "Spaces" as const,
+            keywords: ["worktree", "branch", "git", "space", "delete", "remove"],
+            icon: FolderRemoveIcon,
+            run: ctx.removeWorktreeSpace,
+          },
+        ]
+      : []),
     ...ctx.spaces.map((sp) => ({
       id: `spaces.switch.${sp.id}`,
       title: `Switch to ${sp.name}`,

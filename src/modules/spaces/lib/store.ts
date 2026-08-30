@@ -2,6 +2,11 @@ import { LazyStore } from "@tauri-apps/plugin-store";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import type { SerializedTab } from "./serialize";
 
+export type SpaceWorktree = {
+  repoRoot: string;
+  branch: string;
+};
+
 export type SpaceMeta = {
   id: string;
   name: string;
@@ -9,6 +14,8 @@ export type SpaceMeta = {
   env: WorkspaceEnv;
   /** Opt-in accent, index into SPACE_COLORS. Undefined = theme primary. */
   color?: number;
+  /** Set when the Space root is a git worktree Koden created. */
+  worktree?: SpaceWorktree;
   createdAt: number;
   updatedAt: number;
 };

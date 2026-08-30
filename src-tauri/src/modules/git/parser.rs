@@ -1,4 +1,4 @@
-use crate::modules::git::types::GitChangedFile;
+use crate::modules::git::types::{GitChangedFile, GitWorktree};
 
 #[derive(Default)]
 pub struct PorcelainV2 {
@@ -145,6 +145,75 @@ fn status_label(index_status: char, worktree_status: char) -> String {
     }
 }
 
+#[derive(Default)]
+pub struct RefList {
+    pub local: Vec<String>,
+    pub remote: Vec<String>,
+}
+
+/// Classify full ref names (`for-each-ref --format=%(refname)`); the full form
+/// keeps a local branch literally named `origin/x` out of the remote list.
+pub fn parse_ref_list<'a>(lines: impl IntoIterator<Item = &'a str>) -> RefList {
+    let mut out = RefList::default();
+    for raw in lines {
+        let line = raw.trim();
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            if !name.is_empty() {
+                out.local.push(name.to_string());
+            }
+        } else if let Some(name) = line.strip_prefix("refs/remotes/") {
+            if name.is_empty() || name == "HEAD" || name.ends_with("/HEAD") {
+                continue;
+            }
+            out.remote.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// `git worktree list --porcelain`: blank-line separated blocks, the first block
+/// is always the main (or bare) worktree.
+pub fn parse_worktree_list(stdout: &str) -> Vec<GitWorktree> {
+    let mut out: Vec<GitWorktree> = Vec::new();
+    let mut current: Option<GitWorktree> = None;
+    for raw in stdout.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            out.extend(current.take());
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("worktree ") {
+            out.extend(current.take());
+            current = Some(GitWorktree {
+                path: path.to_string(),
+                head: String::new(),
+                branch: None,
+                is_main: out.is_empty(),
+                locked: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(wt) = current.as_mut() else {
+            continue;
+        };
+        if let Some(sha) = line.strip_prefix("HEAD ") {
+            wt.head = sha.trim().to_string();
+        } else if let Some(reference) = line.strip_prefix("branch ") {
+            let name = reference.strip_prefix("refs/heads/").unwrap_or(reference);
+            wt.branch = Some(name.to_string());
+        } else if line == "detached" {
+            wt.branch = None;
+        } else if line == "locked" || line.starts_with("locked ") {
+            wt.locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            wt.prunable = true;
+        }
+    }
+    out.extend(current.take());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +357,90 @@ mod tests {
         assert_eq!((ok.ahead, ok.behind), (5, 3));
         let garbage = parse_porcelain_v2("# branch.ab +x -y\0");
         assert_eq!((garbage.ahead, garbage.behind), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod worktree_parser_tests {
+    use super::*;
+
+    #[test]
+    fn ref_list_splits_local_and_remote_and_skips_remote_head() {
+        let refs = parse_ref_list([
+            "refs/heads/main",
+            "refs/heads/feat/x",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/feat/x",
+            "refs/tags/v1",
+            "",
+        ]);
+        assert_eq!(refs.local, vec!["main", "feat/x"]);
+        assert_eq!(refs.remote, vec!["origin/main", "origin/feat/x"]);
+    }
+
+    #[test]
+    fn worktree_list_parses_main_linked_detached_locked_prunable() {
+        let stdout = concat!(
+            "worktree C:/repo\n",
+            "HEAD aaaa\n",
+            "branch refs/heads/main\n",
+            "\n",
+            "worktree C:/repo/.koden/worktrees/feat-x\n",
+            "HEAD bbbb\n",
+            "branch refs/heads/feat/x\n",
+            "locked keep me\n",
+            "\n",
+            "worktree /tmp/detached\n",
+            "HEAD cccc\n",
+            "detached\n",
+            "prunable gitdir file points to non-existent location\n",
+            "\n",
+        );
+        let list = parse_worktree_list(stdout);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].path, "C:/repo");
+        assert!(list[0].is_main);
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+        assert!(!list[0].locked);
+
+        assert_eq!(list[1].path, "C:/repo/.koden/worktrees/feat-x");
+        assert!(!list[1].is_main);
+        assert_eq!(list[1].branch.as_deref(), Some("feat/x"));
+        assert_eq!(list[1].head, "bbbb");
+        assert!(list[1].locked);
+        assert!(!list[1].prunable);
+
+        assert!(list[2].branch.is_none());
+        assert!(list[2].prunable);
+        assert!(!list[2].locked);
+    }
+
+    #[test]
+    fn worktree_list_tolerates_missing_trailing_blank_and_crlf() {
+        let list = parse_worktree_list(
+            "worktree /a\r\nHEAD 1\r\nbranch refs/heads/m\r\n\r\nworktree /b\r\nHEAD 2\r\ndetached",
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].path, "/a");
+        assert_eq!(list[0].branch.as_deref(), Some("m"));
+        assert_eq!(list[1].path, "/b");
+        assert_eq!(list[1].head, "2");
+        assert!(list[1].branch.is_none());
+    }
+
+    #[test]
+    fn worktree_list_bare_first_entry_is_main() {
+        let list = parse_worktree_list(
+            "worktree /srv/repo.git\nbare\n\nworktree /srv/wt\nHEAD 3\nbranch refs/heads/x\n",
+        );
+        assert_eq!(list.len(), 2);
+        assert!(list[0].is_main);
+        assert!(!list[1].is_main);
+    }
+
+    #[test]
+    fn worktree_list_empty_input() {
+        assert!(parse_worktree_list("").is_empty());
     }
 }
