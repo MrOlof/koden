@@ -1,4 +1,5 @@
-export { LauncherPane, type LauncherFocusTarget } from "./LauncherPane";
+export type { LauncherFocusTarget } from "./LauncherPane";
+export { LauncherPane } from "./LauncherPaneLazy";
 export { LauncherSection, LauncherSectionTitle } from "./LauncherSection";
 export { RemoteConnectForm } from "./RemoteConnectForm";
 export {

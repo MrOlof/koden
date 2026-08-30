@@ -1,5 +1,4 @@
-export { NewWorktreeDialog } from "./NewWorktreeDialog";
-export { RemoveWorktreeDialog } from "./RemoveWorktreeDialog";
+export { NewWorktreeDialog, RemoveWorktreeDialog } from "./lazy";
 export { slugify } from "./lib/slug";
 export {
   deriveBranch,

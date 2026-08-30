@@ -90,7 +90,9 @@ pub mod transport {
 
     use super::super::protocol::MAX_PAYLOAD_BYTES;
 
+    #[cfg(windows)]
     const CONNECT_RETRIES: u32 = 50;
+    #[cfg(windows)]
     const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(40);
 
     pub fn roundtrip(endpoint: &str, request_line: &str) -> Result<String, String> {
