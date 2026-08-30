@@ -8,7 +8,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use tauri::{AppHandle, Emitter, State};
 
 use crate::modules::fs::to_canon;
-use crate::modules::workspace::{resolve_path, WorkspaceEnv, WorkspaceRegistry};
+use crate::modules::workspace::{require_local_fs, resolve_path, WorkspaceEnv, WorkspaceRegistry};
 
 // Quiet-gap before a batch flushes; MAX_WINDOW caps latency under a long stream.
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -235,6 +235,7 @@ pub fn fs_watch_add(
     registry: State<'_, WorkspaceRegistry>,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    require_local_fs(&workspace)?;
     let prepared = prepare_add(&registry, &workspace, paths);
     if prepared.is_empty() {
         return Ok(());
@@ -254,6 +255,7 @@ pub fn fs_watch_remove(
     state: State<'_, FsWatchState>,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
+    require_local_fs(&workspace)?;
     // A removed/renamed dir no longer canonicalizes; fall back so the refcount
     // entry is still released.
     let prepared: Vec<PathBuf> = paths

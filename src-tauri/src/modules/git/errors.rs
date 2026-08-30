@@ -28,6 +28,7 @@ pub enum GitError {
     },
     Spawn(String),
     Io(std::io::Error),
+    Unsupported(String),
 }
 
 impl GitError {
@@ -88,6 +89,7 @@ impl Display for GitError {
             }
             GitError::Spawn(err) => write!(f, "failed to spawn git: {err}"),
             GitError::Io(err) => write!(f, "io error: {err}"),
+            GitError::Unsupported(msg) => write!(f, "{msg}"),
         }
     }
 }
