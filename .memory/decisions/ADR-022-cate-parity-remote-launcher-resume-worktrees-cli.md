@@ -27,7 +27,7 @@ no new dependencies, `WorkspaceEnv` stays the single environment seam.
 | WP4 worktree Spaces | `git/worktree.rs` (`git_branches`, `git_worktree_list/add/remove`, `git_link_paths`), `parser.rs` additions, `src/modules/worktrees/` (New worktree dialog: name to `feat/<slug>`, any base branch, checkout at `<repo>/.koden/worktrees/<slug>`, `worktreeSymlinkPaths` junctioned in), branch chip + Remove in the Space switcher | **A worktree is a Space.** No `WorktreeMeta` registry: `SpaceMeta.worktree?` carries repo root + branch. Branches are never deleted by remove. Junctions via `mklink /J`, no crate |
 | WP2 launcher | `src/modules/launcher/` (`LauncherPane`, `launcherItems` model, key nav, `RemoteConnectForm`), `launcher` tab kind (never serialized), pref `showLauncherOnStart`, `Mod+N`, palette `launcher.show` / `space.openFolder` / `workspace.connectRemote`, "Open folder..." in the switcher, onboarding lands on it | **A tab, not a modal.** Opens on boot over cold restored tabs, whenever a Space has zero tabs, and on demand. Recent Spaces are the recents list (Spaces sort by last use now) |
 | WP3 resume + scrollback | `brain/lib/resumeCards.ts`, `useRecoveredPanes`, `RecoveredPanesBanner` (Resume types `claude --resume <id>` only when an id was captured), `brain_resume_plan`, `brain_dismiss_recovered`, `spaces/lib/scrollbackStore.ts` (`koden-scrollback.json`, stable leaf keys, 512 KiB cap, FNV change gate, GC), `rendererPool.snapshotLeafForRestore` / `preloadRestoredBuffer`, `terminal/lib/restoreReplay.ts`, prefs `terminalScrollbackRestoreLines` (2000) and `autoResumeAgents` (false) | The dormant `resume/` journal finally has a UI. Scrollback lives in its own store so the layout file stays small. Replay order on first bind: restored text, `[restored]` separator, same-launch snapshot, DormantRing. Private, blocks, note and task panes never persist |
-| WP5 koden CLI | see the WP5 section of `KODEN.md` once merged | **A subcommand of the `koden` executable, never a second `[[bin]]`** (release trap, memory 2026-07-31). Named pipe / unix socket per instance, per-process token planted on every PTY, Settings permission matrix |
+| WP5 koden CLI | `src-tauri/src/modules/cli/` (named pipe `\.\pipe\koden-<pid>` / unix socket, per-process token, `koden cli ...` short-circuit in `main.rs`, `cli_reply` bridge, 30 s timeout, 32 in-flight, 1 MiB cap), `src/modules/cli/` (`CliBridge`, pure `dispatch`, permission gate), `koden` shell function appended to every injected rc script, prefs `cliEnabled` + Terminal/Panels/Notify x Read/Control, Settings > CLI. Commands: `terminal list/read/type/press/run`, `tab open`, `pane split`, `space list/new`, `notify`, `ping`; `--json` for the raw envelope | **A subcommand of the `koden` executable, never a second `[[bin]]`** (release trap, memory 2026-07-31). Named pipe / unix socket per instance, per-process token planted on every PTY, Settings permission matrix |
 
 Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.sections}` and resume closes the launcher tab; vitest excludes `**/.claude/**` so agent worktrees inside the repo never count against the tree.
 
@@ -41,9 +41,12 @@ Merge wiring added by the orchestrator: `LauncherPane extraSections={recovered.s
 - `.koden/` now exists inside repos (worktrees dir with a `*` gitignore). A
   later "project-local Space state" (cate-deep-dive section 7.2) will reuse it
   and needs a trust gate first.
-- Gates on `main` after the merge: tsc clean, biome 104 warnings (baseline 109),
-  vitest 55 files / 587 tests, eager graph unchanged, clippy 0, cargo lib 516
-  passed with only the known `authorize_spawn_cwd_blocks_symlink_escape`.
+- Gates on `main` after all five merges (`c388b90`): tsc clean, biome 104
+  warnings (baseline 109), vitest 57 files / 615 tests, eager graph unchanged,
+  clippy 0, cargo lib 549 passed with only the known
+  `authorize_spawn_cwd_blocks_symlink_escape`, `pnpm build` green with size
+  budgets. Ceiling: `koden` is undefined inside WSL shells (the Windows pipe
+  is unreachable there and `build_wsl` does not plant the env).
 - Nothing was runtime-verified in the GUI by the agents (a live instance was
   running; dev boots rewrite the global hooks). First manual pass: launcher on
   boot, connect to a host, New worktree Space, kill and relaunch with an agent
