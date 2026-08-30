@@ -20,6 +20,7 @@ import {
   ComputerTerminal02Icon,
   DashboardSquare01Icon,
   Globe02Icon,
+  Home01Icon,
   KanbanIcon,
   Note01Icon,
   PencilEdit02Icon,
@@ -50,6 +51,8 @@ type Props = {
   onNewEditor: () => void;
   onNewPreview: () => void;
   onOpenDirector: () => void;
+  /** Open the launcher ("New tab: choose") in the active space. */
+  onOpenLauncher: () => void;
   /** All spaces — feeds the "Move to space" submenu. */
   spaces: SpaceMeta[];
   onMoveToSpace: (tabId: number, spaceId: string) => void;
@@ -64,6 +67,7 @@ type NewTabMenuItemsProps = {
   onNewBoard: () => void;
   onNewTasks: () => void;
   onOpenDirector: () => void;
+  onOpenLauncher: () => void;
 };
 
 /**
@@ -80,9 +84,14 @@ function NewTabMenuItems({
   onNewBoard,
   onNewTasks,
   onOpenDirector,
+  onOpenLauncher,
 }: NewTabMenuItemsProps) {
   return (
     <>
+      <DropdownMenuItem onSelect={onOpenLauncher}>
+        <HugeiconsIcon icon={Home01Icon} size={14} strokeWidth={1.75} />
+        <span className="flex-1">New tab: choose…</span>
+      </DropdownMenuItem>
       <DropdownMenuItem onSelect={onNew}>
         <HugeiconsIcon
           icon={ComputerTerminal02Icon}
@@ -147,6 +156,7 @@ export function VerticalTabs({
   onNewEditor,
   onNewPreview,
   onOpenDirector,
+  onOpenLauncher,
   spaces,
   onMoveToSpace,
 }: Props) {
@@ -193,6 +203,7 @@ export function VerticalTabs({
               onNewBoard={onNewBoard}
               onNewTasks={onNewTasks}
               onOpenDirector={onOpenDirector}
+              onOpenLauncher={onOpenLauncher}
             />
           </DropdownMenuContent>
         </DropdownMenu>
@@ -309,6 +320,7 @@ export function VerticalTabs({
             onNewBoard={onNewBoard}
             onNewTasks={onNewTasks}
             onOpenDirector={onOpenDirector}
+            onOpenLauncher={onOpenLauncher}
           />
         </DropdownMenuContent>
       </DropdownMenu>

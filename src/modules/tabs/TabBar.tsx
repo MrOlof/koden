@@ -8,6 +8,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -27,6 +28,7 @@ import {
   GitCompareIcon,
   Globe02Icon,
   HierarchySquare01Icon,
+  Home01Icon,
   IncognitoIcon,
   KanbanIcon,
   MessageMultiple01Icon,
@@ -65,6 +67,8 @@ type Props = {
   onNewBoard: () => void;
   onNewTasks: () => void;
   onOpenDirector: () => void;
+  /** Open the launcher ("New tab: choose") in the active space. */
+  onOpenLauncher: () => void;
   onClose: (id: number) => void;
   /** Open a fresh tab in this tab's space, inheriting its cwd. */
   onDuplicate: (id: number) => void;
@@ -95,6 +99,7 @@ export function TabBar({
   onNewBoard,
   onNewTasks,
   onOpenDirector,
+  onOpenLauncher,
   onClose,
   onDuplicate,
   onCloseOthers,
@@ -362,6 +367,14 @@ export function TabBar({
             className="min-w-44"
             onCloseAutoFocus={(e) => e.preventDefault()}
           >
+            <DropdownMenuItem onSelect={() => onOpenLauncher()}>
+              <HugeiconsIcon icon={Home01Icon} size={14} strokeWidth={1.75} />
+              <span className="flex-1">New tab: choose…</span>
+              <span className="text-xs text-muted-foreground">
+                {fmtShortcut(MOD_KEY, "N")}
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => onNew()}>
               <HugeiconsIcon
                 icon={ComputerTerminal02Icon}
@@ -614,6 +627,16 @@ export function TabIcon({ tab }: { tab: Tab }) {
     return (
       <HugeiconsIcon
         icon={HierarchySquare01Icon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
+    );
+  }
+  if (tab.kind === "launcher") {
+    return (
+      <HugeiconsIcon
+        icon={Home01Icon}
         size={14}
         strokeWidth={2}
         className="shrink-0"

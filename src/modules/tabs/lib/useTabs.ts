@@ -152,6 +152,13 @@ export type LibraryTab = TabBase & {
   title: string;
 };
 
+/** The "What do you want to do?" page. One per space, never persisted. */
+export type LauncherTab = TabBase & {
+  id: number;
+  kind: "launcher";
+  title: string;
+};
+
 /** Singleton workspace views (one per space). "brain" is the Koden Brain pane;
  *  "brain-map" is its interactive knowledge-graph view. */
 export type OrchestrationView =
@@ -180,6 +187,7 @@ export type Tab =
   | BoardTab
   | TasksTab
   | LibraryTab
+  | LauncherTab
   | OrchestrationTab;
 
 const ORCHESTRATION_TITLES: Record<OrchestrationView, string> = {
@@ -802,6 +810,34 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return targetId;
   }, []);
 
+  // One launcher per space; defaults to the space new tabs land in.
+  const openLauncherTab = useCallback((spaceId?: string) => {
+    const sid = spaceId ?? activeSpaceIdRef.current;
+    let targetId: number | null = null;
+    setTabs((curr) => {
+      const existing = curr.find(
+        (t) => t.kind === "launcher" && t.spaceId === sid,
+      );
+      if (existing) {
+        targetId = existing.id;
+        return curr;
+      }
+      const id = nextIdRef.current++;
+      targetId = id;
+      return [
+        ...curr,
+        {
+          id,
+          kind: "launcher",
+          spaceId: sid,
+          title: "Start",
+        } satisfies LauncherTab,
+      ];
+    });
+    if (targetId !== null) setActiveId(targetId);
+    return targetId;
+  }, []);
+
   // Orchestration views are one-per-space: focus an existing one if present.
   const openOrchestrationTab = useCallback((view: OrchestrationView) => {
     let targetId: number | null = null;
@@ -1102,7 +1138,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           x.kind === "agent-topology" ||
           x.kind === "message-flow" ||
           x.kind === "director" ||
-          x.kind === "library"
+          x.kind === "library" ||
+          x.kind === "launcher"
         ) {
           return x;
         }
@@ -1436,6 +1473,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     newBoardTab,
     newTasksTab,
     openLibraryTab,
+    openLauncherTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,
