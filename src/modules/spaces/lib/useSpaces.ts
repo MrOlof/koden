@@ -6,6 +6,7 @@ import {
   saveActiveId,
   saveSpacesList,
   type SpaceMeta,
+  type SpaceWorktree,
 } from "./store";
 
 type CreateInput = {
@@ -13,6 +14,8 @@ type CreateInput = {
   name: string;
   root: string | null;
   env?: WorkspaceEnv;
+  color?: number;
+  worktree?: SpaceWorktree;
 };
 
 type State = {
@@ -52,6 +55,8 @@ export const useSpaces = create<State>((set, get) => ({
       name: input.name,
       root: input.root,
       env: input.env ?? LOCAL_WORKSPACE,
+      ...(input.color != null ? { color: input.color } : {}),
+      ...(input.worktree ? { worktree: input.worktree } : {}),
       createdAt: now,
       updatedAt: now,
     };

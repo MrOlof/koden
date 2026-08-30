@@ -33,8 +33,13 @@ import {
   setUsageGuardPausePct,
   setUsageGuardWarnPct,
   setVimMode,
+  setWorktreeSymlinkPaths,
   setZoomLevel,
 } from "@/modules/settings/store";
+import {
+  formatSymlinkPaths,
+  parseSymlinkPaths,
+} from "@/modules/worktrees/lib/worktreeModel";
 import { paneColorAt } from "@/modules/terminal/lib/paneAutoColor";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useEffect, useState } from "react";
@@ -72,6 +77,18 @@ export function GeneralSection() {
   const defaultFolder = usePreferencesStore((s) => s.defaultFolder);
   const [folderDraft, setFolderDraft] = useState(defaultFolder);
   useEffect(() => setFolderDraft(defaultFolder), [defaultFolder]);
+  const worktreeSymlinkPaths = usePreferencesStore(
+    (s) => s.worktreeSymlinkPaths,
+  );
+  const [linksDraft, setLinksDraft] = useState(() =>
+    formatSymlinkPaths(worktreeSymlinkPaths),
+  );
+  useEffect(
+    () => setLinksDraft(formatSymlinkPaths(worktreeSymlinkPaths)),
+    [worktreeSymlinkPaths],
+  );
+  const commitLinks = () =>
+    void setWorktreeSymlinkPaths(parseSymlinkPaths(linksDraft));
   const paneColorMode = usePreferencesStore((s) => s.paneColorMode);
   const paneColorPalette = usePreferencesStore((s) => s.paneColorPalette);
   const paneColorTerminal = usePreferencesStore((s) => s.paneColorTerminal);
@@ -199,6 +216,23 @@ export function GeneralSection() {
             onBlur={() => void setDefaultFolder(folderDraft)}
             onKeyDown={(e) => {
               if (e.key === "Enter") void setDefaultFolder(folderDraft);
+            }}
+            className="h-8 w-56 rounded-md border border-border bg-background px-2.5 text-[12px] outline-none focus:border-foreground/40"
+          />
+        </SettingRow>
+        <SettingRow
+          title="Worktree links"
+          description="Workspace-relative folders linked into every new worktree Space (comma-separated), so dependencies are shared instead of reinstalled."
+        >
+          <input
+            type="text"
+            value={linksDraft}
+            placeholder="node_modules, .venv"
+            spellCheck={false}
+            onChange={(e) => setLinksDraft(e.target.value)}
+            onBlur={commitLinks}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitLinks();
             }}
             className="h-8 w-56 rounded-md border border-border bg-background px-2.5 text-[12px] outline-none focus:border-foreground/40"
           />

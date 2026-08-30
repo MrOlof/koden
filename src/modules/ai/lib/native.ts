@@ -91,6 +91,27 @@ export type GitPushResult = {
   pushed: boolean;
 };
 
+export type GitBranches = {
+  current: string | null;
+  local: string[];
+  remote: string[];
+};
+
+export type GitWorktree = {
+  path: string;
+  head: string;
+  branch: string | null;
+  isMain: boolean;
+  locked: boolean;
+  prunable: boolean;
+};
+
+export type GitLinkResult = {
+  path: string;
+  outcome: "linked" | "skipped" | "failed";
+  detail: string | null;
+};
+
 export type GitLogEntry = {
   sha: string;
   shortSha: string;
@@ -356,6 +377,43 @@ export const native = {
     invoke<string | null>("git_remote_url", {
       repoRoot,
       name: name ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitBranches: (repoRoot: string) =>
+    invoke<GitBranches>("git_branches", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitWorktreeList: (repoRoot: string) =>
+    invoke<GitWorktree[]>("git_worktree_list", {
+      repoRoot,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitWorktreeAdd: (
+    repoRoot: string,
+    path: string,
+    newBranch: string | null,
+    base: string,
+  ) =>
+    invoke<GitWorktree>("git_worktree_add", {
+      repoRoot,
+      path,
+      newBranch,
+      base,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitWorktreeRemove: (repoRoot: string, path: string, force: boolean) =>
+    invoke<void>("git_worktree_remove", {
+      repoRoot,
+      path,
+      force,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitLinkPaths: (sourceRoot: string, targetRoot: string, relPaths: string[]) =>
+    invoke<GitLinkResult[]>("git_link_paths", {
+      sourceRoot,
+      targetRoot,
+      relPaths,
       workspace: currentWorkspaceEnv(),
     }),
 };

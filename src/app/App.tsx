@@ -140,6 +140,7 @@ import {
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
 import { useWorkspaceEnvStore } from "@/modules/workspace";
+import { NewWorktreeDialog, RemoveWorktreeDialog } from "@/modules/worktrees";
 import { hydrateDocs } from "@/modules/workspace-docs";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -492,6 +493,10 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const [newEditorOpen, setNewEditorOpen] = useState(false);
+  const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
+  const [removeWorktreeSpaceId, setRemoveWorktreeSpaceId] = useState<
+    string | null
+  >(null);
   const [newGridOpen, setNewGridOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [paletteInitialMode, setPaletteInitialMode] = useState<
@@ -2102,6 +2107,20 @@ export default function App() {
     [newTabInSpace],
   );
 
+  // Same three steps as handleNewSpace so the fresh worktree Space lands
+  // focused on a live terminal in its checkout.
+  const handleWorktreeSpaceCreated = useCallback(
+    (spaceId: string) => {
+      const root = useSpaces
+        .getState()
+        .spaces.find((s) => s.id === spaceId)?.root;
+      setActiveSpaceForNewTabs(spaceId);
+      newTab(root ?? undefined);
+      useSpaces.getState().setActive(spaceId);
+    },
+    [newTab, setActiveSpaceForNewTabs],
+  );
+
   const jumpToTab = useCallback(
     (tabId: number) => {
       const t = tabsRef.current.find((x) => x.id === tabId);
@@ -2120,6 +2139,7 @@ export default function App() {
       tabs={tabs}
       onNewSpace={() => void handleNewSpace()}
       onDeleteSpace={handleDeleteSpace}
+      onRemoveWorktree={setRemoveWorktreeSpaceId}
       onNewTabInSpace={handleNewTabInSpace}
       onJumpTab={jumpToTab}
       onCloseTab={handleClose}
@@ -2172,6 +2192,13 @@ export default function App() {
             openSpacesOverview: () => setSwitcherOpen(true),
             newSpace: () => void handleNewSpace(),
             switchSpace: (id) => useSpaces.getState().setActive(id),
+            newWorktreeSpace: () => setNewWorktreeOpen(true),
+            removeWorktreeSpace: () => {
+              if (activeSpaceId) setRemoveWorktreeSpaceId(activeSpaceId);
+            },
+            activeSpaceIsWorktree: spaces.some(
+              (s) => s.id === activeSpaceId && s.worktree != null,
+            ),
           })
         : [],
     [
@@ -2195,6 +2222,7 @@ export default function App() {
       togglePanelAndFocus,
       askFromSelection,
       activeSpaceId,
+      spaces,
       handleNewSpace,
       newNotesTab,
       newBoardTab,
@@ -2596,6 +2624,24 @@ export default function App() {
             onOpenChange={setNewEditorOpen}
             rootPath={explorerRoot ?? home}
             onCreated={(path) => openFileTab(path)}
+          />
+
+          <NewWorktreeDialog
+            open={newWorktreeOpen}
+            onOpenChange={setNewWorktreeOpen}
+            cwd={activeCwd ?? explorerRoot ?? home ?? null}
+            onCreated={handleWorktreeSpaceCreated}
+          />
+
+          <RemoveWorktreeDialog
+            space={spaces.find((s) => s.id === removeWorktreeSpaceId) ?? null}
+            onOpenChange={(o) => {
+              if (!o) setRemoveWorktreeSpaceId(null);
+            }}
+            onRemoved={(id) => {
+              setRemoveWorktreeSpaceId(null);
+              handleDeleteSpace(id);
+            }}
           />
 
           <GridDialog
