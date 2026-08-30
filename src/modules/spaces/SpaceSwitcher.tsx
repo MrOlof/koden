@@ -5,6 +5,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { envBadgeLabel } from "@/modules/launcher/lib/launcherItems";
 import {
   arrayMove,
   CSS,
@@ -29,6 +30,7 @@ import {
   ArrowRight01Icon,
   Cancel01Icon,
   Delete02Icon,
+  FolderOpenIcon,
   PencilEdit02Icon,
   PlusSignIcon,
 } from "@hugeicons/core-free-icons";
@@ -45,6 +47,8 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   tabs: Tab[];
   onNewSpace: () => void;
+  /** Pick a folder; it becomes a new Space rooted there. */
+  onOpenFolder: () => void;
   onDeleteSpace: (id: string) => void;
   onNewTabInSpace: (spaceId: string) => void;
   onJumpTab: (id: number) => void;
@@ -84,6 +88,7 @@ export function SpaceSwitcher({
   onOpenChange,
   tabs,
   onNewSpace,
+  onOpenFolder,
   onDeleteSpace,
   onNewTabInSpace,
   onJumpTab,
@@ -261,14 +266,22 @@ export function SpaceSwitcher({
             ) : null}
           </DragOverlay>
         </DndContext>
-        <div className="mt-1.5 border-t border-border/60 pt-1.5">
+        <div className="mt-1.5 flex items-center gap-1 border-t border-border/60 pt-1.5">
           <button
             type="button"
             onClick={onNewSpace}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+            className="flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
           >
             <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={1.75} />
             <span className="flex-1">New space</span>
+          </button>
+          <button
+            type="button"
+            onClick={onOpenFolder}
+            className="flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+          >
+            <HugeiconsIcon icon={FolderOpenIcon} size={14} strokeWidth={1.75} />
+            <span className="flex-1">Open folder…</span>
           </button>
         </div>
       </PopoverContent>
@@ -328,6 +341,7 @@ function SpaceRow({
   });
 
   const moveTarget = isOver && draggingTabFromOther;
+  const envBadge = envBadgeLabel(space.env);
 
   return (
     <div
@@ -385,6 +399,14 @@ function SpaceRow({
         ) : (
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
             {space.name}
+          </span>
+        )}
+        {!editing && envBadge && (
+          <span
+            title={envBadge}
+            className="max-w-24 shrink-0 truncate rounded-[3px] border border-border/60 px-1 font-mono text-[9px] leading-4 text-muted-foreground/70"
+          >
+            {envBadge}
           </span>
         )}
         {!editing && (
