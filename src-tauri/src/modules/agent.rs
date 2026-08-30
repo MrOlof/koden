@@ -30,7 +30,7 @@ const OWNED_MARKERS: [&str; 6] = [
 // `terminalSequence` because hooks lost /dev/tty access in v2.1.139.
 fn hook_cmd(event: &str) -> String {
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && printf '{{"terminalSequence":"\\u001b]777;notify;Koden;{event}\\u0007"}}' || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && printf '%s' '{{"terminalSequence":"\u001b]777;notify;Koden;{event}\u0007"}}' || true"#
     )
 }
 
@@ -84,7 +84,7 @@ fn bus_cat_cmd() -> String {
 fn user_turn_hook_cmd() -> String {
     let bus = bus_path_str();
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && {{ mkdir -p "$(dirname "{bus}")" 2>/dev/null; p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; printf '{{"terminalSequence":"\\u001b]777;notify;Koden;working\\u0007"}}'; }} || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && {{ mkdir -p "$(dirname "{bus}")" 2>/dev/null; p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; printf '%s' '{{"terminalSequence":"\u001b]777;notify;Koden;working\u0007"}}'; }} || true"#
     )
 }
 
