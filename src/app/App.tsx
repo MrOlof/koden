@@ -725,6 +725,28 @@ export default function App() {
     [activeLeafId],
   );
 
+  // Explicit close is the kill switch for remote sessions: without this,
+  // adoption (M2.5 F2) would resurrect deliberately closed tabs on the next
+  // connect. Fire-and-forget — a host that's offline right now keeps the
+  // window and adoption brings it back; delete again when reachable.
+  // ponytail: closeOthersInSpace bypasses this (rare; safe failure mode is
+  // resurrection, not loss).
+  const killRemoteLeaves = useCallback((ids: number[], spaceId: string) => {
+    const space = useSpaces.getState().spaces.find((s) => s.id === spaceId);
+    if (!space || space.sshTmux !== true) return;
+    const env = spaceEnv(space);
+    if (env.kind !== "ssh") return;
+    for (const lid of ids) {
+      const key = peekLeafRestoreKey(lid);
+      if (!key) continue;
+      void invoke("ssh_tmux_kill_window", {
+        host: env.host,
+        spaceKey: spaceId,
+        leafKey: key,
+      }).catch((e) => console.warn("[koden] remote window kill failed:", e));
+    }
+  }, []);
+
   const disposeTab = useCallback(
     (id: number) => {
       // Terminal-leaf-keyed maps (terminalRefs/searchAddons) are pruned by
@@ -732,9 +754,31 @@ export default function App() {
       // handles need explicit cleanup here.
       editorRefs.current.delete(id);
       previewRefs.current.delete(id);
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (t?.kind === "terminal") killRemoteLeaves(leafIds(t.paneTree), t.spaceId);
       closeTab(id);
     },
-    [closeTab],
+    [closeTab, killRemoteLeaves],
+  );
+
+  const closePaneKillingRemote = useCallback(
+    (leafId: number) => {
+      const t = tabsRef.current.find(
+        (x) => x.kind === "terminal" && hasLeaf(x.paneTree, leafId),
+      );
+      if (t && t.kind === "terminal") killRemoteLeaves([leafId], t.spaceId);
+      closePaneByLeaf(leafId);
+    },
+    [closePaneByLeaf, killRemoteLeaves],
+  );
+
+  const closeActivePaneKillingRemote = useCallback(
+    (tabId: number) => {
+      const t = tabsRef.current.find((x) => x.id === tabId);
+      if (t?.kind === "terminal") killRemoteLeaves([t.activeLeafId], t.spaceId);
+      closeActivePane(tabId);
+    },
+    [closeActivePane, killRemoteLeaves],
   );
 
   const {
@@ -749,7 +793,16 @@ export default function App() {
     confirmDeleteClose,
     cancelDeleteClose,
     handlePathDeleted,
-  } = useTabCloseGuards({ tabs, disposeTab });
+  } = useTabCloseGuards({
+    tabs,
+    disposeTab,
+    // Closing an ssh+tmux tab kills a live remote session the local
+    // foreground check can't see: always confirm.
+    forceTerminalConfirm: (t) => {
+      const space = useSpaces.getState().spaces.find((s) => s.id === t.spaceId);
+      return space?.sshTmux === true && spaceEnv(space).kind === "ssh";
+    },
+  });
 
   useEffect(() => {
     const live = new Set<number>();
@@ -1498,11 +1551,11 @@ export default function App() {
   const handleCloseTabOrPane = useCallback(() => {
     const t = tabsRef.current.find((x) => x.id === activeId);
     if (t?.kind === "terminal" && leafIds(t.paneTree).length > 1) {
-      closeActivePane(activeId);
+      closeActivePaneKillingRemote(activeId);
       return;
     }
     void handleClose(activeId);
-  }, [activeId, closeActivePane, handleClose]);
+  }, [activeId, closeActivePaneKillingRemote, handleClose]);
 
   const [zenMode, setZenMode] = useState(false);
 
@@ -2068,10 +2121,12 @@ export default function App() {
           void respawnSession(leafId, tab.cwd);
         }
       } else {
-        closePaneByLeaf(leafId);
+        // Natural exit: the remote window (if any) already closed itself, so
+        // the kill in the wrapper is a no-op; explicit pane closes share it.
+        closePaneKillingRemote(leafId);
       }
     },
-    [closePaneByLeaf],
+    [closePaneKillingRemote],
   );
 
   const handleEditorDirty = useCallback(
@@ -2148,6 +2203,20 @@ export default function App() {
 
   const handleDeleteSpace = useCallback(
     (id: string) => {
+      // Deleting a Space is its kill switch: take the host-side tmux session
+      // down with it, or adoption would resurrect it on the next connect.
+      const space = useSpaces.getState().spaces.find((s) => s.id === id);
+      if (space?.sshTmux === true) {
+        const env = spaceEnv(space);
+        if (env.kind === "ssh") {
+          void invoke("ssh_tmux_kill_session", {
+            host: env.host,
+            spaceKey: id,
+          }).catch((e) =>
+            console.warn("[koden] remote session kill failed:", e),
+          );
+        }
+      }
       useSpaces.getState().remove(id);
       removeTabsForSpace(id);
     },
@@ -2789,7 +2858,7 @@ export default function App() {
                       onCwd={handleTerminalCwd}
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
-                      onClosePane={closePaneByLeaf}
+                      onClosePane={closePaneKillingRemote}
                       onSplit={handlePaneSplit}
                       onMovePane={(source, target, side) =>
                         movePane(activeId, source, target, side)

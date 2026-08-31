@@ -5,6 +5,10 @@ import type { Tab } from "@/modules/tabs";
 type Params = {
   tabs: Tab[];
   disposeTab: (id: number) => void;
+  /** Route this terminal tab through the close confirmation regardless of
+   * the local foreground check — e.g. ssh+tmux tabs, where closing kills a
+   * remote session the local check can't see. */
+  forceTerminalConfirm?: (tab: Tab) => boolean;
 };
 
 /**
@@ -12,7 +16,11 @@ type Params = {
  * process route through a confirmation dialog instead of closing immediately.
  * Owns the three pending-close states the dialogs render from.
  */
-export function useTabCloseGuards({ tabs, disposeTab }: Params) {
+export function useTabCloseGuards({
+  tabs,
+  disposeTab,
+  forceTerminalConfirm,
+}: Params) {
   const [pendingCloseTab, setPendingCloseTab] = useState<number | null>(null);
   const [pendingTerminalCloseTab, setPendingTerminalCloseTab] = useState<
     number | null
@@ -29,6 +37,10 @@ export function useTabCloseGuards({ tabs, disposeTab }: Params) {
         return;
       }
       if (t?.kind === "terminal") {
+        if (forceTerminalConfirm?.(t)) {
+          setPendingTerminalCloseTab(id);
+          return;
+        }
         const leaves = leafIds(t.paneTree);
         const checks = await Promise.all(leaves.map(leafHasForegroundProcess));
         if (checks.some(Boolean)) {
@@ -38,7 +50,7 @@ export function useTabCloseGuards({ tabs, disposeTab }: Params) {
       }
       disposeTab(id);
     },
-    [tabs, disposeTab],
+    [tabs, disposeTab, forceTerminalConfirm],
   );
 
   const confirmClose = useCallback(() => {

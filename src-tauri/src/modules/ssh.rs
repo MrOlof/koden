@@ -413,6 +413,42 @@ pub async fn ssh_tmux_windows(
         .map_err(|e| e.to_string())?
 }
 
+fn tmux_kill_blocking(host: &str, target: &str) -> Result<(), String> {
+    // kill-window on the last window kills the session too; `|| true` keeps
+    // "already gone" from reading as an error.
+    let cmd = format!("sh -c 'tmux {target} 2>/dev/null || true'");
+    ssh_exec_capture(host, &cmd, Duration::from_secs(10), None).map(|_| ())
+}
+
+/// Kill one pane's tmux window on the host. Explicit tab/pane close is the
+/// intended kill switch: without this, adoption (ssh_tmux_windows) would
+/// resurrect deliberately closed tabs on the next connect.
+#[tauri::command]
+pub async fn ssh_tmux_kill_window(
+    host: String,
+    space_key: String,
+    leaf_key: String,
+) -> Result<(), String> {
+    let session = crate::modules::pty::shell_ssh::tmux_session_name(&space_key);
+    let window = crate::modules::pty::shell_ssh::tmux_window_name(&leaf_key);
+    tauri::async_runtime::spawn_blocking(move || {
+        tmux_kill_blocking(&host, &format!("kill-window -t ={session}:={window}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Kill a Space's whole base tmux session on the host (explicit Space delete).
+#[tauri::command]
+pub async fn ssh_tmux_kill_session(host: String, space_key: String) -> Result<(), String> {
+    let session = crate::modules::pty::shell_ssh::tmux_session_name(&space_key);
+    tauri::async_runtime::spawn_blocking(move || {
+        tmux_kill_blocking(&host, &format!("kill-session -t ={session}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
