@@ -27,6 +27,8 @@ export {
   disposeSession,
   getCommandMarksForLeaf,
   getSearchAddonForLeaf,
+  holdLeafForRetry,
+  leafExitedQuickly,
   leafHasForegroundProcess,
   leafIdForPty,
   navigateFocusedBlocks,

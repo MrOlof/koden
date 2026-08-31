@@ -130,11 +130,12 @@ fn ensure_installed(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `koden-<id>` restricted to the characters tmux accepts unquoted.
-pub fn tmux_session_name(space_id: &str) -> String {
-    let mut out = String::from("koden-");
-    let mut last_dash = true;
-    for c in space_id.chars() {
+/// `<prefix><sanitized id>` restricted to the characters tmux accepts
+/// unquoted, capped, with a fallback when nothing survives.
+fn tmux_name(prefix: &str, id: &str, fallback: &str) -> String {
+    let mut out = String::from(prefix);
+    let mut last_dash = prefix.ends_with('-');
+    for c in id.chars() {
         let mapped = if c.is_ascii_alphanumeric() || c == '_' {
             c
         } else {
@@ -154,11 +155,23 @@ pub fn tmux_session_name(space_id: &str) -> String {
         }
     }
     let trimmed = out.trim_end_matches('-');
-    if trimmed == "koden" {
-        "koden-space".to_string()
+    if trimmed.len() <= prefix.trim_end_matches('-').len() {
+        fallback.to_string()
     } else {
         trimmed.to_string()
     }
+}
+
+/// `koden-<id>` for the Space's base tmux session.
+pub fn tmux_session_name(space_id: &str) -> String {
+    tmux_name("koden-", space_id, "koden-space")
+}
+
+/// `w-<leaf restore key>`: one tmux window per Koden pane, named by the
+/// restart-stable restore key so a restored pane reattaches to its own
+/// window (M2.5 Feature 1).
+pub fn tmux_window_name(leaf_key: &str) -> String {
+    tmux_name("w-", leaf_key, "w-pane")
 }
 
 fn remote_path_literal(path: &str) -> Result<String, String> {
@@ -190,8 +203,15 @@ fn remote_path_literal(path: &str) -> Result<String, String> {
 /// pass a single-quoted string through. It cds into `path` (falling back to
 /// `$HOME`), then execs the login shell with Koden's rc files when they are
 /// installed, plain otherwise. With a tmux session name the shell runs inside
-/// `tmux new-session -A` when tmux exists on the host.
-pub fn remote_command(path: &str, tmux_session: Option<&str>) -> Result<String, String> {
+/// tmux when it exists on the host — windowed mode (session + window, M2.5)
+/// gives every Koden pane its own window in the Space's base session and
+/// attaches through a per-client grouped session, so panes and devices don't
+/// mirror each other; legacy mode (session only) is the old `new-session -A`.
+pub fn remote_command(
+    path: &str,
+    tmux_session: Option<&str>,
+    tmux_window: Option<&str>,
+) -> Result<String, String> {
     let p = remote_path_literal(path)?;
     let mut parts: Vec<String> = vec![
         format!("d=\"$HOME/{REMOTE_DIR}\""),
@@ -207,10 +227,29 @@ pub fn remote_command(path: &str, tmux_session: Option<&str>) -> Result<String, 
              esac"
         ),
     ];
-    if let Some(name) = tmux_session {
-        parts.push(format!(
-            "if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {name} -c \"$PWD\" \"$c\"; fi"
-        ));
+    match (tmux_session, tmux_window) {
+        (Some(name), Some(win)) => {
+            // Windowed mode. Guarded creates tolerate two panes racing on a
+            // fresh host (the loser's create fails silently, the window check
+            // runs after); `destroy-unattached` reaps the grouped viewport on
+            // detach while the base session keeps running. `$$` (remote sh
+            // pid) makes the viewport name unique per connection.
+            // ponytail: a pid-reuse collision on the viewport name fails the
+            // attach; the pane's Enter-to-retry respawns with a fresh pid.
+            parts.push(format!(
+                "if command -v tmux >/dev/null 2>&1; then \
+                 tmux has-session -t ={name} 2>/dev/null || tmux new-session -d -s {name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
+                 tmux list-windows -t ={name} -F \"#W\" 2>/dev/null | grep -qx -- {win} || tmux new-window -d -t ={name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
+                 exec tmux new-session -t ={name} -s {name}-$$ \\; set-option destroy-unattached on \\; select-window -t :={win}; \
+                 fi"
+            ));
+        }
+        (Some(name), None) => {
+            parts.push(format!(
+                "if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {name} -c \"$PWD\" \"$c\"; fi"
+            ));
+        }
+        (None, _) => {}
     }
     parts.push("exec sh -c \"$c\"".into());
     let script = parts.join("; ");
@@ -233,18 +272,35 @@ pub fn build(
     env_path: &str,
     host: &str,
     tmux_key: Option<&str>,
+    tmux_window_key: Option<&str>,
 ) -> Result<CommandBuilder, String> {
     ssh::validate_ssh_host(host)?;
     let bin = ssh::resolve_ssh_binary().ok_or_else(|| ssh::SSH_BINARY_MISSING.to_string())?;
     let path = remote_cwd_or(cwd.as_deref(), env_path);
     let session = tmux_key.map(tmux_session_name);
-    let remote = remote_command(path, session.as_deref())?;
+    // A window only means something inside a session.
+    let window = session
+        .as_deref()
+        .and(tmux_window_key)
+        .map(tmux_window_name);
+    let remote = remote_command(path, session.as_deref(), window.as_deref())?;
     if let Err(e) = ensure_installed(host) {
         log::warn!("ssh shell integration disabled for {host}: {e}");
     }
 
     let mut cmd = CommandBuilder::new(bin);
-    for arg in ["-t", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30"] {
+    // 15s x 2 probes: a dead link (sleep, cable pull, VPN drop) surfaces as an
+    // exit within ~30s instead of OpenSSH's default 30s x 3 = 90s of a
+    // frozen-looking pane.
+    for arg in [
+        "-t",
+        "-o",
+        "ConnectTimeout=20",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
+    ] {
         cmd.arg(arg);
     }
     cmd.arg(host);
@@ -301,7 +357,7 @@ mod tests {
 
     #[test]
     fn remote_command_cds_into_path_and_execs_detected_shell() {
-        let remote = remote_command("/home/kosta/repo", None).unwrap();
+        let remote = remote_command("/home/kosta/repo", None, None).unwrap();
         let script = inner_script(&remote);
         assert!(!script.contains('\''), "inner script must not contain single quotes");
         assert!(script.contains("p=\"/home/kosta/repo\"; "));
@@ -317,27 +373,27 @@ mod tests {
 
     #[test]
     fn remote_command_expands_tilde_and_accepts_empty_path() {
-        let home = remote_command("~", None).unwrap();
+        let home = remote_command("~", None, None).unwrap();
         assert!(inner_script(&home).contains("p=\"$HOME\"; "));
-        let sub = remote_command("~/src/koden", None).unwrap();
+        let sub = remote_command("~/src/koden", None, None).unwrap();
         assert!(inner_script(&sub).contains("p=\"$HOME/src/koden\"; "));
-        let empty = remote_command("", None).unwrap();
+        let empty = remote_command("", None, None).unwrap();
         assert!(inner_script(&empty).contains("p=\"\"; "));
     }
 
     #[test]
     fn remote_command_escapes_double_quote_specials() {
-        let remote = remote_command("/tmp/a \"b\" $c `d`", None).unwrap();
+        let remote = remote_command("/tmp/a \"b\" $c `d`", None, None).unwrap();
         assert!(inner_script(&remote).contains(r#"p="/tmp/a \"b\" \$c \`d\`"; "#));
     }
 
     #[test]
     fn remote_command_rejects_unsafe_or_relative_paths() {
-        assert!(remote_command("/tmp/it's", None).is_err());
-        assert!(remote_command("/tmp/back\\slash", None).is_err());
-        assert!(remote_command("/tmp/new\nline", None).is_err());
-        assert!(remote_command("relative/path", None).is_err());
-        assert!(remote_command("~user/x", None).is_err());
+        assert!(remote_command("/tmp/it's", None, None).is_err());
+        assert!(remote_command("/tmp/back\\slash", None, None).is_err());
+        assert!(remote_command("/tmp/new\nline", None, None).is_err());
+        assert!(remote_command("relative/path", None, None).is_err());
+        assert!(remote_command("~user/x", None, None).is_err());
     }
 
     #[test]
@@ -352,11 +408,43 @@ mod tests {
 
     #[test]
     fn remote_command_wraps_shell_in_tmux_when_requested() {
-        let remote = remote_command("/srv/app", Some("koden-abc")).unwrap();
+        let remote = remote_command("/srv/app", Some("koden-abc"), None).unwrap();
         let script = inner_script(&remote);
         assert!(script.contains(
             "if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s koden-abc -c \"$PWD\" \"$c\"; fi; exec sh -c \"$c\""
         ));
+    }
+
+    #[test]
+    fn remote_command_windowed_creates_window_and_grouped_attach() {
+        let remote =
+            remote_command("/srv/app", Some("koden-abc"), Some("w-rk1")).unwrap();
+        let script = inner_script(&remote);
+        assert!(!script.contains('\''), "no single quotes: {script}");
+        assert!(!script.contains('\n'));
+        // Guarded base-session create with our window as window 0.
+        assert!(script.contains(
+            "tmux has-session -t =koden-abc 2>/dev/null || tmux new-session -d -s koden-abc -n w-rk1 -c \"$PWD\" \"$c\" 2>/dev/null || true"
+        ));
+        // Guarded window create for an existing base session.
+        assert!(script.contains(
+            "tmux list-windows -t =koden-abc -F \"#W\" 2>/dev/null | grep -qx -- w-rk1 || tmux new-window -d -t =koden-abc -n w-rk1 -c \"$PWD\" \"$c\" 2>/dev/null || true"
+        ));
+        // Per-client grouped viewport, reaped on detach, pinned to our window.
+        assert!(script.contains(
+            "exec tmux new-session -t =koden-abc -s koden-abc-$$ \\; set-option destroy-unattached on \\; select-window -t :=w-rk1"
+        ));
+        // Plain-shell fallback still closes the script.
+        assert!(script.ends_with("; exec sh -c \"$c\""));
+    }
+
+    #[test]
+    fn tmux_window_name_is_sanitised() {
+        assert_eq!(tmux_window_name("rk-mthk-u0pjur"), "w-rk-mthk-u0pjur");
+        assert_eq!(tmux_window_name("My Pane: v2"), "w-My-Pane-v2");
+        assert_eq!(tmux_window_name("..."), "w-pane");
+        assert_eq!(tmux_window_name(""), "w-pane");
+        assert!(tmux_window_name(&"x".repeat(200)).len() <= 48);
     }
 
     #[test]
@@ -416,10 +504,12 @@ mod tests {
             eprintln!("sh not found on PATH, skipping syntax check");
             return;
         };
-        let plain = remote_command("/home/k/repo", None).unwrap();
+        let plain = remote_command("/home/k/repo", None, None).unwrap();
         assert!(sh_syntax_ok(&sh, inner_script(&plain)));
-        let tmux = remote_command("~/x", Some("koden-s1")).unwrap();
+        let tmux = remote_command("~/x", Some("koden-s1"), None).unwrap();
         assert!(sh_syntax_ok(&sh, inner_script(&tmux)));
+        let windowed = remote_command("~/x", Some("koden-s1"), Some("w-rk1")).unwrap();
+        assert!(sh_syntax_ok(&sh, inner_script(&windowed)));
         let files = bundle();
         assert!(sh_syntax_ok(&sh, &installer_script(&files, &bundle_hash(&files))));
     }
@@ -504,7 +594,7 @@ mod tests {
             return;
         };
         let host = fake_host("bash");
-        let remote = remote_command("/definitely/not/here", None).unwrap();
+        let remote = remote_command("/definitely/not/here", None, None).unwrap();
         let out = run_remote(&sh, &host, &remote, None);
         // Compared against the $HOME the shell saw: MSYS sh reports the temp
         // dir as /tmp/... while the Rust side holds C:/..., same directory.
@@ -527,7 +617,7 @@ mod tests {
         let host = fake_host("zsh");
         let target = host.home.join("proj");
         std::fs::create_dir_all(&target).unwrap();
-        let remote = remote_command("~/proj", None).unwrap();
+        let remote = remote_command("~/proj", None, None).unwrap();
         let out = run_remote(&sh, &host, &remote, Some("/custom/zdot"));
         let home = line(&out, "HOME");
         assert_eq!(line(&out, "ARGS"), "-l");
@@ -544,7 +634,7 @@ mod tests {
             return;
         };
         let host = fake_host("nu");
-        let remote = remote_command("", None).unwrap();
+        let remote = remote_command("", None, None).unwrap();
         let out = run_remote(&sh, &host, &remote, None);
         assert_eq!(line(&out, "ARGS"), "-l");
         assert_eq!(line(&out, "KT"), "");
@@ -553,7 +643,7 @@ mod tests {
 
     #[test]
     fn build_refuses_unsafe_host() {
-        let err = build(None, "/home/k", "-oProxyCommand=x", None).unwrap_err();
+        let err = build(None, "/home/k", "-oProxyCommand=x", None, None).unwrap_err();
         assert!(err.contains("unsafe ssh host"), "got: {err}");
     }
 }

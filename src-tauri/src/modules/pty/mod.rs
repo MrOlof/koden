@@ -8,8 +8,8 @@ pub(crate) mod shell_init;
 mod shell_ssh;
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
@@ -56,6 +56,7 @@ pub async fn pty_open(
     workspace: Option<WorkspaceEnv>,
     blocks: Option<bool>,
     ssh_tmux: Option<String>,
+    ssh_tmux_window: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
 ) -> Result<u32, String> {
@@ -68,7 +69,17 @@ pub async fn pty_open(
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
         session::spawn(
-            id, app, cols, rows, cwd, workspace, blocks, ssh_tmux, on_data, on_exit,
+            id,
+            app,
+            cols,
+            rows,
+            cwd,
+            workspace,
+            blocks,
+            ssh_tmux,
+            ssh_tmux_window,
+            on_data,
+            on_exit,
         )
         .map(|(s, _)| s)
     })
@@ -88,6 +99,10 @@ pub async fn pty_open(
 
 // Input is the latency-critical path: raw body + id header skips JSON
 // serialization of every keystroke on both sides of the IPC boundary.
+// Deliberately sync (ordered, no async dispatch) but non-blocking: the actual
+// PTY write happens on the session's writer thread. Sync commands run on the
+// main thread, and a `write_all` against a wedged conhost here used to freeze
+// keyboard input app-wide (2026-08-31 ssh/ai-server incident).
 #[tauri::command]
 pub fn pty_write(
     state: tauri::State<PtyState>,
@@ -112,24 +127,27 @@ pub fn pty_write(
             log::warn!("pty_write: unknown id={id}");
             "no session".to_string()
         })?;
-    // Bind to a local so the MutexGuard temporary drops before `session` —
-    // see rustc note on tail-expression temporary drop order.
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(bytes)
-        .map_err(|e| {
-            // EPIPE is expected if the child already exited.
-            log::debug!("pty_write id={id} failed: {e}");
-            e.to_string()
-        });
-    result
+    match session.input_tx.try_send(bytes.to_vec()) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => {
+            // Only reachable when the writer thread is stuck (wedged conhost,
+            // stalled ssh): drop the chunk instead of blocking the caller.
+            log::warn!("pty_write id={id}: input queue full, dropped {} bytes", bytes.len());
+            Err("pty input backlogged".to_string())
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            // Expected if the child already exited (the old EPIPE case).
+            log::debug!("pty_write id={id}: writer thread gone");
+            Err("pty writer closed".to_string())
+        }
+    }
 }
 
+// Async: ResizePseudoConsole is a blocking RPC into conhost and must never
+// run on the main thread — a wedged conhost would take all IPC down with it.
 #[tauri::command]
-pub fn pty_resize(
-    state: tauri::State<PtyState>,
+pub async fn pty_resize(
+    state: tauri::State<'_, PtyState>,
     id: u32,
     cols: u16,
     rows: u16,
@@ -144,38 +162,41 @@ pub fn pty_resize(
             log::warn!("pty_resize: unknown id={id}");
             "no session".to_string()
         })?;
-    let result = session
-        .master
-        .lock()
-        .unwrap()
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| {
-            log::warn!("pty_resize id={id} failed: {e}");
-            e.to_string()
-        });
-    result
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .master
+            .lock()
+            .unwrap()
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| {
+                log::warn!("pty_resize id={id} failed: {e}");
+                e.to_string()
+            })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
     let session = state.sessions.write().unwrap().remove(&id);
     if let Some(s) = session {
-        if let Err(e) = s.killer.lock().unwrap().kill() {
-            // Non-fatal: the child may already have exited on its own (e.g. the
-            // user ran `exit`). Log so this isn't invisible during debugging.
-            log::debug!("pty_close: kill id={id} returned {e}");
-        }
-        log::info!("pty closed id={id}");
-        // Detached: on Windows `ClosePseudoConsole` can block until conhost
-        // drains, which would freeze this Tauri worker thread and stall IPC.
+        // Detached: kill and ClosePseudoConsole can both block on a wedged
+        // conhost, and this sync command runs on the main thread.
         thread::Builder::new()
             .name(format!("koden-pty-drop-{id}"))
             .spawn(move || {
+                if let Err(e) = s.killer.lock().unwrap().kill() {
+                    // Non-fatal: the child may already have exited on its own
+                    // (e.g. the user ran `exit`). Log so this isn't invisible.
+                    log::debug!("pty_close: kill id={id} returned {e}");
+                }
+                log::info!("pty closed id={id}");
                 let t0 = std::time::Instant::now();
                 session::drop_session(s);
                 log::info!(
@@ -190,43 +211,67 @@ pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
     Ok(())
 }
 
+// Async: pgrep (unix) / a Toolhelp snapshot (Windows) are syscalls that don't
+// belong on the main thread.
 #[tauri::command]
-pub fn pty_has_foreground_process(state: tauri::State<PtyState>, id: u32) -> Result<bool, String> {
-    let sessions = state.sessions.read().unwrap();
-    let session = sessions.get(&id).ok_or_else(|| {
-        log::warn!("pty_has_foreground_process: unknown session id={id}");
-        "no session".to_string()
-    })?;
-    let shell_pid = session.shell_pid;
+pub async fn pty_has_foreground_process(
+    state: tauri::State<'_, PtyState>,
+    id: u32,
+) -> Result<bool, String> {
+    let shell_pid = {
+        let sessions = state.sessions.read().unwrap();
+        let session = sessions.get(&id).ok_or_else(|| {
+            log::warn!("pty_has_foreground_process: unknown session id={id}");
+            "no session".to_string()
+        })?;
+        session.shell_pid
+    };
     if shell_pid == 0 {
         return Ok(false);
     }
-    Ok(shell_has_children(shell_pid))
+    tauri::async_runtime::spawn_blocking(move || shell_has_children(shell_pid))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // Foreground-only check for the renderer hibernation path: true while a job
 // owns the tty (tcgetpgrp != shell pgid). Stricter and cheaper than
 // pty_has_foreground_process, which counts background children too.
+// Async: the unix branch takes `master.lock()`, which a stuck resize against
+// a wedged pty could hold — never contend for it on the main thread.
 #[tauri::command]
-pub fn pty_has_foreground_job(state: tauri::State<PtyState>, id: u32) -> Result<bool, String> {
-    let sessions = state.sessions.read().unwrap();
-    let session = sessions.get(&id).ok_or_else(|| {
-        log::warn!("pty_has_foreground_job: unknown session id={id}");
-        "no session".to_string()
-    })?;
+pub async fn pty_has_foreground_job(
+    state: tauri::State<'_, PtyState>,
+    id: u32,
+) -> Result<bool, String> {
+    let session = state
+        .sessions
+        .read()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| {
+            log::warn!("pty_has_foreground_job: unknown session id={id}");
+            "no session".to_string()
+        })?;
     let shell_pid = session.shell_pid;
     if shell_pid == 0 {
         return Ok(false);
     }
-    #[cfg(unix)]
-    {
-        let leader = session.master.lock().unwrap().process_group_leader();
-        Ok(matches!(leader, Some(pid) if pid > 0 && pid as u32 != shell_pid))
-    }
-    #[cfg(windows)]
-    {
-        Ok(shell_has_children(shell_pid))
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(unix)]
+        {
+            let leader = session.master.lock().unwrap().process_group_leader();
+            matches!(leader, Some(pid) if pid > 0 && pid as u32 != shell_pid)
+        }
+        #[cfg(windows)]
+        {
+            let _ = &session;
+            shell_has_children(shell_pid)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // pgrep -P exits 0 when shell_pid has at least one child, 1 when none.
@@ -281,12 +326,14 @@ pub fn pty_close_all(state: tauri::State<PtyState>) -> Result<usize, String> {
     };
     let count = drained.len();
     for (id, s) in drained {
-        if let Err(e) = s.killer.lock().unwrap().kill() {
-            log::debug!("pty_close_all: kill id={id} returned {e}");
-        }
         thread::Builder::new()
             .name(format!("koden-pty-drop-{id}"))
-            .spawn(move || session::drop_session(s))
+            .spawn(move || {
+                if let Err(e) = s.killer.lock().unwrap().kill() {
+                    log::debug!("pty_close_all: kill id={id} returned {e}");
+                }
+                session::drop_session(s)
+            })
             .expect("spawn pty drop thread");
     }
     if count > 0 {

@@ -48,7 +48,9 @@ export function RemoteConnectForm({
 }: Props) {
   const [host, setHost] = useState("");
   const [path, setPath] = useState("");
-  const [tmux, setTmux] = useState(false);
+  // Default on: the whole point of a remote Space is picking up where you
+  // left off; opting OUT of host-side persistence is the unusual choice.
+  const [tmux, setTmux] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pathRef = useRef<HTMLInputElement>(null);

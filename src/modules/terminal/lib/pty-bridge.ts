@@ -24,6 +24,9 @@ export async function openPty(
   /** SSH envs only: key (typically the space id) of a tmux session to attach
    * to on the host so the shell outlives the client. */
   sshTmux?: string,
+  /** With sshTmux: the pane's restart-stable restore key. Each pane gets its
+   * own tmux window in the Space's session (M2.5), so panes don't mirror. */
+  sshTmuxWindow?: string,
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
   const onData = new Channel<ArrayBuffer>();
@@ -38,10 +41,24 @@ export async function openPty(
     onExit.onmessage = noop;
   };
 
+  // Reap the backend Session when the child exits on its own: nothing else
+  // calls pty_close on a natural exit (the frontend nulls its pty first), and
+  // every leaked Session pins a ConPTY/conhost until app restart.
+  let closed = false;
+  let ptyId: number | null = null;
+  let exited = false;
+  const reapBackend = () => {
+    if (closed || ptyId === null) return;
+    closed = true;
+    invoke("pty_close", { id: ptyId }).catch(() => {});
+  };
+
   onData.onmessage = (buf) => handlers.onData(new Uint8Array(buf));
   onExit.onmessage = (code) => {
     handlers.onExit?.(code);
     releaseHandlers();
+    exited = true;
+    reapBackend();
   };
 
   const id = await invoke<number>("pty_open", {
@@ -51,11 +68,14 @@ export async function openPty(
     workspace: currentWorkspaceEnv(),
     blocks: blocks ?? false,
     sshTmux: sshTmux ?? null,
+    sshTmuxWindow: sshTmuxWindow ?? null,
     onData,
     onExit,
   });
+  ptyId = id;
+  // The child can die before pty_open's response lands; reap late in that case.
+  if (exited) reapBackend();
 
-  let closed = false;
   const headers = { "x-pty-id": String(id) };
 
   return {

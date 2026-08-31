@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,10 @@ const MAX_PENDING: usize = 4 * 1024 * 1024;
 // we're forced to discard backlog.
 const OVERFLOW_NOTICE: &[u8] =
     b"\x1bc\x1b[2m[koden: dropped output due to backpressure]\x1b[0m\r\n";
+// Pending input chunks queued for the writer thread. A chunk is one pty_write
+// body (keystrokes are bytes, a paste is one chunk), so a wedged conhost
+// swallows at most a few KB of typing before callers start getting errors.
+const INPUT_QUEUE: usize = 256;
 
 pub struct Session {
     // Field drop order is intentional. Rust drops fields top-to-bottom:
@@ -49,7 +53,9 @@ pub struct Session {
     //      the Tauri worker thread that triggered the close.
     //   2. `killer` — best-effort kill (redundant on Windows once Job
     //      closed, but harmless and required on Unix where there is no Job).
-    //   3. `writer` — closes the input side of the master pipe.
+    //   3. `input_tx` — dropping the session's sender (the reader thread's
+    //      DA clone dies at EOF) disconnects the writer thread, which exits
+    //      and closes the input side of the master pipe.
     //   4. `master` — last; ClosePseudoConsole on Windows. By now the child
     //      is dead and conhost has nothing left to drain.
     #[cfg(windows)]
@@ -60,7 +66,11 @@ pub struct Session {
     /// uses this to resolve a pty leaf → project. `None` when not given at open.
     pub cwd: Option<String>,
     pub killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
-    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Input funnel. The actual `write_all` runs on a dedicated per-session
+    /// writer thread so a wedged conhost / stalled ssh can never block a
+    /// Tauri command thread — the 2026-08-31 "can't type anywhere" freeze
+    /// was `pty_write` (sync, main thread) stuck in exactly that write.
+    pub input_tx: mpsc::SyncSender<Vec<u8>>,
     pub master: Mutex<Box<dyn MasterPty + Send>>,
 }
 
@@ -118,13 +128,20 @@ pub fn spawn(
     workspace: WorkspaceEnv,
     blocks: bool,
     ssh_tmux: Option<String>,
+    ssh_tmux_window: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
 ) -> Result<(Arc<Session>, PtySize), String> {
     // Built before the ConPTY lock: an SSH spawn may spend seconds pushing rc
     // files to the host and must not stall every other tab meanwhile.
     let session_cwd = cwd.clone();
-    let mut cmd = shell_init::build_command(cwd, workspace, blocks, ssh_tmux.as_deref())?;
+    let mut cmd = shell_init::build_command(
+        cwd,
+        workspace,
+        blocks,
+        ssh_tmux.as_deref(),
+        ssh_tmux_window.as_deref(),
+    )?;
 
     #[cfg(windows)]
     let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
@@ -153,10 +170,25 @@ pub fn spawn(
     let mut guard = ChildKillGuard::new(child.clone_killer());
     let killer = child.clone_killer();
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-        pair.master.take_writer().map_err(|e| e.to_string())?,
-    ));
+    let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     guard.disarm();
+
+    // All input goes through this channel to a dedicated writer thread, so a
+    // blocking write against a wedged conhost stalls only this session. On a
+    // write error the thread exits; senders then see Disconnected, which
+    // callers surface the same way as the old EPIPE path.
+    let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE);
+    thread::Builder::new()
+        .name("koden-pty-writer".into())
+        .spawn(move || {
+            while let Ok(chunk) = input_rx.recv() {
+                if let Err(e) = writer.write_all(&chunk) {
+                    log::debug!("pty writer ended: {e}");
+                    break;
+                }
+            }
+        })
+        .expect("spawn pty writer thread");
 
     let shell_pid = child.process_id().unwrap_or(0);
 
@@ -178,7 +210,7 @@ pub fn spawn(
         shell_pid,
         cwd: session_cwd,
         killer: Mutex::new(killer),
-        writer: writer.clone(),
+        input_tx: input_tx.clone(),
         master: Mutex::new(pair.master),
     });
 
@@ -192,7 +224,7 @@ pub fn spawn(
     let first_byte = Arc::new(AtomicBool::new(false));
 
     let pending_r = pending.clone();
-    let writer_for_da = writer.clone();
+    let tx_da = input_tx;
     let app_reader = app.clone();
     let first_byte_r = first_byte;
     let reader_thread = thread::Builder::new()
@@ -242,9 +274,9 @@ pub fn spawn(
                         });
                         filtered.clear();
                         da_filter.process(&buf[..n], &mut filtered, |reply| {
-                            if let Ok(mut w) = writer_for_da.lock() {
-                                let _ = w.write_all(reply);
-                            }
+                            // try_send: a DA reply is best-effort; never let a
+                            // wedged writer stall the reader thread.
+                            let _ = tx_da.try_send(reply.to_vec());
                         });
                         if filtered.is_empty() {
                             continue;
@@ -374,14 +406,13 @@ mod tests {
         drop(pair.slave);
 
         let killer = child.clone_killer();
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
+        let (input_tx, _input_rx) = mpsc::sync_channel::<Vec<u8>>(1);
 
         let session = Arc::new(Session {
             shell_pid: child.process_id().unwrap_or(0),
             cwd: None,
             killer: Mutex::new(killer),
-            writer,
+            input_tx,
             master: Mutex::new(pair.master),
         });
 
@@ -423,14 +454,13 @@ mod tests {
         let _ = child.wait();
 
         let killer = child.clone_killer();
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
+        let (input_tx, _input_rx) = mpsc::sync_channel::<Vec<u8>>(1);
 
         let session = Arc::new(Session {
             shell_pid: 0,
             cwd: None,
             killer: Mutex::new(killer),
-            writer,
+            input_tx,
             master: Mutex::new(pair.master),
         });
 

@@ -136,6 +136,8 @@ import {
   findLeaf,
   findLeafCwd,
   hasLeaf,
+  holdLeafForRetry,
+  leafExitedQuickly,
   leafIdForPty,
   leafIds,
   navigateFocusedBlocks,
@@ -2027,17 +2029,35 @@ export default function App() {
   }, []);
 
   const handleLeafExit = useCallback(
-    (leafId: number, _code: number) => {
+    (leafId: number, code: number) => {
       const all = tabsRef.current;
       const tab = all.find(
         (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
       );
       if (!tab || tab.kind !== "terminal") return;
+      // A non-zero exit on an ssh pane is a dropped/failed connection, not
+      // the user leaving: keep the pane (layout survives) and offer
+      // Enter-to-reconnect instead of closing or respawn-looping against a
+      // host that may still be down. A clean exit (`exit` at the prompt)
+      // falls through to normal close semantics.
+      const space = useSpaces
+        .getState()
+        .spaces.find((s) => s.id === tab.spaceId);
+      if (space && spaceEnv(space).kind === "ssh" && code !== 0) {
+        holdLeafForRetry(leafId, `connection lost (exit ${code})`);
+        return;
+      }
       const isLast =
         leafIds(tab.paneTree).length === 1 &&
         all.filter((t) => t.kind === "terminal").length === 1;
       if (isLast) {
-        void respawnSession(leafId, tab.cwd);
+        // Backoff: a shell dying right after spawn (broken profile, dead
+        // host) would otherwise respawn in a tight loop.
+        if (leafExitedQuickly(leafId)) {
+          holdLeafForRetry(leafId, `shell exited immediately (code ${code})`);
+        } else {
+          void respawnSession(leafId, tab.cwd);
+        }
       } else {
         closePaneByLeaf(leafId);
       }

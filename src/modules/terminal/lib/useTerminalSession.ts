@@ -2,6 +2,7 @@ import { clipboardWriteText } from "@/lib/clipboard";
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { revealInFinder } from "@/modules/explorer/lib/contextActions";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { leafRestoreKey } from "@/modules/spaces/lib/scrollbackStore";
 import { activeSpaceTmuxKey } from "@/modules/spaces/lib/tmuxKey";
 import { readTerminalTokens, resolveCssColorToHex } from "@/styles/tokens";
 import { invoke } from "@tauri-apps/api/core";
@@ -117,6 +118,10 @@ type Session = {
   commandRunning: boolean;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
   spawnFailed: boolean;
+  // Epoch ms of the last successful pty open; 0 before the first. Lets the
+  // exit handler tell a shell that died right after spawning (dead ssh host,
+  // broken shell config) from one that ran for a while.
+  lastSpawnAt: number;
 };
 
 const sessions = new Map<number, Session>();
@@ -613,6 +618,7 @@ function ensureSession(
     commandRunning: false,
     hiddenReleaseTimer: null,
     spawnFailed: false,
+    lastSpawnAt: 0,
   };
   sessions.set(leafId, session);
 
@@ -669,6 +675,36 @@ function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
   );
 }
 
+/**
+ * Keep an exited pane on screen with an Enter-to-retry banner instead of
+ * closing or auto-respawning it. Reuses the spawnFailed machinery: the
+ * renderer-pool input hook turns the next Enter into a respawnSession.
+ * Used for dropped ssh connections (layout survives the disconnect) and as
+ * the backoff when a shell dies right after spawning (no respawn loop).
+ */
+export function holdLeafForRetry(leafId: number, detail: string): void {
+  const s = sessions.get(leafId);
+  if (!s || s.disposed) return;
+  s.spawnFailed = true;
+  // The exit path disabled stdin on the slot; Enter must still reach the
+  // retry hook.
+  const slot = getSlotForLeaf(leafId);
+  if (slot) slot.term.options.disableStdin = false;
+  deliverPtyBytes(
+    leafId,
+    new TextEncoder().encode(
+      `\r\n\x1b[31m[koden] ${detail}\x1b[0m\r\n\x1b[2mpress Enter to retry\x1b[0m\r\n`,
+    ),
+  );
+}
+
+/** True when the leaf's pty died within `withinMs` of opening. */
+export function leafExitedQuickly(leafId: number, withinMs = 5000): boolean {
+  const s = sessions.get(leafId);
+  if (!s || s.lastSpawnAt === 0) return false;
+  return Date.now() - s.lastSpawnAt < withinMs;
+}
+
 async function openPtyForSession(
   leafId: number,
   s: Session,
@@ -676,6 +712,9 @@ async function openPtyForSession(
 ): Promise<PtySession> {
   const startCols = s.cols > 0 ? s.cols : 80;
   const startRows = s.rows > 0 ? s.rows : 24;
+  // Per-pane tmux window (M2.5): the restore key is the identity that
+  // survives restarts, so a restored pane reattaches to its own window.
+  const tmuxKey = activeSpaceTmuxKey();
   const pty = await openPty(
     startCols,
     startRows,
@@ -694,8 +733,10 @@ async function openPtyForSession(
     },
     cwd,
     s.blocks,
-    activeSpaceTmuxKey(),
+    tmuxKey,
+    tmuxKey ? leafRestoreKey(leafId) : undefined,
   );
+  s.lastSpawnAt = Date.now();
   // Only resize if the bound dims changed during the spawn: a same-size
   // ResizePseudoConsole during conhost warmup is a known ConPTY trigger for
   // a console that never renders (blank tab).

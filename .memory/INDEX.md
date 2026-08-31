@@ -201,6 +201,37 @@ layer, FTS = retrieval layer). Remaining queue by decision: embeddings prototype
 key, sidecar journal, UI-walker require_git. ADR-012 demand-driven; ADR-013 stored
 upgrade rejected-for-now.
 
+**2026-08-31 (new laptop, NO .git on this copy — commit from a git machine):
+notification levels + coalescing.** `agentNotificationMode` pref ("all" |
+"smart" | "important", default **smart**) + `lib/coalesce.ts` (4 s window
+batches calm kinds → "N agents finished — Tab1, Tab2"; attention/error always
+immediate; bell records everything in every mode; "important" = finished/memory
+→ bell only). Settings → General → Agents gets a "Notification level" select
+under the existing switch. Touched: settings/store.ts, agents/lib/route.ts,
+agents/lib/coalesce.ts(+test), GeneralSection.tsx. tsc clean, vitest 12/12
+(coalesce+store), biome lint clean on new files (format check unusable here —
+CRLF noise from the git-less MEGA copy). GUI not runtime-verified.
+
+**2026-08-31 (evening) — ssh-space freeze root-caused + PTY main-thread hardening.**
+Symptom: after adding the ai-server remote Space, "can't type anywhere, mouse
+works". Root cause: `pty_write`/`pty_resize` were SYNC Tauri commands (main
+thread); a ConPTY that wedged during the ssh spawn blocked them → all IPC dead
+while the WebView2 DOM stayed alive. Evidence: ai-server sshd showed the probes
+succeeding then silence; no server-side drops; 3 force-killed Koden boots in
+25 min. Fixes (all uncommitted — git-less MEGA copy, commit from a git machine):
+per-session writer thread + bounded channel so `pty_write` stays sync but can
+never block (session.rs; DA replies routed through it too); `pty_resize` +
+foreground checks async on the blocking pool; kill moved onto the detached
+drop thread in `pty_close`/`pty_close_all`; pty-bridge now reaps the backend
+Session on natural exit (was leaking a conhost per exited shell);
+`ServerAliveInterval=15`+`CountMax=2` (~30s dead-link detection, was 90s);
+`handleLeafExit` holds a non-zero-exit ssh pane with an Enter-to-reconnect
+banner (layout survives drops) and backs off instead of respawn-looping when
+a shell dies <5s after spawn (`holdLeafForRetry`/`leafExitedQuickly`).
+Sweep green: cargo lib 554/1-known, vitest 643/643, tsc + clippy clean.
+Unrelated but real: HQ's Tailscale is wedged (expired key, NoState) — Kosta
+re-authing it; the ssh path itself is LAN (`ai-server` = 192.168.1.240).
+
 ## Key decisions (`decisions/`)
 - **ADR-011 — Gist known-unknowns + per-claim freshness labels** *(Accepted + implemented
   2026-07-06, commit `3036916`)*. Two adoptions from an external design review: the gist
