@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use shared_child::SharedChild;
@@ -433,6 +434,74 @@ pub async fn ssh_tmux_kill_window(
     let window = crate::modules::pty::shell_ssh::tmux_window_name(&leaf_key);
     tauri::async_runtime::spawn_blocking(move || {
         tmux_kill_blocking(&host, &format!("kill-window -t ={session}:={window}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---- remote image paste (M2.9) ------------------------------------------
+// Two steps so no Tauri thread ever blocks on the network with a raw-body
+// borrow in hand: `ssh_paste_stage` (sync, raw body) stashes the bytes and
+// returns instantly; `ssh_paste_send` ships them from the blocking pool.
+
+const PASTE_MAX_BYTES: usize = 12 * 1024 * 1024;
+static PASTE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn paste_stash() -> &'static Mutex<HashMap<u64, Vec<u8>>> {
+    static STASH: OnceLock<Mutex<HashMap<u64, Vec<u8>>>> = OnceLock::new();
+    STASH.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[tauri::command]
+pub fn ssh_paste_stage(request: tauri::ipc::Request) -> Result<u64, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("ssh_paste_stage: expected raw body".into());
+    };
+    if bytes.is_empty() {
+        return Err("empty image".into());
+    }
+    if bytes.len() > PASTE_MAX_BYTES {
+        return Err("image too large (12 MB cap)".into());
+    }
+    let id = PASTE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut stash = paste_stash().lock().expect("paste stash poisoned");
+    // A stale entry means a stage whose send never happened; cap growth.
+    if stash.len() > 8 {
+        stash.clear();
+    }
+    stash.insert(id, bytes.clone());
+    Ok(id)
+}
+
+/// Ship a staged clipboard image to `~/.koden/paste/` on the host and return
+/// the remote absolute path (for insertion into the terminal input, where
+/// Claude Code attaches it). Old pastes are pruned in the same trip.
+#[tauri::command]
+pub async fn ssh_paste_send(host: String, id: u64, ext: String) -> Result<String, String> {
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif") {
+        return Err(format!("unsupported image type: {ext}"));
+    }
+    let bytes = paste_stash()
+        .lock()
+        .expect("paste stash poisoned")
+        .remove(&id)
+        .ok_or_else(|| "no staged image (stage first)".to_string())?;
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = format!("koden-paste-{ms}.{ext}");
+    let cmd = format!(
+        "sh -c 'mkdir -p \"$HOME/.koden/paste\" && find \"$HOME/.koden/paste\" -type f -mtime +3 -delete 2>/dev/null; cat > \"$HOME/.koden/paste/{name}.tmp\" && mv \"$HOME/.koden/paste/{name}.tmp\" \"$HOME/.koden/paste/{name}\" && printf %s \"$HOME/.koden/paste/{name}\"'"
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = ssh_exec_capture(&host, &cmd, Duration::from_secs(30), Some(&bytes))?;
+        let path = last_line(&out);
+        if path.starts_with('/') {
+            Ok(path)
+        } else {
+            Err(format!("unexpected paste-upload output: {path:?}"))
+        }
     })
     .await
     .map_err(|e| e.to_string())?

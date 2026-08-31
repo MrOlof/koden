@@ -431,6 +431,15 @@ export function clearFocusedTerminal(): boolean {
   return false;
 }
 
+/** The leaf that currently has terminal focus, if any (remote image paste
+ * targets it). */
+export function focusedLeafId(): number | null {
+  for (const [leafId, s] of sessions) {
+    if (s.visibleNow && s.focusedNow) return leafId;
+  }
+  return null;
+}
+
 export function leafIdForPty(ptyId: number): number | null {
   for (const [leafId, s] of sessions) {
     if (s.pty?.id === ptyId) return leafId;

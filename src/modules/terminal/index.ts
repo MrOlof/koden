@@ -25,6 +25,7 @@ export {
   captureLeafForRestore,
   clearFocusedTerminal,
   disposeSession,
+  focusedLeafId,
   getCommandMarksForLeaf,
   getSearchAddonForLeaf,
   holdLeafForRetry,
