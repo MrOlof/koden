@@ -232,6 +232,25 @@ Sweep green: cargo lib 554/1-known, vitest 643/643, tsc + clippy clean.
 Unrelated but real: HQ's Tailscale is wedged (expired key, NoState) — Kosta
 re-authing it; the ssh path itself is LAN (`ai-server` = 192.168.1.240).
 
+**2026-09-01 (dogfood night close-out).** After cross-device shipped, the
+same night added: **F2 manifest push** (`ca5cdd3`+`97e591c` — active ssh
+Space mirrors tab names to `~/.koden/spaces/<tmuxKey>.json`; host-side
+views label windows; fresh-tab "shell" placeholder mirrors the displayed
+cwd name), **remote image paste M2.9** (`977b89d` — Ctrl+V image in an ssh
+pane: Tauri clipboard readImage → canvas PNG → staged raw-body command →
+ssh stdin to `~/.koden/paste/` → quoted path typed; hooked in
+rendererPool's key handler because WebView2 never fires a browser paste
+event there; live-verified by Kosta), and **auto-updater ACTIVATED**
+(v0.11.1: the minisign pair minted 2026-07-31 in `_ClaudeSetup/secrets/`
+matches the baked-in pubkey, repo is public, endpoint was right all
+along; `autoUpdateCheck` defaults ON; `scripts/release-koden.ps1` =
+one-command signed release incl. `git push origin main` — releases are
+the ONE sanctioned push path). Companion product on the box:
+`ai-server:~/Snorlax/Products/ai-server-dashboard` (v2.6, own git) —
+faceplate, tiles, workspace w/ live pulses + peek + kill/update buttons,
+devices, VM detail, roster w/ skills. M2.8 (remote agent signal via
+TMUX_PANE hook) speced in KODEN-REMOTE.md, not built.
+
 **2026-08-31 (final) — CROSS-DEVICE WORKSPACES LIVE (`5159c59` + `e90fc8d`).**
 Two closing moves on top of F2-lean: (1) explicit close = kill (`5159c59`):
 closing a tab/pane kills its tmux window (`ssh_tmux_kill_window`, always
