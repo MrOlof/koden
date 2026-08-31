@@ -118,6 +118,14 @@ import {
   useSpacesBoot,
 } from "@/modules/spaces";
 import { spaceEnv } from "@/modules/spaces/lib/envSwitch";
+import {
+  planAdoption,
+  type RemoteWindow,
+} from "@/modules/spaces/lib/remoteSessions";
+import {
+  peekLeafRestoreKey,
+  seedLeafRestoreKey,
+} from "@/modules/spaces/lib/scrollbackStore";
 import { StatusBar } from "@/modules/statusbar";
 import {
   GridDialog,
@@ -328,6 +336,7 @@ export default function App() {
     newTasksTab,
     openLibraryTab,
     openLauncherTab,
+    adoptTerminalTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,
@@ -2322,6 +2331,48 @@ export default function App() {
     if (tabs.some((t) => t.spaceId === activeSpaceKey)) return;
     openLauncherTab(activeSpaceKey);
   }, [tabs, activeSpaceKey, spacesHydrated, openLauncherTab]);
+
+  // M2.5 F2 (lean): on first activation of an ssh+tmux Space, ask the host
+  // what's actually running and adopt live windows no local pane owns — a
+  // deleted Space, another device's work, or a survived crash all come back
+  // as background tabs instead of orphaned tmux sessions. Once per Space per
+  // app run; a Koden restart re-reconciles.
+  const reconciledSpaces = useRef(new Set<string>());
+  useEffect(() => {
+    if (!spacesHydrated) return;
+    const space = spaces.find((s) => s.id === activeSpaceId);
+    if (!space || space.sshTmux !== true) return;
+    const env = spaceEnv(space);
+    if (env.kind !== "ssh") return;
+    if (reconciledSpaces.current.has(space.id)) return;
+    reconciledSpaces.current.add(space.id);
+    void (async () => {
+      try {
+        const windows = await invoke<RemoteWindow[]>("ssh_tmux_windows", {
+          host: env.host,
+          spaceKey: space.id,
+        });
+        if (windows.length === 0) return;
+        const localKeys = new Set<string>();
+        for (const t of tabsRef.current) {
+          if (t.spaceId !== space.id || t.kind !== "terminal") continue;
+          for (const lid of leafIds(t.paneTree)) {
+            const k = peekLeafRestoreKey(lid);
+            if (k) localKeys.add(k);
+          }
+        }
+        for (const pane of planAdoption(windows, localKeys)) {
+          adoptTerminalTab(
+            space.id,
+            { title: pane.title, leafKey: pane.key, ...(pane.cwd && { cwd: pane.cwd }) },
+            seedLeafRestoreKey,
+          );
+        }
+      } catch (e) {
+        console.warn("[koden] remote session adoption failed:", e);
+      }
+    })();
+  }, [spacesHydrated, activeSpaceId, spaces, adoptTerminalTab]);
 
   const spaceSwitcher = (
     <SpaceSwitcher

@@ -838,6 +838,41 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return targetId;
   }, []);
 
+  // A live remote session discovered on the host gets its own background tab
+  // (M2.5 F2 adoption). `seedKey` binds the window's restore key to the fresh
+  // leaf BEFORE the pane mounts, so the pty spawn reattaches that tmux window
+  // instead of creating a new one. Never steals focus.
+  const adoptTerminalTab = useCallback(
+    (
+      spaceId: string,
+      opts: { cwd?: string; title: string; leafKey: string },
+      seedKey: (leafId: number, key: string) => void,
+    ) => {
+      const leafId = nextIdRef.current++;
+      const id = nextIdRef.current++;
+      seedKey(leafId, opts.leafKey);
+      setTabs((curr) => [
+        ...curr,
+        {
+          id,
+          kind: "terminal",
+          spaceId,
+          cold: true,
+          title: opts.title,
+          ...(opts.cwd !== undefined && { cwd: opts.cwd }),
+          paneTree: {
+            kind: "leaf",
+            id: leafId,
+            ...(opts.cwd !== undefined && { cwd: opts.cwd }),
+          },
+          activeLeafId: leafId,
+        } satisfies TerminalTab,
+      ]);
+      return id;
+    },
+    [],
+  );
+
   // Orchestration views are one-per-space: focus an existing one if present.
   const openOrchestrationTab = useCallback((view: OrchestrationView) => {
     let targetId: number | null = null;
@@ -1450,6 +1485,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     newTasksTab,
     openLibraryTab,
     openLauncherTab,
+    adoptTerminalTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,

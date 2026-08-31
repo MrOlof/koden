@@ -27,6 +27,7 @@ import {
   START_ITEM_IDS,
   type StartIcons,
 } from "./lib/launcherItems";
+import { remoteSessionCount } from "@/modules/spaces/lib/remoteSessions";
 import { useLauncherKeys } from "./lib/useLauncherKeys";
 import {
   RemoteConnectForm,
@@ -160,6 +161,25 @@ export function LauncherPane({
     };
   }, []);
 
+  // Live remote-session counts for ssh+tmux Spaces, filled in as the probes
+  // land (bounded backend timeout + module cache): the start page never
+  // blocks on them, the badges just appear.
+  const [liveness, setLiveness] = useState<Record<string, number | null>>({});
+  useEffect(() => {
+    let alive = true;
+    for (const s of spaces) {
+      const env = s.env;
+      if (env?.kind !== "ssh" || s.sshTmux !== true) continue;
+      void remoteSessionCount(env.host, s.id).then((n) => {
+        if (!alive || n === null) return;
+        setLiveness((m) => (m[s.id] === n ? m : { ...m, [s.id]: n }));
+      });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [spaces]);
+
   const toggleRemote = useCallback(() => setRemoteOpen((v) => !v), []);
 
   const closeRemote = useCallback(() => {
@@ -176,6 +196,7 @@ export function LauncherPane({
           distros,
           isWindows: IS_WINDOWS,
           home,
+          liveness,
           newTerminalShortcut,
           newEditorShortcut,
           icons: ICONS,
@@ -194,6 +215,7 @@ export function LauncherPane({
       activeSpaceId,
       distros,
       home,
+      liveness,
       newTerminalShortcut,
       newEditorShortcut,
       onSwitchSpace,

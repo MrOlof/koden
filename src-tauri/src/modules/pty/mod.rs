@@ -5,7 +5,7 @@ mod job;
 mod retry_detect;
 mod session;
 pub(crate) mod shell_init;
-mod shell_ssh;
+pub(crate) mod shell_ssh;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};

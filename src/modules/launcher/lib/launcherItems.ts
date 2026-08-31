@@ -1,3 +1,4 @@
+import { livenessHint } from "@/modules/spaces/lib/remoteSessions";
 import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import type { WorkspaceEnv, WslDistro } from "@/modules/workspace";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -177,6 +178,9 @@ export type StartPageInput = {
   isWindows: boolean;
   /** Local home, folded to `~` in recent paths; null leaves paths as-is. */
   home: string | null;
+  /** Live remote-session counts by space id (ssh+tmux Spaces only); absent
+   * or null entries render no hint. Filled in asynchronously by the pane. */
+  liveness?: Record<string, number | null>;
   newTerminalShortcut?: string | null;
   newEditorShortcut?: string | null;
   icons: StartIcons;
@@ -302,6 +306,10 @@ export function buildStartPage(
             s.root,
             kind === "local" ? input.home : null,
           ),
+          // The headline feature made visible: a remote Space with live tmux
+          // sessions shows them the moment the launcher opens.
+          hint:
+            kind === "ssh" ? livenessHint(input.liveness?.[s.id]) : null,
           badge: envBadgeLabel(s.env),
           icon: envIcon(s.env, icons),
           onSelect: () => on.switchSpace(s.id),

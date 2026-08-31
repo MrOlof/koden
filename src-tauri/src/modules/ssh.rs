@@ -350,6 +350,69 @@ pub async fn ssh_home(host: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxWindow {
+    pub name: String,
+    pub command: String,
+    pub path: String,
+}
+
+/// Lines of `tmux list-windows -F "#W\t#{pane_current_command}\t#{pane_current_path}"`.
+/// Malformed lines and window names outside the tmux-safe charset are skipped;
+/// command/path are host-controlled display strings, passed through verbatim.
+pub fn parse_tmux_windows(out: &str) -> Vec<TmuxWindow> {
+    let mut windows = Vec::new();
+    for line in out.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(name), Some(command), Some(path)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            continue;
+        }
+        windows.push(TmuxWindow {
+            name: name.to_string(),
+            command: command.to_string(),
+            path: path.to_string(),
+        });
+    }
+    windows
+}
+
+fn tmux_windows_blocking(host: &str, space_key: &str) -> Result<Vec<TmuxWindow>, String> {
+    let session = crate::modules::pty::shell_ssh::tmux_session_name(space_key);
+    // `sh -c '...'` so the remote login shell only passes a single-quoted
+    // string through (same convention as shell_ssh's remote_command).
+    // `|| true`: no session / no tmux reads as "0 live windows", not an error.
+    let cmd = format!(
+        "sh -c 'tmux list-windows -t ={session} -F \"#W\t#{{pane_current_command}}\t#{{pane_current_path}}\" 2>/dev/null || true'"
+    );
+    let out = ssh_exec_capture(host, &cmd, Duration::from_secs(10), None)?;
+    Ok(parse_tmux_windows(&out))
+}
+
+/// Live tmux windows of a Space's base session on `host`. Powers the
+/// launcher's liveness badges and connect-time session adoption (M2.5 F2 /
+/// M2.7): existence comes from tmux itself — no host-side manifest needed
+/// for the lean version.
+#[tauri::command]
+pub async fn ssh_tmux_windows(
+    host: String,
+    space_key: String,
+) -> Result<Vec<TmuxWindow>, String> {
+    tauri::async_runtime::spawn_blocking(move || tmux_windows_blocking(&host, &space_key))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,5 +618,33 @@ Host docker
         let err = ssh_exec_capture("-oProxyCommand=x", "true", Duration::from_secs(1), None)
             .unwrap_err();
         assert!(err.contains("unsafe ssh host"), "got: {err}");
+    }
+
+    #[test]
+    fn parses_tmux_window_lines_and_skips_junk() {
+        let out = "w-rk-abc\tclaude\t/home/k/proj\n\
+                   w-rk-def\tbash\t/home/k\n\
+                   bad name!\tzsh\t/tmp\n\
+                   only-two-fields\tbash\n\
+                   \n";
+        let ws = parse_tmux_windows(out);
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws[0].name, "w-rk-abc");
+        assert_eq!(ws[0].command, "claude");
+        assert_eq!(ws[0].path, "/home/k/proj");
+        assert_eq!(ws[1].name, "w-rk-def");
+    }
+
+    #[test]
+    fn tmux_window_serializes_camel_case() {
+        let w = TmuxWindow {
+            name: "w-a".into(),
+            command: "claude".into(),
+            path: "/x".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&w).unwrap(),
+            r#"{"name":"w-a","command":"claude","path":"/x"}"#
+        );
     }
 }

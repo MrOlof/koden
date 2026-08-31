@@ -154,11 +154,12 @@ export function RemoteConnectForm({
         />
         <span className="flex min-w-0 flex-col gap-0.5">
           <span className="text-[11.5px] leading-tight text-foreground/90">
-            Keep the session alive on the host (tmux)
+            Keep this workspace running on the host
           </span>
           <span className="text-[10.5px] leading-snug text-muted-foreground/60">
-            Reattach the same session from any device. Prompt tracking and
-            agent status are limited inside tmux.
+            Sessions live on the host (tmux) and survive disconnects, restarts
+            and device switches — pick up exactly where you left off, from
+            anywhere. Prompt tracking and agent status are limited inside tmux.
           </span>
         </span>
       </label>

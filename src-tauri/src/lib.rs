@@ -294,6 +294,7 @@ pub fn run() {
             workspace::wsl_home,
             ssh::ssh_list_hosts,
             ssh::ssh_home,
+            ssh::ssh_tmux_windows,
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
