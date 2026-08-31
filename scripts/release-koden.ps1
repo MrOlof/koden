@@ -1,32 +1,18 @@
-# release-koden.ps1 — build, sign, and publish a Koden release in one go.
-# Run from the repo root on HQ (the machine holding the updater key):
-#   pwsh scripts/release-koden.ps1
-# Version comes from src-tauri/tauri.conf.json — bump it first.
+# release-koden.ps1 — publish a Koden release via CI (the only sanctioned way).
+# GitHub Actions (release.yml) builds, signs (key + password live as repo
+# secrets — the local key backup is scrypt-locked and CI is its only reader),
+# and publishes a DRAFT release on tag push; this script tags, pushes, waits,
+# and undrafts. Bump `version` in src-tauri/tauri.conf.json first.
 $ErrorActionPreference = "Stop"
 
 $ver = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
-$key = "$HOME\Snorlax\_ClaudeSetup\secrets\koden-updater.key"
-if (-not (Test-Path $key)) { throw "updater key not found at $key" }
-$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $key -Raw)
-
-npx tauri build
-if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
-
-$dir = "src-tauri/target/release/bundle/nsis"
-$exe = "$dir/Koden_${ver}_x64-setup.exe"
-$sig = (Get-Content "$exe.sig" -Raw).Trim()
-
-@{
-    version   = $ver
-    pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    platforms = @{
-        "windows-x86_64" = @{
-            signature = $sig
-            url       = "https://github.com/MrOlof/koden/releases/download/v$ver/Koden_${ver}_x64-setup.exe"
-        }
-    }
-} | ConvertTo-Json -Depth 4 | Set-Content "$dir/latest.json" -Encoding ascii
+$tag = "v$ver"
 
 git push origin main
-gh release create "v$ver" $exe "$dir/latest.json" --repo MrOlof/koden --title "Koden v$ver" --generate-notes
-Write-Host "released v$ver - installed apps pick it up on next launch/check"
+git tag $tag
+git push origin $tag
+Write-Host "tag $tag pushed - CI is building (github.com/MrOlof/koden/actions)"
+
+gh run watch --repo MrOlof/koden --exit-status (gh run list --repo MrOlof/koden --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh release edit $tag --repo MrOlof/koden --draft=false
+Write-Host "released $tag - installs pick it up on their next update check"
