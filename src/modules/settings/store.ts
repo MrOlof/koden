@@ -139,6 +139,13 @@ export type Preferences = {
   lastWslDistro: string | null;
   zoomLevel: number;
   agentNotifications: boolean;
+  /**
+   * How loudly agent events surface. "all" = every event immediately.
+   * "smart" = needs-input/errors immediately, finished turns coalesced into
+   * one OS notification. "important" = needs-input/errors only; finished
+   * turns just mark the bell. The bell records everything in every mode.
+   */
+  agentNotificationMode: AgentNotificationMode;
   /** Librarian memory-activity toasts + bell entries (ADR-020). Default ON. */
   memoryNotifications: boolean;
   /**
@@ -234,7 +241,10 @@ const KEY_AUTO_RESUME_AGENTS = "autoResumeAgents";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
+const KEY_AGENT_NOTIFICATION_MODE = "agentNotificationMode";
 const KEY_MEMORY_NOTIFICATIONS = "memoryNotifications";
+
+export type AgentNotificationMode = "all" | "smart" | "important";
 const KEY_HANDS_FREE_MODE = "handsFreeMode";
 const KEY_AUTO_RETRY_ENABLED = "autoRetryEnabled";
 const KEY_USAGE_GUARD_ENABLED = "usageGuardEnabled";
@@ -332,6 +342,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   lastWslDistro: null,
   zoomLevel: 1.0,
   agentNotifications: true,
+  agentNotificationMode: "smart",
   memoryNotifications: true,
   handsFreeMode: false,
   autoRetryEnabled: false,
@@ -526,6 +537,9 @@ export async function loadPreferences(): Promise<Preferences> {
     agentNotifications:
       get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
       DEFAULT_PREFERENCES.agentNotifications,
+    agentNotificationMode: normalizeAgentNotificationMode(
+      get<string>(KEY_AGENT_NOTIFICATION_MODE),
+    ),
     memoryNotifications:
       get<boolean>(KEY_MEMORY_NOTIFICATIONS) ??
       DEFAULT_PREFERENCES.memoryNotifications,
@@ -892,6 +906,20 @@ export async function setEditorAutoSaveDelay(value: number): Promise<void> {
 
 export async function setAgentNotifications(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_NOTIFICATIONS, value);
+}
+
+function normalizeAgentNotificationMode(
+  v: string | null | undefined,
+): AgentNotificationMode {
+  return v === "all" || v === "smart" || v === "important"
+    ? v
+    : DEFAULT_PREFERENCES.agentNotificationMode;
+}
+
+export async function setAgentNotificationMode(
+  value: AgentNotificationMode,
+): Promise<void> {
+  await writePref(KEY_AGENT_NOTIFICATION_MODE, value);
 }
 
 export async function setMemoryNotifications(value: boolean): Promise<void> {

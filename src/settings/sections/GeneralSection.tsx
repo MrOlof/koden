@@ -10,10 +10,12 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type {
+  AgentNotificationMode,
   PaneColorMode,
   PaneColorPalette,
 } from "@/modules/settings/store";
 import {
+  setAgentNotificationMode,
   setAgentNotifications,
   setAutoRetryEnabled,
   setAutostart,
@@ -100,6 +102,9 @@ export function GeneralSection() {
   const paneColorTask = usePreferencesStore((s) => s.paneColorTask);
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
   const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
+  const agentNotificationMode = usePreferencesStore(
+    (s) => s.agentNotificationMode,
+  );
   const autoRetryEnabled = usePreferencesStore((s) => s.autoRetryEnabled);
   const usageGuardEnabled = usePreferencesStore((s) => s.usageGuardEnabled);
   const usageGuardWarnPct = usePreferencesStore((s) => s.usageGuardWarnPct);
@@ -331,6 +336,34 @@ export function GeneralSection() {
             onCheckedChange={(v) => void setAgentNotifications(v)}
           />
         </SettingRow>
+        {agentNotifications ? (
+          <SettingRow
+            title="Notification level"
+            description="All: every event, immediately. Smart: needs-input and errors immediately, finished turns batched into one notification. Important only: needs-input and errors; finished turns just mark the bell."
+          >
+            <Select
+              value={agentNotificationMode}
+              onValueChange={(v) =>
+                void setAgentNotificationMode(v as AgentNotificationMode)
+              }
+            >
+              <SelectTrigger size="sm" className="h-8 w-36 text-[12px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="smart" className="text-[12px]">
+                  Smart
+                </SelectItem>
+                <SelectItem value="important" className="text-[12px]">
+                  Important only
+                </SelectItem>
+                <SelectItem value="all" className="text-[12px]">
+                  All
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+        ) : null}
         <SettingRow
           title="Auto-retry on rate limit"
           description="When a Claude Code terminal hits its usage limit, wait until the reset time then resend a continue prompt (max 3 retries per terminal). This is the default for new agent terminals; toggle per tab from the Agents dock."

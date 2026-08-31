@@ -1,6 +1,7 @@
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { showAgentToast } from "../components/AgentToast";
 import { useAgentStore } from "../store/agentStore";
+import { createCoalescer } from "./coalesce";
 import { osNotify } from "./notify";
 import type { AgentSource, NotificationKind } from "./types";
 
@@ -20,6 +21,13 @@ type RouteArgs = {
   onActivate: () => void;
 };
 
+/** Kinds that surface immediately whatever the notification mode. */
+function isUrgent(kind: NotificationKind): boolean {
+  return kind === "attention" || kind === "error";
+}
+
+const calmOsNotify = createCoalescer((title, body) => void osNotify(title, body));
+
 export function routeAgentNotification({
   source,
   agent,
@@ -33,13 +41,22 @@ export function routeAgentNotification({
   leafId = 0,
   onActivate,
 }: RouteArgs): void {
-  if (!usePreferencesStore.getState().agentNotifications) return;
+  const prefs = usePreferencesStore.getState();
+  if (!prefs.agentNotifications) return;
   if (focused && visible) return;
 
   useAgentStore.getState().pushNotification({ source, agent, kind, tabId, leafId });
 
+  // The bell above records everything; from here the mode decides loudness.
+  if (prefs.agentNotificationMode === "important" && !isUrgent(kind)) return;
+
   if (!focused) {
-    void osNotify(title, body ?? agent);
+    if (prefs.agentNotificationMode === "smart" && !isUrgent(kind)) {
+      // Calm events (finished/memory) batch: N agents done ≈ one OS toast.
+      calmOsNotify.add({ kind, agent, title, body: body ?? agent });
+    } else {
+      void osNotify(title, body ?? agent);
+    }
     return;
   }
   if (allowToast) {
