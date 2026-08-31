@@ -438,6 +438,37 @@ pub async fn ssh_tmux_kill_window(
     .map_err(|e| e.to_string())?
 }
 
+/// Push a Space's tab manifest to `~/.koden/spaces/<key>.json` on the host
+/// (M2.5 F2): `{ name, tabs: [{ key, title }] }`. Host-side views (the
+/// dashboard) label tmux windows with real tab names from it. Written via
+/// stdin + tmp-rename so a dropped connection never leaves a torn file.
+#[tauri::command]
+pub async fn ssh_write_space_manifest(
+    host: String,
+    space_key: String,
+    json: String,
+) -> Result<(), String> {
+    if !space_key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        || space_key.is_empty()
+        || space_key.len() > 60
+    {
+        return Err("bad space key".into());
+    }
+    if json.len() > 16 * 1024 {
+        return Err("manifest too large".into());
+    }
+    let cmd = format!(
+        "sh -c 'mkdir -p \"$HOME/.koden/spaces\" && cat > \"$HOME/.koden/spaces/{space_key}.json.tmp\" && mv \"$HOME/.koden/spaces/{space_key}.json.tmp\" \"$HOME/.koden/spaces/{space_key}.json\"'"
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        ssh_exec_capture(&host, &cmd, Duration::from_secs(15), Some(json.as_bytes())).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Kill a Space's whole base tmux session on the host (explicit Space delete).
 #[tauri::command]
 pub async fn ssh_tmux_kill_session(host: String, space_key: String) -> Result<(), String> {

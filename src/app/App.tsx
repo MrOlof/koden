@@ -123,6 +123,7 @@ import {
   type RemoteWindow,
 } from "@/modules/spaces/lib/remoteSessions";
 import {
+  leafRestoreKey,
   peekLeafRestoreKey,
   seedLeafRestoreKey,
 } from "@/modules/spaces/lib/scrollbackStore";
@@ -2406,6 +2407,40 @@ export default function App() {
     if (tabs.some((t) => t.spaceId === activeSpaceKey)) return;
     openLauncherTab(activeSpaceKey);
   }, [tabs, activeSpaceKey, spacesHydrated, openLauncherTab]);
+
+  // F2 manifest: mirror the active ssh+tmux Space's tab names to the host
+  // (~/.koden/spaces/<key>.json) so host-side views (the ai-server dashboard)
+  // can label tmux windows with real tab titles. Debounced; a failed push is
+  // dropped — the next change tries again.
+  const lastManifest = useRef("");
+  useEffect(() => {
+    const space = spaces.find((s) => s.id === activeSpaceId);
+    const tmuxKey = tmuxKeyFor(space);
+    if (!space || !tmuxKey) return;
+    const env = spaceEnv(space);
+    if (env.kind !== "ssh") return;
+    const entries = tabs.flatMap((t) =>
+      t.spaceId === space.id && t.kind === "terminal"
+        ? leafIds(t.paneTree).map((lid) => ({
+            key: leafRestoreKey(lid),
+            title: t.customTitle?.trim() || t.title,
+          }))
+        : [],
+    );
+    const json = JSON.stringify({ v: 1, name: space.name, tabs: entries, updatedAt: Date.now() });
+    // Compare without the timestamp so identical layouts don't re-push.
+    const sig = `${tmuxKey}:${JSON.stringify(entries)}`;
+    if (sig === lastManifest.current) return;
+    const timer = setTimeout(() => {
+      lastManifest.current = sig;
+      void invoke("ssh_write_space_manifest", {
+        host: env.host,
+        spaceKey: tmuxKey,
+        json,
+      }).catch(() => {});
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [tabs, spaces, activeSpaceId]);
 
   // M2.5 F2 (lean): on first activation of an ssh+tmux Space, ask the host
   // what's actually running and adopt live windows no local pane owns — a

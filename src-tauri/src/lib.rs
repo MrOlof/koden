@@ -297,6 +297,7 @@ pub fn run() {
             ssh::ssh_tmux_windows,
             ssh::ssh_tmux_kill_window,
             ssh::ssh_tmux_kill_session,
+            ssh::ssh_write_space_manifest,
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
