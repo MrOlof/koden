@@ -329,7 +329,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalWebglEnabled: true,
   smartLinksEnabled: true,
   commandMinimapEnabled: true,
-  autoUpdateCheck: false,
+  // On since 2026-09-01: the release feed on MrOlof/koden is live and
+  // builds are minisign-signed; the historical upstream-footgun is gone.
+  autoUpdateCheck: true,
   linkTypes: DEFAULT_LINK_TYPES,
   terminalCursorBlink: false,
   terminalFontFamily: "",
