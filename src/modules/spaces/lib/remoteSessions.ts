@@ -90,15 +90,15 @@ const livenessCache = new Map<
 
 export function remoteSessionCount(
   host: string,
-  spaceId: string,
+  tmuxKey: string,
   ttlMs: number = LIVENESS_TTL_MS,
 ): Promise<number | null> {
-  const cacheKey = `${host}\0${spaceId}`;
+  const cacheKey = `${host}\0${tmuxKey}`;
   const hit = livenessCache.get(cacheKey);
   if (hit && Date.now() - hit.at < ttlMs) return hit.value;
   const value = invoke<RemoteWindow[]>("ssh_tmux_windows", {
     host,
-    spaceKey: spaceId,
+    spaceKey: tmuxKey,
   })
     .then((ws) => ws.filter((w) => keyFromWindowName(w.name) !== null).length)
     .catch(() => null);

@@ -126,6 +126,7 @@ import {
   peekLeafRestoreKey,
   seedLeafRestoreKey,
 } from "@/modules/spaces/lib/scrollbackStore";
+import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
 import { StatusBar } from "@/modules/statusbar";
 import {
   GridDialog,
@@ -733,7 +734,9 @@ export default function App() {
   // resurrection, not loss).
   const killRemoteLeaves = useCallback((ids: number[], spaceId: string) => {
     const space = useSpaces.getState().spaces.find((s) => s.id === spaceId);
-    if (!space || space.sshTmux !== true) return;
+    if (!space) return;
+    const tmuxKey = tmuxKeyFor(space);
+    if (!tmuxKey) return;
     const env = spaceEnv(space);
     if (env.kind !== "ssh") return;
     for (const lid of ids) {
@@ -741,7 +744,7 @@ export default function App() {
       if (!key) continue;
       void invoke("ssh_tmux_kill_window", {
         host: env.host,
-        spaceKey: spaceId,
+        spaceKey: tmuxKey,
         leafKey: key,
       }).catch((e) => console.warn("[koden] remote window kill failed:", e));
     }
@@ -2205,13 +2208,16 @@ export default function App() {
     (id: string) => {
       // Deleting a Space is its kill switch: take the host-side tmux session
       // down with it, or adoption would resurrect it on the next connect.
+      // Path-keyed sessions are shared across devices, so this kills the
+      // workspace everywhere — delete means delete.
       const space = useSpaces.getState().spaces.find((s) => s.id === id);
-      if (space?.sshTmux === true) {
+      const tmuxKey = tmuxKeyFor(space);
+      if (space && tmuxKey) {
         const env = spaceEnv(space);
         if (env.kind === "ssh") {
           void invoke("ssh_tmux_kill_session", {
             host: env.host,
-            spaceKey: id,
+            spaceKey: tmuxKey,
           }).catch((e) =>
             console.warn("[koden] remote session kill failed:", e),
           );
@@ -2410,7 +2416,9 @@ export default function App() {
   useEffect(() => {
     if (!spacesHydrated) return;
     const space = spaces.find((s) => s.id === activeSpaceId);
-    if (!space || space.sshTmux !== true) return;
+    if (!space) return;
+    const tmuxKey = tmuxKeyFor(space);
+    if (!tmuxKey) return;
     const env = spaceEnv(space);
     if (env.kind !== "ssh") return;
     if (reconciledSpaces.current.has(space.id)) return;
@@ -2419,7 +2427,7 @@ export default function App() {
       try {
         const windows = await invoke<RemoteWindow[]>("ssh_tmux_windows", {
           host: env.host,
-          spaceKey: space.id,
+          spaceKey: tmuxKey,
         });
         if (windows.length === 0) return;
         const localKeys = new Set<string>();

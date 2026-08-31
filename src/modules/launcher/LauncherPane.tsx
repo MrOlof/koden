@@ -28,6 +28,7 @@ import {
   type StartIcons,
 } from "./lib/launcherItems";
 import { remoteSessionCount } from "@/modules/spaces/lib/remoteSessions";
+import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
 import { useLauncherKeys } from "./lib/useLauncherKeys";
 import {
   RemoteConnectForm,
@@ -169,8 +170,9 @@ export function LauncherPane({
     let alive = true;
     for (const s of spaces) {
       const env = s.env;
-      if (env?.kind !== "ssh" || s.sshTmux !== true) continue;
-      void remoteSessionCount(env.host, s.id).then((n) => {
+      const tmuxKey = tmuxKeyFor(s);
+      if (env?.kind !== "ssh" || !tmuxKey) continue;
+      void remoteSessionCount(env.host, tmuxKey).then((n) => {
         if (!alive || n === null) return;
         setLiveness((m) => (m[s.id] === n ? m : { ...m, [s.id]: n }));
       });
