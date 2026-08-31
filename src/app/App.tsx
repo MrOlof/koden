@@ -2419,14 +2419,18 @@ export default function App() {
     if (!space || !tmuxKey) return;
     const env = spaceEnv(space);
     if (env.kind !== "ssh") return;
-    const entries = tabs.flatMap((t) =>
-      t.spaceId === space.id && t.kind === "terminal"
-        ? leafIds(t.paneTree).map((lid) => ({
-            key: leafRestoreKey(lid),
-            title: t.customTitle?.trim() || t.title,
-          }))
-        : [],
-    );
+    const entries = tabs.flatMap((t) => {
+      if (t.spaceId !== space.id || t.kind !== "terminal") return [];
+      // A fresh tab's internal title is the "shell" placeholder while the UI
+      // shows the cwd basename; mirror what the user actually sees.
+      const cwdBase = t.cwd?.split(/[\\/]/).filter(Boolean).pop();
+      const title =
+        t.customTitle?.trim() || (t.title === "shell" && cwdBase ? cwdBase : t.title);
+      return leafIds(t.paneTree).map((lid) => ({
+        key: leafRestoreKey(lid),
+        title,
+      }));
+    });
     const json = JSON.stringify({ v: 1, name: space.name, tabs: entries, updatedAt: Date.now() });
     // Compare without the timestamp so identical layouts don't re-push.
     const sig = `${tmuxKey}:${JSON.stringify(entries)}`;
