@@ -232,6 +232,19 @@ Sweep green: cargo lib 554/1-known, vitest 643/643, tsc + clippy clean.
 Unrelated but real: HQ's Tailscale is wedged (expired key, NoState) — Kosta
 re-authing it; the ssh path itself is LAN (`ai-server` = 192.168.1.240).
 
+**2026-08-31 (later) — M2.5 F2 lean + launcher liveness SHIPPED (`6ff03c5`).**
+tmux IS the manifest: `ssh_tmux_windows` (ssh.rs) lists a Space's base-session
+windows (name+command+path, one bounded probe, `sh -c` wrapped). On first
+activation of an ssh+tmux Space, App adopts live windows no local pane owns —
+`adoptTerminalTab` (useTabs) creates a background tab whose leaf is seeded
+with the window's restore key BEFORE mount, so the spawn reattaches. Pure
+logic + parity vectors in `spaces/lib/remoteSessions.ts(.test)` —
+`windowNameForKey` mirrors Rust `tmux_window_name`; keep them in lockstep.
+Launcher RECENT rows show "● N live sessions" via the same probe (cached
+30s, async fill). Deferred: json manifest (custom titles/order), switcher
+badges, re-reconcile without app restart, brain crate-split + headless
+indexer (M2.7 A — next big rock).
+
 **2026-08-31 (late) — M2.5 Feature 1 SHIPPED (`ab1ad5a`): per-pane tmux
 windows.** With the Space tmux flag on (connect form now defaults it ON),
 every pane owns a tmux window named `w-<restore key>` (`leafRestoreKey` —
