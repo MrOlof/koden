@@ -1,4 +1,6 @@
 import { clipboardReadText, clipboardWriteText } from "@/lib/clipboard";
+import { currentWorkspaceEnv } from "@/modules/workspace";
+import { pasteClipboardImageToRemote } from "./remoteImagePaste";
 import { detectMonoFontFamily } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
@@ -365,6 +367,12 @@ function createSlot(): Slot {
           void clipboardReadText().then((text) => {
             if (text) {
               slot.term.paste(text);
+            } else if (currentWorkspaceEnv().kind === "ssh") {
+              // No text, remote pane: the claude over there reads the HOST
+              // clipboard (empty, headless), so ship the image from the
+              // LOCAL clipboard to the host and insert the remote path
+              // (M2.9 remote image paste).
+              void pasteClipboardImageToRemote((d) => bridge.writeToPty(d));
             } else {
               // No text on the clipboard: most likely an image. Forward the
               // Alt+V sequence (ESC v) so a TUI like Claude Code performs its

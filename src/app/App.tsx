@@ -128,10 +128,6 @@ import {
   seedLeafRestoreKey,
 } from "@/modules/spaces/lib/scrollbackStore";
 import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
-import {
-  imageFromClipboard,
-  uploadPastedImage,
-} from "@/modules/terminal/lib/remoteImagePaste";
 import { StatusBar } from "@/modules/statusbar";
 import {
   GridDialog,
@@ -149,7 +145,6 @@ import {
   disposeSession,
   findLeaf,
   findLeafCwd,
-  focusedLeafId,
   hasLeaf,
   holdLeafForRetry,
   leafExitedQuickly,
@@ -2412,41 +2407,6 @@ export default function App() {
     if (tabs.some((t) => t.spaceId === activeSpaceKey)) return;
     openLauncherTab(activeSpaceKey);
   }, [tabs, activeSpaceKey, spacesHydrated, openLauncherTab]);
-
-  // M2.9 remote image paste: an image in the clipboard can't reach a remote
-  // Claude through the pty (terminal paste is text-only; the process reads
-  // the clipboard of the machine it runs on). Intercept image-paste into a
-  // focused ssh pane, ship the image to the host, insert the remote path.
-  // Text paste falls through to xterm untouched.
-  useEffect(() => {
-    const onPaste = (e: ClipboardEvent) => {
-      const el = document.activeElement;
-      if (!(el instanceof HTMLElement) || !el.classList.contains("xterm-helper-textarea")) return;
-      const { spaces: allSpaces, activeId: sid } = useSpaces.getState();
-      const space = allSpaces.find((s) => s.id === sid);
-      if (!space) return;
-      const env = spaceEnv(space);
-      if (env.kind !== "ssh") return;
-      const img = imageFromClipboard(e);
-      if (!img) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const leafId = focusedLeafId();
-      if (leafId === null) return;
-      const uploading = toast.loading("Sending image to the host…");
-      uploadPastedImage(env.host, img.blob, img.ext)
-        .then((path) => {
-          toast.dismiss(uploading);
-          writeToSession(leafId, `'${path}' `);
-        })
-        .catch((err) => {
-          toast.dismiss(uploading);
-          toast.error(`Image paste failed: ${String(err)}`);
-        });
-    };
-    window.addEventListener("paste", onPaste, true);
-    return () => window.removeEventListener("paste", onPaste, true);
-  }, []);
 
   // F2 manifest: mirror the active ssh+tmux Space's tab names to the host
   // (~/.koden/spaces/<key>.json) so host-side views (the ai-server dashboard)
