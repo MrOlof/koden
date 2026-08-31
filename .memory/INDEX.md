@@ -232,6 +232,19 @@ Sweep green: cargo lib 554/1-known, vitest 643/643, tsc + clippy clean.
 Unrelated but real: HQ's Tailscale is wedged (expired key, NoState) — Kosta
 re-authing it; the ssh path itself is LAN (`ai-server` = 192.168.1.240).
 
+**2026-08-31 (late) — M2.5 Feature 1 SHIPPED (`ab1ad5a`): per-pane tmux
+windows.** With the Space tmux flag on (connect form now defaults it ON),
+every pane owns a tmux window named `w-<restore key>` (`leafRestoreKey` —
+restart-stable) inside base session `koden-<spaceId>`; each client attaches
+via a grouped session (`-t base`, destroy-unattached) pinned to its window —
+no pane/device mirroring, restored panes reattach 1:1, closing a pane
+detaches (window keeps running). Ceilings: orphan windows after a pane is
+closed locally (F2 manifest reconciliation will re-surface them), viewport
+name `$$`-based (pid-reuse collision = one Enter-retry). F2 (host-side Space
+manifest, cross-device tab discovery) NOT built — spec in
+`To-Do\Workbench-Setup\KODEN-REMOTE.md` §M2.5. Committed on restored `.git`
+(main `3d18407 → 35159df → ab1ad5a`); NOT pushed.
+
 ## Key decisions (`decisions/`)
 - **ADR-011 — Gist known-unknowns + per-claim freshness labels** *(Accepted + implemented
   2026-07-06, commit `3036916`)*. Two adoptions from an external design review: the gist
