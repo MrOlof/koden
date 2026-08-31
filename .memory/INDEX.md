@@ -232,6 +232,23 @@ Sweep green: cargo lib 554/1-known, vitest 643/643, tsc + clippy clean.
 Unrelated but real: HQ's Tailscale is wedged (expired key, NoState) — Kosta
 re-authing it; the ssh path itself is LAN (`ai-server` = 192.168.1.240).
 
+**2026-08-31 (final) — CROSS-DEVICE WORKSPACES LIVE (`5159c59` + `e90fc8d`).**
+Two closing moves on top of F2-lean: (1) explicit close = kill (`5159c59`):
+closing a tab/pane kills its tmux window (`ssh_tmux_kill_window`, always
+confirmed via forceTerminalConfirm — local foreground check can't see remote),
+deleting a Space kills the base session; accidents still resurrect via
+adoption. (2) **path-keyed sessions** (`e90fc8d`): tmux session =
+`koden-p<fnv1a(path)>-<tail>` (`pathTmuxKey` in tmuxKey.ts, frontend-only),
+so every device connecting to the same host+path shares ONE live session and
+adoption merges tabs both ways — Kosta's "same spaces despite device" done.
+Delete-space therefore kills the workspace for ALL devices, by design.
+Kosta's live session was migrated by hand (`tmux rename-session` →
+`koden-pcnh0sv-home-snorlax`); older `koden-sp-*` strays on ai-server are
+invisible to the new naming — kill manually when spotted. Known feel-ceiling
+accepted by Kosta: fast output over tmux is frame-batched, not stream-smooth
+(tmux repaints, inherent). Laptop installer staged at
+`ai-server:~/koden-dist/`. HQ runs this build (installed 22:55).
+
 **2026-08-31 (later) — M2.5 F2 lean + launcher liveness SHIPPED (`6ff03c5`).**
 tmux IS the manifest: `ssh_tmux_windows` (ssh.rs) lists a Space's base-session
 windows (name+command+path, one bounded probe, `sh -c` wrapped). On first
