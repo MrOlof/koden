@@ -6,6 +6,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { isValidSyncHost } from "@/modules/sync/lib/transport";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -440,13 +441,21 @@ export function GeneralSection() {
               title="Sync host"
               description="ssh alias or user@host holding the shared state (key auth, must be in known_hosts). The canonical copy lives in ~/.koden/spaces/ on this host."
             >
-              <Input
-                value={syncHostDraft}
-                onChange={(e) => setSyncHostDraft(e.target.value)}
-                onBlur={() => void setSyncHost(syncHostDraft)}
-                placeholder="ai-server"
-                className="h-8 w-44 text-[12px]"
-              />
+              <div className="flex flex-col items-end gap-1">
+                <Input
+                  value={syncHostDraft}
+                  onChange={(e) => setSyncHostDraft(e.target.value)}
+                  onBlur={() => void setSyncHost(syncHostDraft)}
+                  placeholder="ai-server"
+                  className="h-8 w-44 text-[12px]"
+                />
+                {syncHostDraft.trim() !== "" &&
+                !isValidSyncHost(syncHostDraft.trim()) ? (
+                  <span className="text-[11px] text-destructive">
+                    Not a valid ssh host (letters, digits, . _ - : @ only)
+                  </span>
+                ) : null}
+              </div>
             </SettingRow>
             <SettingRow
               title="Tree root on this machine"

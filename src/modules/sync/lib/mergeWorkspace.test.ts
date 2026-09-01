@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
-import { mergeWorkspace, type WorkspaceLocal } from "./mergeWorkspace";
+import {
+  mergeTombstoneMaps,
+  mergeWorkspace,
+  type WorkspaceLocal,
+} from "./mergeWorkspace";
 import type { WorkspaceEnvelope } from "./types";
 
 function space(id: string, over: Partial<SpaceMeta> = {}): SpaceMeta {
@@ -81,13 +85,19 @@ describe("space merge", () => {
 });
 
 describe("tombstones", () => {
+  // Real-clock-relative: mergeTombstoneMaps prunes entries past its TTL, so
+  // epoch-era literals would silently vanish and prove nothing.
+  const NOW = Date.now();
+
   it("removes a locally-present space deleted elsewhere, and cleans its state", () => {
     const l = local({
-      spaces: [space("dead", { contentUpdatedAt: 100, updatedAt: 950 })],
+      spaces: [
+        space("dead", { contentUpdatedAt: NOW - 900, updatedAt: NOW - 50 }),
+      ],
       states: new Map([["dead", state("t")]]),
-      stateMeta: { dead: { at: 100 } },
+      stateMeta: { dead: { at: NOW - 900 } },
     });
-    const m = mergeWorkspace(l, remote({ tombstones: { dead: 500 } }));
+    const m = mergeWorkspace(l, remote({ tombstones: { dead: NOW - 500 } }));
     expect(m.spaces).toEqual([]);
     expect(m.removedSpaces).toEqual(["dead"]);
     expect(m.states.has("dead")).toBe(false);
@@ -96,29 +106,47 @@ describe("tombstones", () => {
 
   it("does not resurrect a deleted space from a remote copy", () => {
     const m = mergeWorkspace(
-      local({ tombstones: { dead: 500 } }),
-      remote({ spaces: [space("dead", { contentUpdatedAt: 100 })] }),
+      local({ tombstones: { dead: NOW - 500 } }),
+      remote({ spaces: [space("dead", { contentUpdatedAt: NOW - 900 })] }),
     );
     expect(m.spaces).toEqual([]);
     expect(m.pushNeeded).toBe(true);
   });
 
   it("a recreate or post-delete edit survives the tombstone", () => {
-    const recreated = space("dead", { createdAt: 600, contentUpdatedAt: 600 });
-    const edited = space("dead2", { createdAt: 100, contentUpdatedAt: 700 });
+    const recreated = space("dead", {
+      createdAt: NOW - 400,
+      contentUpdatedAt: NOW - 400,
+    });
+    const edited = space("dead2", {
+      createdAt: NOW - 900,
+      contentUpdatedAt: NOW - 300,
+    });
     const m = mergeWorkspace(
       local({ spaces: [recreated, edited] }),
-      remote({ tombstones: { dead: 500, dead2: 500 } }),
+      remote({ tombstones: { dead: NOW - 500, dead2: NOW - 500 } }),
     );
     expect(m.spaces.map((s) => s.id).sort()).toEqual(["dead", "dead2"]);
   });
 
   it("merges tombstone clocks as max", () => {
+    const now = Date.now();
     const m = mergeWorkspace(
-      local({ tombstones: { x: 100 } }),
-      remote({ tombstones: { x: 200, y: 50 } }),
+      local({ tombstones: { x: now - 100 } }),
+      remote({ tombstones: { x: now - 50, y: now - 10 } }),
     );
-    expect(m.tombstones).toEqual({ x: 200, y: 50 });
+    expect(m.tombstones).toEqual({ x: now - 50, y: now - 10 });
+  });
+
+  it("mergeTombstoneMaps keeps max per id and prunes past the TTL", () => {
+    const now = 1_000_000_000_000;
+    const ninetyOneDays = 91 * 24 * 3600_000;
+    const merged = mergeTombstoneMaps(
+      { a: now - 100, old: now - ninetyOneDays },
+      { a: now - 50, b: now - 10 },
+      now,
+    );
+    expect(merged).toEqual({ a: now - 50, b: now - 10 });
   });
 });
 

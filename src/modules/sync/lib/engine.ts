@@ -18,11 +18,15 @@ import {
   type WorkspaceLocal,
 } from "./mergeWorkspace";
 import {
+  getBootFailCount,
   getDeviceId,
   getLastGen,
   getLocalTombstones,
+  getWsSig,
+  setBootFailCount,
   setLastGen,
   setLocalTombstones,
+  setWsSig,
 } from "./meta";
 import {
   fromWirePath,
@@ -31,7 +35,13 @@ import {
   toWirePath,
 } from "./pathMap";
 import { useSyncStore } from "./syncStore";
-import { isValidSyncHost, peekGen, pullDomain, pushDomain } from "./transport";
+import {
+  isValidSyncHost,
+  peekGen,
+  pullDomain,
+  pushDomain,
+  TORN_MESSAGE,
+} from "./transport";
 import {
   type DocsEnvelope,
   type StateMeta,
@@ -41,11 +51,21 @@ import {
 
 // Cadences (ADR-023). Every remote round-trip is a full ssh handshake (no
 // ControlMaster), so polls are slow and gen-gated to one call when unchanged.
+//
+// Consistency model, revised after adversarial review:
+// - docs "lastGen" means "fully merged into the live store".
+// - ws "lastGen" is BOOT-ONLY: pushes never advance it, because layout
+//   adoption happens only at boot. A mid-session pull folded into a push is
+//   NOT locally adopted, so marking it consumed would both skip the next
+//   boot's adoption and let a later skip-merge push erase it from the host.
 const DOCS_PULL_INTERVAL_MS = 5 * 60_000;
 const DOCS_PULL_FOCUS_GAP_MS = 30_000;
 const DOCS_PUSH_DEBOUNCE_MS = 15_000;
 const WS_CHECK_INTERVAL_MS = 60_000;
 const BOOT_PULL_BUDGET_MS = 8_000;
+// After a failed boot pull, later boots wait far less: an unreachable host
+// (asleep, VPN down) must not stall every launch for the full budget.
+const BOOT_PULL_RETRY_BUDGET_MS = 2_000;
 const BACKOFF_MS = [60_000, 300_000];
 
 type SyncConfig = { host: string; pathRoot: string };
@@ -93,20 +113,26 @@ async function pushDocs(cfg: SyncConfig): Promise<void> {
 }
 
 /** Pull-merge-and-maybe-push. Push always goes through here so a concurrent
- * writer's entries are merged in, never clobbered (ADR-023: merge-then-write). */
+ * writer's entries are merged in, never clobbered (merge-then-write). Gated
+ * on docs hydration: adopting into an empty pre-hydration store would let
+ * older remote entries shadow newer local ones when hydration lands. */
 async function syncDocs(cfg: SyncConfig, force = false): Promise<void> {
   if (backedOff(force)) return;
-  const sync = useSyncStore.getState();
-  sync.setStatus("syncing");
+  await hydrateDocs();
+  useSyncStore.getState().setStatus("syncing");
   try {
     const lastGen = await getLastGen("docs");
     const pulled = await pullDomain<DocsEnvelope>(cfg.host, "docs", lastGen);
-    if (pulled.status === "error") {
-      noteFailure(pulled.message);
-      return;
-    }
     let pushNeeded = false;
-    if (pulled.status === "absent") {
+    if (pulled.status === "error") {
+      if (pulled.message !== TORN_MESSAGE) {
+        noteFailure(pulled.message);
+        return;
+      }
+      // Torn manifests (a writer crashed mid-push): a fresh push rewrites
+      // parts and index consistently, healing the host for every peer.
+      pushNeeded = true;
+    } else if (pulled.status === "absent") {
       pushNeeded = true;
     } else if (pulled.status === "ok") {
       const remote = {
@@ -127,11 +153,20 @@ async function syncDocs(cfg: SyncConfig, force = false): Promise<void> {
       // unchanged remote: push only when local edits happened since last push.
       pushNeeded = docsDirty;
     }
-    // Clear before the push: an edit landing mid-push re-dirties and the next
-    // interval pushes it; the push itself reads live state.
+    // Clear before the push (an edit landing mid-push re-dirties; the push
+    // reads live state), but restore on failure so the edit isn't stranded
+    // out of the pipeline until the next unrelated edit.
     const shouldPush = pushNeeded || (force && docsDirty);
+    const wasDirty = docsDirty;
     docsDirty = false;
-    if (shouldPush) await pushDocs(cfg);
+    if (shouldPush) {
+      try {
+        await pushDocs(cfg);
+      } catch (e) {
+        docsDirty = docsDirty || wasDirty || pushNeeded;
+        throw e;
+      }
+    }
     noteSuccess();
   } catch (e) {
     noteFailure(e instanceof Error ? e.message : String(e));
@@ -204,25 +239,38 @@ async function loadedToLocal(loaded: LoadedSpaces): Promise<WorkspaceLocal> {
 /**
  * Boot-time layout adoption (ADR-023): merge the remote workspace envelope
  * into the just-loaded local triple BEFORE useSpaces.hydrate/replaceTabs see
- * it, persist what changed, and hand the merged result back to boot. Bounded:
- * past the budget the boot proceeds local-only and layout waits for the next
- * boot (docs still sync live).
+ * it, persist what changed, and hand the merged result back to boot.
+ *
+ * Bounded and CANCELLED past the budget: a late completion must not write
+ * merged state computed from a pre-boot snapshot behind the back of a UI
+ * that proceeded local-only (it could drop a just-created Default space or
+ * mark the pull consumed without adopting it).
  */
 export async function bootPullWorkspace(
   loaded: LoadedSpaces,
 ): Promise<LoadedSpaces> {
   const cfg = config();
   if (!cfg) return loaded;
+  let cancelled = false;
   try {
+    const budget =
+      (await getBootFailCount()) > 0
+        ? BOOT_PULL_RETRY_BUDGET_MS
+        : BOOT_PULL_BUDGET_MS;
     const merged = await Promise.race([
-      bootPullInner(loaded, cfg),
+      bootPullInner(loaded, cfg, () => cancelled),
       new Promise<null>((resolve) =>
-        setTimeout(() => resolve(null), BOOT_PULL_BUDGET_MS),
+        setTimeout(() => {
+          cancelled = true;
+          resolve(null);
+        }, budget),
       ),
     ]);
+    if (merged === null) void setBootFailCount((await getBootFailCount()) + 1);
     return merged ?? loaded;
   } catch (e) {
     console.warn("[koden] sync boot pull failed:", e);
+    void setBootFailCount(1);
     return loaded;
   }
 }
@@ -230,13 +278,18 @@ export async function bootPullWorkspace(
 async function bootPullInner(
   loaded: LoadedSpaces,
   cfg: SyncConfig,
+  isCancelled: () => boolean,
 ): Promise<LoadedSpaces | null> {
   const lastGen = await getLastGen("ws");
   const pulled = await pullDomain<WorkspaceEnvelope>(cfg.host, "ws", lastGen);
+  if (isCancelled()) return null;
   if (pulled.status === "error") {
     noteFailure(pulled.message);
+    // A torn host heals on the next push; make sure one happens.
+    if (pulled.message === TORN_MESSAGE) wsPushSoon(true);
     return null;
   }
+  void setBootFailCount(0);
   if (pulled.status === "absent" || pulled.status === "unchanged") {
     noteSuccess();
     wsPushSoon();
@@ -245,15 +298,21 @@ async function bootPullInner(
   const local = await loadedToLocal(loaded);
   const remote = envelopeFromWire(pulled.envelope, cfg.pathRoot);
   const merged = mergeWorkspace(local, remote);
+  if (isCancelled()) return null;
 
   const spacesChanged =
     merged.changedSpaces.length > 0 || merged.removedSpaces.length > 0;
   if (spacesChanged) await saveSpacesList(merged.spaces);
   for (const id of merged.changedStates) {
+    if (isCancelled()) return null;
     const st = merged.states.get(id);
     if (st) await saveState(id, st, merged.stateMeta[id]?.at ?? Date.now());
   }
-  for (const id of merged.removedSpaces) await deleteSpaceData(id);
+  for (const id of merged.removedSpaces) {
+    if (isCancelled()) return null;
+    await deleteSpaceData(id);
+  }
+  if (isCancelled()) return null;
   await setLocalTombstones(merged.tombstones);
   await setLastGen("ws", pulled.gen);
   noteSuccess();
@@ -269,11 +328,10 @@ async function bootPullInner(
   return { spaces: merged.spaces, activeId, states: merged.states, stateMeta };
 }
 
-let lastPushedWsSig = "";
-
-/** Push the local workspace envelope, merge-then-write. Remote layout changes
- * found here are folded into the pushed envelope but NOT applied to the
- * running UI — layout adoption is boot-only by design. */
+/** Push the local workspace envelope, merge-then-write. Remote changes found
+ * mid-session are folded into the pushed envelope but NOT applied locally
+ * (layout adoption is boot-only), and ws lastGen is deliberately NOT
+ * advanced here, so the next boot still pulls and adopts them. */
 async function syncWorkspace(cfg: SyncConfig, force = false): Promise<void> {
   if (backedOff(force)) return;
   try {
@@ -281,6 +339,7 @@ async function syncWorkspace(cfg: SyncConfig, force = false): Promise<void> {
     const local = await loadedToLocal(loaded);
     let envelope = envelopeToWire(local, cfg.pathRoot);
     const sig = JSON.stringify(envelope);
+    if (lastPushedWsSig === null) lastPushedWsSig = await getWsSig();
     if (!force && sig === lastPushedWsSig) return;
 
     const lastGen = await getLastGen("ws");
@@ -308,15 +367,17 @@ async function syncWorkspace(cfg: SyncConfig, force = false): Promise<void> {
           cfg.pathRoot,
         );
         await setLocalTombstones(merged.tombstones);
-      } else if (pulled.status === "error") {
+      } else if (pulled.status === "error" && pulled.message !== TORN_MESSAGE) {
         noteFailure(pulled.message);
         return;
       }
+      // A torn remote falls through to the push, which rewrites the
+      // manifests consistently and heals the host.
     }
     const deviceId = await getDeviceId();
-    const gen = await pushDomain(cfg.host, "ws", envelope, deviceId);
-    await setLastGen("ws", gen);
+    await pushDomain(cfg.host, "ws", envelope, deviceId);
     lastPushedWsSig = sig;
+    await setWsSig(sig);
     noteSuccess();
   } catch (e) {
     noteFailure(e instanceof Error ? e.message : String(e));
@@ -330,15 +391,18 @@ let docsDirty = false;
 // Suppresses the docs-store subscription while we apply remote entries, so
 // our own adoption doesn't schedule a redundant push.
 let adopting = false;
+// null until loaded from the meta store; persisted so a fresh boot doesn't
+// re-push a byte-identical envelope with a new gen.
+let lastPushedWsSig: string | null = null;
 let stopFns: (() => void)[] = [];
 let wsPushTimer: ReturnType<typeof setTimeout> | null = null;
 
-function wsPushSoon(): void {
+function wsPushSoon(force = false): void {
   if (wsPushTimer) return;
   wsPushTimer = setTimeout(() => {
     wsPushTimer = null;
     const cfg = config();
-    if (cfg) void syncWorkspace(cfg);
+    if (cfg) void syncWorkspace(cfg, force);
   }, 15_000);
 }
 
@@ -357,16 +421,33 @@ export function startSyncEngine(): () => void {
   started = true;
 
   let lastDocsPull = 0;
+  let unsubDocs: (() => void) | null = null;
 
   const applyStatus = () => {
-    const cfg = config();
-    if (!cfg) useSyncStore.getState().setStatus("disabled");
-    else if (useSyncStore.getState().status === "disabled")
+    const p = usePreferencesStore.getState();
+    if (!p.syncEnabled) {
+      useSyncStore.getState().setStatus("disabled");
+      return;
+    }
+    if (!isValidSyncHost(p.syncHost.trim())) {
+      // Enabled but misconfigured must be visible, not silently disabled.
+      useSyncStore.getState().setStatus("error", "invalid sync host");
+      return;
+    }
+    if (useSyncStore.getState().status === "disabled") {
       useSyncStore.getState().setStatus("idle");
+    }
   };
   applyStatus();
 
+  // Subscribe to the docs store only after hydration: the hydration setState
+  // itself must not mark the store dirty, or every boot pushes a
+  // byte-identical envelope and forces every peer into a full re-pull.
   void hydrateDocs().then(() => {
+    docsDirty = false;
+    unsubDocs = useDocsStore.subscribe(() => {
+      if (!adopting) docsDirty = true;
+    });
     const cfg = config();
     if (cfg) {
       lastDocsPull = Date.now();
@@ -374,9 +455,6 @@ export function startSyncEngine(): () => void {
     }
   });
 
-  const unsubDocs = useDocsStore.subscribe(() => {
-    if (!adopting) docsDirty = true;
-  });
   const docsPushTimer = setInterval(() => {
     const cfg = config();
     if (cfg && docsDirty) void syncDocs(cfg);
@@ -414,7 +492,7 @@ export function startSyncEngine(): () => void {
   const unsubPrefs = usePreferencesStore.subscribe(applyStatus);
 
   stopFns = [
-    unsubDocs,
+    () => unsubDocs?.(),
     unsubPrefs,
     () => clearInterval(docsPushTimer),
     () => clearInterval(docsPullTimer),

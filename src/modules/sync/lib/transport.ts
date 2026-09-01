@@ -67,9 +67,14 @@ async function pullOnce<T>(
   return { status: "ok", gen: index.gen, envelope };
 }
 
-/** Pull a domain envelope. A torn read (racing a concurrent writer across
- * manifest files) retries once; a second tear reports as error and the next
- * scheduled pull tries again. */
+/** A pull that failed with this message hit inconsistent manifests: either a
+ * racing writer (transient) or a writer that crashed between the part writes
+ * and the index write (permanent until someone pushes). The engine treats it
+ * as "schedule a healing push". */
+export const TORN_MESSAGE = "torn read after retry";
+
+/** Pull a domain envelope. A torn read retries once; a second tear reports as
+ * an error carrying TORN_MESSAGE so the caller can repair by pushing. */
 export async function pullDomain<T>(
   host: string,
   domain: SyncDomain,
@@ -79,7 +84,7 @@ export async function pullDomain<T>(
     let r = await pullOnce<T>(host, domain, lastGen);
     if (r.status === "torn") r = await pullOnce<T>(host, domain, lastGen);
     if (r.status === "torn") {
-      return { status: "error", message: "torn read after retry" };
+      return { status: "error", message: TORN_MESSAGE };
     }
     return r;
   } catch (e) {

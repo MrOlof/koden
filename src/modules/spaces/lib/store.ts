@@ -80,13 +80,31 @@ export async function saveActiveId(id: string | null): Promise<void> {
   await store.set(KEY_ACTIVE, id);
 }
 
+/** True when the serialized tab layouts differ. activeTabIndex is excluded on
+ * purpose: switching tabs or a boot's seeded first flush must not advance the
+ * cross-machine LWW stamp, or a mere visit beats a real edit (ADR-023). */
+export function layoutContentChanged(
+  prev: SpaceState | undefined,
+  next: SpaceState,
+): boolean {
+  return !prev || JSON.stringify(prev.tabs) !== JSON.stringify(next.tabs);
+}
+
 export async function saveState(
   id: string,
   state: SpaceState,
-  at: number = Date.now(),
+  at?: number,
 ): Promise<void> {
+  const prev = await store.get<SpaceState>(stateKey(id)).catch(() => undefined);
   await store.set(stateKey(id), state);
-  await store.set(stateMetaKey(id), { at } satisfies SpaceStateMeta);
+  if (at !== undefined) {
+    // Sync adoption path: carry the remote stamp verbatim.
+    await store.set(stateMetaKey(id), { at } satisfies SpaceStateMeta);
+  } else if (layoutContentChanged(prev, state)) {
+    await store.set(stateMetaKey(id), {
+      at: Date.now(),
+    } satisfies SpaceStateMeta);
+  }
 }
 
 export async function deleteSpaceData(id: string): Promise<void> {

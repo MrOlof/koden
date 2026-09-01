@@ -1,4 +1,5 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
+import { mergeTombstoneMaps } from "./mergeWorkspace";
 import type { SyncDomain, Tombstones } from "./types";
 
 // Machine-local sync bookkeeping. Never synced itself: the device id is the
@@ -52,8 +53,37 @@ export async function recordTombstone(spaceId: string): Promise<void> {
   await store.set(KEY_TOMBSTONES, all).catch(() => {});
 }
 
-/** Replace local pending tombstones with the merged set after a push, so the
- * file doesn't grow forever; the shared envelope is the durable record. */
+/** MERGES into the stored set (never replaces): a tombstone recorded between
+ * a sync cycle's snapshot and this write must survive, or the delete silently
+ * un-happens on the next merge. TTL-pruned to keep the file bounded. */
 export async function setLocalTombstones(t: Tombstones): Promise<void> {
-  await store.set(KEY_TOMBSTONES, t).catch(() => {});
+  const current = await getLocalTombstones();
+  await store
+    .set(KEY_TOMBSTONES, mergeTombstoneMaps(current, t))
+    .catch(() => {});
+}
+
+const KEY_WS_SIG = "wsSig";
+const KEY_WS_BOOT_FAILS = "wsBootFails";
+
+/** Signature of the last successfully pushed ws envelope. Persisted so a
+ * fresh boot doesn't re-push (and re-gen) a byte-identical envelope. */
+export async function getWsSig(): Promise<string> {
+  const v = await store.get<string>(KEY_WS_SIG).catch(() => undefined);
+  return v ?? "";
+}
+
+export async function setWsSig(sig: string): Promise<void> {
+  await store.set(KEY_WS_SIG, sig).catch(() => {});
+}
+
+/** Consecutive boot-pull failures; shrinks the next boot's wait budget so an
+ * unreachable sync host doesn't stall every launch. */
+export async function getBootFailCount(): Promise<number> {
+  const v = await store.get<number>(KEY_WS_BOOT_FAILS).catch(() => undefined);
+  return typeof v === "number" ? v : 0;
+}
+
+export async function setBootFailCount(n: number): Promise<void> {
+  await store.set(KEY_WS_BOOT_FAILS, n).catch(() => {});
 }

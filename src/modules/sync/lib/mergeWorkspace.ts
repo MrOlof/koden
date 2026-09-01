@@ -1,6 +1,26 @@
 import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
 import type { StateMeta, Tombstones, WorkspaceEnvelope } from "./types";
 
+const TOMBSTONE_TTL_MS = 90 * 24 * 3600_000;
+
+/** Union with max-clock per id, dropping entries past the TTL. Shared by the
+ * envelope merge and the meta store's merge-write, so a delete recorded mid
+ * sync cycle never loses to a stale snapshot. */
+export function mergeTombstoneMaps(
+  a: Tombstones,
+  b: Tombstones,
+  now: number = Date.now(),
+): Tombstones {
+  const out: Tombstones = {};
+  for (const src of [a, b]) {
+    for (const [id, at] of Object.entries(src)) {
+      if (now - at > TOMBSTONE_TTL_MS) continue;
+      out[id] = Math.max(out[id] ?? 0, at);
+    }
+  }
+  return out;
+}
+
 // Space content merges on contentUpdatedAt because updatedAt is deliberately
 // an LRU clock (setActive bumps it for the launcher's Continue list) — a mere
 // visit must never beat a rename from another machine.
@@ -55,10 +75,10 @@ export function mergeWorkspace(
   local: WorkspaceLocal,
   remote: WorkspaceEnvelope,
 ): WorkspaceMergeResult {
-  const tombstones: Tombstones = { ...local.tombstones };
-  for (const [id, at] of Object.entries(remote.tombstones ?? {})) {
-    tombstones[id] = Math.max(tombstones[id] ?? 0, at);
-  }
+  const tombstones = mergeTombstoneMaps(
+    local.tombstones,
+    remote.tombstones ?? {},
+  );
 
   const localById = new Map(local.spaces.map((s) => [s.id, s]));
   const remoteById = new Map(
