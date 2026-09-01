@@ -29,11 +29,13 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use koden_lib::modules::brain::ast::ImpactDirection;
+use koden_lib::modules::brain::memory::scan_project_memory;
 use koden_lib::modules::brain::registry::project_id_for_root;
 use koden_lib::modules::brain::store::{
     code_impact_readonly, get_symbol_readonly, outline_for_path_readonly, projects_readonly,
-    recent_activity_readonly, search_readonly,
+    recent_activity_readonly, search_readonly, SqliteIndex,
 };
+use koden_lib::modules::brain::worker::index_dir;
 use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -337,7 +339,137 @@ fn handle(req: &Value) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
+// ---------------------------------------------------------------------------
+// `koden-brain daemon` — headless indexer for always-on hosts (M2.7-A2).
+//
+// The GUI app's worker loop is the writer on a desktop; on a server there is
+// no GUI, so this subcommand drives the SAME proven pipeline (`index_dir` →
+// walk → secrets redact → FTS → reconcile, exactly what tests/brain_sandbox.rs
+// exercises) on a polling loop. Polling over a filesystem watcher on purpose:
+// one cycle over an already-indexed tree is cheap (blake3 skip), and a watcher
+// across a whole home tree is the complex path with the same outcome.
+// Single-writer by deployment: run ONE daemon per store (systemd unit);
+// the MCP server stays a read-only WAL reader beside it.
+
+/// Directories never worth descending into while looking for project roots.
+const DISCOVER_SKIP: &[&str] = &[
+    "node_modules", "target", "dist", "build", ".venv", "venv", "__pycache__",
+    ".next", ".cache", "vendor",
+];
+
+fn is_project_root(dir: &std::path::Path) -> bool {
+    dir.join(".git").exists() || dir.join(".koden-memory").is_dir() || dir.join(".memory").is_dir()
+}
+
+/// Find project roots under `root`, up to `max_depth` levels down. A project
+/// root (marker: .git / .koden-memory / .memory) is collected and NOT descended
+/// into — nested repos inside it are the project walk's business, not ours.
+fn discover_projects(root: &std::path::Path, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if max_depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || DISCOVER_SKIP.contains(&name.as_ref()) {
+            continue;
+        }
+        if is_project_root(&p) {
+            out.push(p);
+        } else {
+            discover_projects(&p, max_depth - 1, out);
+        }
+    }
+}
+
+fn daemon_main(rest: &[String]) -> ! {
+    let mut root: Option<PathBuf> = None;
+    let mut interval_secs: u64 = 300;
+    let mut once = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--root" => {
+                i += 1;
+                root = rest.get(i).map(PathBuf::from);
+            }
+            "--interval" => {
+                i += 1;
+                interval_secs = rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(300);
+            }
+            "--once" => once = true,
+            other => {
+                eprintln!("koden-brain daemon: unknown arg {other}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    let root = root
+        .or_else(|| dirs::home_dir().map(|h| h.join("Snorlax")))
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| {
+            eprintln!("koden-brain daemon: pass --root <dir> (default ~/Snorlax not found)");
+            std::process::exit(2);
+        });
+    let Some(db) = db_path() else {
+        eprintln!("koden-brain daemon: cannot resolve store path");
+        std::process::exit(2);
+    };
+    if let Some(parent) = db.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let idx = match SqliteIndex::open(&db) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("koden-brain daemon: cannot open {}: {e}", db.display());
+            std::process::exit(1);
+        }
+    };
+    eprintln!(
+        "koden-brain daemon: root={} store={} interval={}s",
+        root.display(),
+        db.display(),
+        interval_secs
+    );
+    loop {
+        let t0 = std::time::Instant::now();
+        let mut projects = Vec::new();
+        discover_projects(&root, 4, &mut projects);
+        projects.sort();
+        let (mut indexed, mut pruned, mut notes) = (0usize, 0usize, 0usize);
+        for p in &projects {
+            let id = project_id_for_root(p);
+            let stats = index_dir(&idx, &id, p);
+            indexed += stats.indexed;
+            pruned += stats.pruned;
+            notes += scan_project_memory(&idx, &id, p);
+        }
+        eprintln!(
+            "cycle: {} projects, {} files indexed, {} pruned, {} memory notes, {:.1}s",
+            projects.len(),
+            indexed,
+            pruned,
+            notes,
+            t0.elapsed().as_secs_f32()
+        );
+        if once {
+            std::process::exit(0);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("daemon") {
+        daemon_main(&args[2..]);
+    }
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -360,5 +492,40 @@ fn main() {
                 break; // client hung up
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod daemon_tests {
+    use super::discover_projects;
+
+    fn mk(root: &std::path::Path, rel: &str, dir: bool) {
+        let p = root.join(rel);
+        if dir {
+            std::fs::create_dir_all(p).unwrap();
+        } else {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+    }
+
+    #[test]
+    fn discovery_finds_markers_prunes_projects_and_skips_junk() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        mk(r, "Products/app/.git/HEAD", false); // repo at depth 2
+        mk(r, "Products/app/sub/.git/HEAD", false); // nested repo: pruned, not listed
+        mk(r, "Scripts/TT/Source/prov/.memory", true); // marker at depth 4
+        mk(r, "node_modules/x/.git/HEAD", false); // junk dir: skipped
+        mk(r, "Deep/a/b/c/d/.git/HEAD", false); // depth 5: beyond max_depth
+        mk(r, "Plain/notes.txt", false); // no marker anywhere
+
+        let mut found = Vec::new();
+        discover_projects(r, 4, &mut found);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![r.join("Products/app"), r.join("Scripts/TT/Source/prov")]
+        );
     }
 }
