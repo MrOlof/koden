@@ -50,12 +50,31 @@ export type AdoptablePane = {
   cwd?: string;
 };
 
+/** Titles by restore key from the host-side manifest json ("manifest is
+ * truth for titles"). Tolerates absent/garbled input. */
+export function parseManifestTitles(json: string): Map<string, string> {
+  const out = new Map<string, string>();
+  try {
+    const m = JSON.parse(json) as { tabs?: { key?: unknown; title?: unknown }[] };
+    for (const t of m.tabs ?? []) {
+      if (typeof t.key === "string" && typeof t.title === "string" && t.title) {
+        out.set(t.key, t.title);
+      }
+    }
+  } catch {
+    // no manifest yet — command names carry the day
+  }
+  return out;
+}
+
 /** Windows live on the host that no local pane owns — each becomes a tab on
- * connect. A shell sitting at the prompt is still adopted: it may hold
- * scrollback, and dropping it would betray "never miss a session". */
+ * connect, named from the manifest when it knows the window. A shell
+ * sitting at the prompt is still adopted: it may hold scrollback, and
+ * dropping it would betray "never miss a session". */
 export function planAdoption(
   windows: readonly RemoteWindow[],
   localKeys: ReadonlySet<string>,
+  titles?: ReadonlyMap<string, string>,
 ): AdoptablePane[] {
   const out: AdoptablePane[] = [];
   for (const w of windows) {
@@ -63,7 +82,7 @@ export function planAdoption(
     if (!key || localKeys.has(key)) continue;
     out.push({
       key,
-      title: w.command.trim() || "session",
+      title: titles?.get(key) || w.command.trim() || "session",
       ...(w.path.startsWith("/") || w.path.startsWith("~")
         ? { cwd: w.path }
         : {}),

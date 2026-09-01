@@ -538,6 +538,27 @@ pub async fn ssh_write_space_manifest(
     .map_err(|e| e.to_string())?
 }
 
+/// Read a Space's tab manifest from the host (empty string when absent).
+/// Koden's reconcile uses it to give adopted tabs their real names and to
+/// sync renames across devices — the manifest is truth for titles.
+#[tauri::command]
+pub async fn ssh_read_space_manifest(host: String, space_key: String) -> Result<String, String> {
+    if !space_key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        || space_key.is_empty()
+        || space_key.len() > 60
+    {
+        return Err("bad space key".into());
+    }
+    let cmd = format!("sh -c 'cat \"$HOME/.koden/spaces/{space_key}.json\" 2>/dev/null || true'");
+    tauri::async_runtime::spawn_blocking(move || {
+        ssh_exec_capture(&host, &cmd, Duration::from_secs(10), None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Kill a Space's whole base tmux session on the host (explicit Space delete).
 #[tauri::command]
 pub async fn ssh_tmux_kill_session(host: String, space_key: String) -> Result<(), String> {

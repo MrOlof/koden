@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   keyFromWindowName,
   livenessHint,
+  parseManifestTitles,
   planAdoption,
   windowNameForKey,
 } from "./remoteSessions";
@@ -53,6 +54,24 @@ describe("planAdoption", () => {
       new Set(["rk-live1"]),
     );
     expect(plan).toEqual([]);
+  });
+
+  it("prefers manifest titles over the pane command", () => {
+    const titles = new Map([["rk-live1", "test 2"]]);
+    const plan = planAdoption([windows[0]], new Set(), titles);
+    expect(plan[0].title).toBe("test 2");
+  });
+});
+
+describe("parseManifestTitles", () => {
+  it("maps keys to titles and survives garbage", () => {
+    const t = parseManifestTitles(
+      '{"v":1,"tabs":[{"key":"rk-a","title":"test 2"},{"key":7,"title":"x"},{"key":"rk-b"}]}',
+    );
+    expect(t.get("rk-a")).toBe("test 2");
+    expect(t.size).toBe(1);
+    expect(parseManifestTitles("").size).toBe(0);
+    expect(parseManifestTitles("not json").size).toBe(0);
   });
 });
 

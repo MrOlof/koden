@@ -240,7 +240,10 @@ pub fn remote_command(
                 "if command -v tmux >/dev/null 2>&1; then \
                  tmux has-session -t ={name} 2>/dev/null || tmux new-session -d -s {name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
                  tmux list-windows -t ={name} -F \"#W\" 2>/dev/null | grep -qx -- {win} || tmux new-window -d -t ={name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
-                 exec tmux new-session -t ={name} -s {name}-$$ \\; set-option destroy-unattached on \\; select-window -t :={win}; \
+                 tmux set-option -t {name} status off 2>/dev/null || true; \
+                 tmux set-option -w -t ={name}:={win} window-size latest 2>/dev/null || true; \
+                 tmux set-option -w -t ={name}:={win} aggressive-resize on 2>/dev/null || true; \
+                 exec tmux new-session -t ={name} -s {name}-$$ \\; set-option destroy-unattached on \\; set-option status off \\; select-window -t :={win}; \
                  fi"
             ));
         }
@@ -430,9 +433,14 @@ mod tests {
         assert!(script.contains(
             "tmux list-windows -t =koden-abc -F \"#W\" 2>/dev/null | grep -qx -- w-rk1 || tmux new-window -d -t =koden-abc -n w-rk1 -c \"$PWD\" \"$c\" 2>/dev/null || true"
         ));
+        // Multi-client defaults: active machine wins the window size, no
+        // tmux status bar (Koden's UI is the chrome).
+        assert!(script.contains("tmux set-option -w -t =koden-abc:=w-rk1 window-size latest"));
+        assert!(script.contains("tmux set-option -w -t =koden-abc:=w-rk1 aggressive-resize on"));
+        assert!(script.contains("tmux set-option -t koden-abc status off"));
         // Per-client grouped viewport, reaped on detach, pinned to our window.
         assert!(script.contains(
-            "exec tmux new-session -t =koden-abc -s koden-abc-$$ \\; set-option destroy-unattached on \\; select-window -t :=w-rk1"
+            "exec tmux new-session -t =koden-abc -s koden-abc-$$ \\; set-option destroy-unattached on \\; set-option status off \\; select-window -t :=w-rk1"
         ));
         // Plain-shell fallback still closes the script.
         assert!(script.ends_with("; exec sh -c \"$c\""));

@@ -119,6 +119,7 @@ import {
 } from "@/modules/spaces";
 import { spaceEnv } from "@/modules/spaces/lib/envSwitch";
 import {
+  parseManifestTitles,
   planAdoption,
   type RemoteWindow,
 } from "@/modules/spaces/lib/remoteSessions";
@@ -2104,13 +2105,23 @@ export default function App() {
       // A non-zero exit on an ssh pane is a dropped/failed connection, not
       // the user leaving: keep the pane (layout survives) and offer
       // Enter-to-reconnect instead of closing or respawn-looping against a
-      // host that may still be down. A clean exit (`exit` at the prompt)
-      // falls through to normal close semantics.
+      // host that may still be down.
       const space = useSpaces
         .getState()
         .spaces.find((s) => s.id === tab.spaceId);
-      if (space && spaceEnv(space).kind === "ssh" && code !== 0) {
-        holdLeafForRetry(leafId, `connection lost (exit ${code})`);
+      if (space && spaceEnv(space).kind === "ssh") {
+        if (code !== 0) {
+          holdLeafForRetry(leafId, `connection lost (exit ${code})`);
+          return;
+        }
+        // Clean exit is NEVER a kill: a tmux detach and a user-typed `exit`
+        // both end the pane with code 0, and only one of them means the
+        // remote window is gone. Close the local pane and leave the window
+        // alone — a detached-but-live session is re-adopted on the next
+        // reconcile. (2026-09-01: a detach-client read as user-close killed
+        // two live sessions through the kill wrapper.) Kills stay exclusive
+        // to the explicit close buttons.
+        closePaneByLeaf(leafId);
         return;
       }
       const isLast =
@@ -2125,12 +2136,12 @@ export default function App() {
           void respawnSession(leafId, tab.cwd);
         }
       } else {
-        // Natural exit: the remote window (if any) already closed itself, so
-        // the kill in the wrapper is a no-op; explicit pane closes share it.
+        // Local natural exit: nothing remote to kill; the wrapper's kill is
+        // a no-op for non-ssh spaces anyway.
         closePaneKillingRemote(leafId);
       }
     },
-    [closePaneKillingRemote],
+    [closePaneKillingRemote, closePaneByLeaf],
   );
 
   const handleEditorDirty = useCallback(
@@ -2464,11 +2475,18 @@ export default function App() {
     reconciledSpaces.current.add(space.id);
     void (async () => {
       try {
-        const windows = await invoke<RemoteWindow[]>("ssh_tmux_windows", {
-          host: env.host,
-          spaceKey: tmuxKey,
-        });
+        const [windows, manifestJson] = await Promise.all([
+          invoke<RemoteWindow[]>("ssh_tmux_windows", {
+            host: env.host,
+            spaceKey: tmuxKey,
+          }),
+          invoke<string>("ssh_read_space_manifest", {
+            host: env.host,
+            spaceKey: tmuxKey,
+          }).catch(() => ""),
+        ]);
         if (windows.length === 0) return;
+        const titles = parseManifestTitles(manifestJson);
         const localKeys = new Set<string>();
         for (const t of tabsRef.current) {
           if (t.spaceId !== space.id || t.kind !== "terminal") continue;
@@ -2477,18 +2495,28 @@ export default function App() {
             if (k) localKeys.add(k);
           }
         }
-        for (const pane of planAdoption(windows, localKeys)) {
+        for (const pane of planAdoption(windows, localKeys, titles)) {
           adoptTerminalTab(
             space.id,
             { title: pane.title, leafKey: pane.key, ...(pane.cwd && { cwd: pane.cwd }) },
             seedLeafRestoreKey,
           );
         }
+        // Manifest is truth for names: sync EXISTING tabs too, so a rename
+        // on one device shows up on the other at next activation.
+        for (const t of tabsRef.current) {
+          if (t.spaceId !== space.id || t.kind !== "terminal") continue;
+          const firstLeaf = leafIds(t.paneTree)[0];
+          const key = firstLeaf !== undefined ? peekLeafRestoreKey(firstLeaf) : undefined;
+          const wanted = key ? titles.get(key) : undefined;
+          const current = t.customTitle?.trim() || t.title;
+          if (wanted && wanted !== current) updateTab(t.id, { customTitle: wanted });
+        }
       } catch (e) {
         console.warn("[koden] remote session adoption failed:", e);
       }
     })();
-  }, [spacesHydrated, activeSpaceId, spaces, adoptTerminalTab]);
+  }, [spacesHydrated, activeSpaceId, spaces, adoptTerminalTab, updateTab]);
 
   const spaceSwitcher = (
     <SpaceSwitcher
