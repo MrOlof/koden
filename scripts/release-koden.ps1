@@ -13,6 +13,14 @@ git tag $tag
 git push origin $tag
 Write-Host "tag $tag pushed - CI is building (github.com/MrOlof/koden/actions)"
 
-gh run watch --repo MrOlof/koden --exit-status (gh run list --repo MrOlof/koden --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+# Wait for THIS tag's run to register (a bare `--limit 1` races the push and
+# can grab the previous release's run).
+$runId = $null
+for ($i = 0; $i -lt 12 -and -not $runId; $i++) {
+    Start-Sleep -Seconds 10
+    $runId = gh run list --repo MrOlof/koden --workflow=release.yml --json databaseId,headBranch --jq "[.[] | select(.headBranch == `"$tag`")][0].databaseId"
+}
+if (-not $runId) { throw "CI run for $tag never appeared" }
+gh run watch $runId --repo MrOlof/koden --exit-status
 gh release edit $tag --repo MrOlof/koden --draft=false
 Write-Host "released $tag - installs pick it up on their next update check"
