@@ -398,3 +398,28 @@ manifest, cross-device tab discovery) NOT built — spec in
 - Global-hooks phase 2: per-pane `TERAX_SESSION` is injected and the subagent bus is now WIRED + resilient (`AgentBusBridge` + `subagentBus.ts` recover subagents from corrupt `agent-bus.jsonl` by `tool_use_id`). Remaining: the subagent-start hook in `~/.claude/settings.json` is non-atomic (reader recovers; the writer still corrupts on parallel spawns), the dual-installer drift (`agent.rs` still writes the legacy OSC-777/director-bus path + stale `OWNED_MARKERS`), and store unification.
 - ~~`getAgentCommand()` drops `@args`~~ **FIXED 2026-06-20**: `getAgentCommandWithArgs()` swaps `cm`→`claude` when flags are present so `--append-system-prompt`/`--agents` survive; the plain no-arg launch is unchanged.
 - Known non-regression test failures: `eager-budget.test.ts` (env), Rust `authorize_spawn_cwd_blocks_symlink_escape` (Windows symlink privilege).
+
+**2026-08-31 (new laptop, NO .git on this copy — commit from a git machine):
+notification levels + coalescing.** `agentNotificationMode` pref ("all" |
+"smart" | "important", default **smart**) + `lib/coalesce.ts` (4 s window
+batches calm kinds → "N agents finished — Tab1, Tab2"; attention/error always
+immediate; bell records everything in every mode; "important" = finished/memory
+→ bell only). Settings → General → Agents gets a "Notification level" select
+under the existing switch. Touched: settings/store.ts, agents/lib/route.ts,
+agents/lib/coalesce.ts(+test), GeneralSection.tsx. tsc clean, vitest 12/12
+(coalesce+store), biome lint clean on new files (format check unusable here —
+CRLF noise from the git-less MEGA copy). GUI not runtime-verified.
+
+**2026-09-01 — Koden Buddy: character APPROVED + implementation plan DRAFTED
+(awaiting Kosta's review; nothing in-app yet).** Character: a living terminal
+block cursor in Svart spruce with a spruce sprout on his head (Kosta's
+favorite detail); status via underline caret in Svart ANSI colors;
+hollow-cursor sleep; fully procedural SVG+CSS, zero deps. Overnight recon +
+full plan (architecture, mood engine, 3-tier popover, 4 phases, open
+decisions): headline = ~90% of machinery exists (AiMiniWindow chat, adapters,
+signal spine); 7 brain commands incl. `brain_plan_context` are Rust-complete
+with zero frontend callers (Phase 0 = bindings, valuable standalone). Spec,
+recon findings, plan-artifact link, and the open-decision list all in
+`buddy-character-design-2026-09-01.md`. Open-LLM-VTuber = idea source only
+(param rig, emotion tags), rejected as dependency.
+
