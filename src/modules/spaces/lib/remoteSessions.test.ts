@@ -34,10 +34,10 @@ describe("keyFromWindowName", () => {
 
 describe("planAdoption", () => {
   const windows = [
-    { name: "w-rk-live1", command: "claude", path: "/home/k/proj" },
-    { name: "w-rk-owned", command: "bash", path: "/home/k" },
-    { name: "manual-window", command: "htop", path: "/tmp" },
-    { name: "w-rk-noPath", command: "", path: "relative/junk" },
+    { name: "w-rk-live1", command: "claude", path: "/home/k/proj", pane: "%1" },
+    { name: "w-rk-owned", command: "bash", path: "/home/k", pane: "%2" },
+    { name: "manual-window", command: "htop", path: "/tmp", pane: "%3" },
+    { name: "w-rk-noPath", command: "", path: "relative/junk", pane: "" },
   ];
 
   it("adopts unowned koden windows only, with command title and posix cwd", () => {

@@ -113,6 +113,7 @@ import {
 } from "@/modules/source-control";
 import {
   SpaceSwitcher,
+  usePaneEventsBridge,
   useSpacePersistence,
   useSpaces,
   useSpacesBoot,
@@ -467,6 +468,10 @@ export default function App() {
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
     enabled: spacesHydrated,
   });
+
+  // M2.8: remote tabs get working/attention dots from the host's
+  // pane-events.jsonl (tmux eats OSC 777, so the local hook path can't).
+  usePaneEventsBridge(tabs, spaces);
 
   const prevSpaceRef = useRef(activeSpaceId);
   useEffect(() => {

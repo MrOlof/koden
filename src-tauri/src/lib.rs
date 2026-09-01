@@ -301,6 +301,8 @@ pub fn run() {
             ssh::ssh_read_space_manifest,
             ssh::ssh_paste_stage,
             ssh::ssh_paste_send,
+            ssh::ssh_pane_events_start,
+            ssh::ssh_pane_events_stop,
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             get_launch_dir,
