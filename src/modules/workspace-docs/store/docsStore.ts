@@ -69,6 +69,16 @@ type DocsState = {
   moveCard: (boardId: string, cardId: string, toColumnId: string) => void;
   renameColumn: (boardId: string, columnId: string, title: string) => void;
 
+  /** Adopt cross-machine entries (ADR-023). Newer-wins is re-checked against
+   * LIVE state at apply time so an entry edited while the pull was in flight
+   * is never clobbered; adopted winners persist through the normal dual-write
+   * path. Returns how many entries changed. */
+  adoptRemote: (remote: {
+    notes: Record<string, NoteDoc>;
+    boards: Record<string, Board>;
+    tasks: Record<string, TaskList>;
+  }) => number;
+
   ensureTaskList: (listId: string) => void;
   addTask: (listId: string, text: string) => void;
   toggleTask: (listId: string, taskId: string) => void;
@@ -217,6 +227,41 @@ export const useDocsStore = create<DocsState>((set, get) => ({
       persistBoard(s.hydrated, boardId, next);
       return { boards: { ...s.boards, [boardId]: next } };
     }),
+
+  adoptRemote: (remote) => {
+    let adopted = 0;
+    set((s) => {
+      const notes = { ...s.notes };
+      const boards = { ...s.boards };
+      const tasks = { ...s.tasks };
+      for (const [id, doc] of Object.entries(remote.notes)) {
+        const cur = notes[id];
+        if (!cur || (doc.updatedAt ?? 0) > (cur.updatedAt ?? 0)) {
+          notes[id] = doc;
+          persistNote(s.hydrated, id, doc);
+          adopted++;
+        }
+      }
+      for (const [id, board] of Object.entries(remote.boards)) {
+        const cur = boards[id];
+        if (!cur || (board.updatedAt ?? 0) > (cur.updatedAt ?? 0)) {
+          boards[id] = board;
+          persistBoard(s.hydrated, id, board);
+          adopted++;
+        }
+      }
+      for (const [id, list] of Object.entries(remote.tasks)) {
+        const cur = tasks[id];
+        if (!cur || (list.updatedAt ?? 0) > (cur.updatedAt ?? 0)) {
+          tasks[id] = list;
+          persistTaskList(s.hydrated, id, list);
+          adopted++;
+        }
+      }
+      return adopted > 0 ? { notes, boards, tasks } : s;
+    });
+    return adopted;
+  },
 
   ensureTaskList: (listId) => {
     if (get().tasks[listId]) return;

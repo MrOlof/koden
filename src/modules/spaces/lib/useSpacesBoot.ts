@@ -8,6 +8,7 @@ import {
 } from "@/modules/brain/lib/resumeCards";
 import { markRecoveredPaneConsumed } from "@/modules/brain/lib/useRecoveredPanes";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { bootPullWorkspace } from "@/modules/sync/lib/engine";
 import type { Tab } from "@/modules/tabs";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { usePaneTitleStore } from "@/modules/terminal/lib/paneTitles";
@@ -139,10 +140,12 @@ export function useSpacesBoot({
 
     void (async () => {
       try {
-        const [{ spaces, activeId, states }] = await Promise.all([
-          loadAll(),
-          whenPrefsHydrated(),
-        ]);
+        const [loaded] = await Promise.all([loadAll(), whenPrefsHydrated()]);
+        // Cross-machine layout adoption (ADR-023): merge the remote envelope
+        // into the loaded triple before anything downstream sees it. Prefs
+        // must be hydrated first (syncEnabled/syncHost gate it); bounded so
+        // an offline boot proceeds local after ~8s.
+        const { spaces, activeId, states } = await bootPullWorkspace(loaded);
         const prefs = usePreferencesStore.getState();
         const restoreLines = prefs.terminalScrollbackRestoreLines;
         const snapshotsP =

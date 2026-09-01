@@ -7,6 +7,7 @@ import { useUsageStore } from "@/modules/agents/store/usageStore";
 import { useChatStore } from "@/modules/ai";
 import { AgentStatusPill } from "@/modules/ai/components/AgentStatusPill";
 import { AiStatusBarControls } from "@/modules/ai/components/AiStatusBarControls";
+import { SyncStatusSegment } from "@/modules/sync";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { IncognitoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -73,6 +74,8 @@ export function StatusBar({
       <div className="flex shrink-0 items-center gap-1.5">
         {/* ADR-020: ambient Librarian segment — always on, never a popup. */}
         <BrainActivitySegment />
+        {/* ADR-023: cross-machine sync state; hidden while the pref is off. */}
+        <SyncStatusSegment />
         {pauseActive ? (
           <span
             title={

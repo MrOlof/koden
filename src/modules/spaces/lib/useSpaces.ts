@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { recordSpaceDeleted } from "@/modules/sync/lib/syncSignals";
 import { LOCAL_WORKSPACE, type WorkspaceEnv } from "@/modules/workspace";
 import {
   deleteSpaceData,
@@ -62,6 +63,7 @@ export const useSpaces = create<State>((set, get) => ({
       ...(input.sshTmux ? { sshTmux: true } : {}),
       createdAt: now,
       updatedAt: now,
+      contentUpdatedAt: now,
     };
     const spaces = [...get().spaces, meta];
     set({ spaces });
@@ -70,25 +72,32 @@ export const useSpaces = create<State>((set, get) => ({
   },
 
   rename: (id, name) => {
+    const now = Date.now();
     const spaces = get().spaces.map((s) =>
-      s.id === id ? { ...s, name, updatedAt: Date.now() } : s,
+      s.id === id
+        ? { ...s, name, updatedAt: now, contentUpdatedAt: now }
+        : s,
     );
     set({ spaces });
     void saveSpacesList(spaces);
   },
 
   setColor: (id, color) => {
+    const now = Date.now();
     const spaces = get().spaces.map((s) =>
-      s.id === id ? { ...s, color, updatedAt: Date.now() } : s,
+      s.id === id
+        ? { ...s, color, updatedAt: now, contentUpdatedAt: now }
+        : s,
     );
     set({ spaces });
     void saveSpacesList(spaces);
   },
 
   setSshTmux: (id, on) => {
+    const now = Date.now();
     const spaces = get().spaces.map((s) =>
       s.id === id && (s.sshTmux ?? false) !== on
-        ? { ...s, sshTmux: on, updatedAt: Date.now() }
+        ? { ...s, sshTmux: on, updatedAt: now, contentUpdatedAt: now }
         : s,
     );
     set({ spaces });
@@ -118,6 +127,7 @@ export const useSpaces = create<State>((set, get) => ({
     set({ spaces, activeId });
     void saveSpacesList(spaces);
     void deleteSpaceData(id);
+    recordSpaceDeleted(id);
     if (activeId !== prev.activeId) void saveActiveId(activeId);
     return activeId;
   },

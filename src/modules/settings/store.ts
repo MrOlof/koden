@@ -149,6 +149,20 @@ export type Preferences = {
   /** Librarian memory-activity toasts + bell entries (ADR-020). Default ON. */
   memoryNotifications: boolean;
   /**
+   * Cross-machine workspace sync (ADR-023): notes/tasks/boards live-merge and
+   * spaces/tab-layout adopt at boot, against a canonical ssh host. Default
+   * OFF — opt-in because it reaches out to a host.
+   */
+  syncEnabled: boolean;
+  /** ssh host (alias or user@host) holding the canonical sync state. */
+  syncHost: string;
+  /**
+   * This machine's tree root (e.g. C:/Users/Snorlax/Snorlax vs
+   * /home/snorlax/Snorlax); rewritten to a wire token so cwds/roots stay
+   * portable across machines. Empty = no rewriting.
+   */
+  syncPathRoot: string;
+  /**
    * Hands-free terminal control (ADR-017 addendum): armed, the Librarian's
    * terminal_send submits (Enter included) skip the per-send approval card.
    * Every send still lands in the chat transcript and raises a toast; shell
@@ -242,6 +256,9 @@ const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
 const KEY_AGENT_NOTIFICATION_MODE = "agentNotificationMode";
+const KEY_SYNC_ENABLED = "syncEnabled";
+const KEY_SYNC_HOST = "syncHost";
+const KEY_SYNC_PATH_ROOT = "syncPathRoot";
 const KEY_MEMORY_NOTIFICATIONS = "memoryNotifications";
 
 export type AgentNotificationMode = "all" | "smart" | "important";
@@ -346,6 +363,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
   agentNotifications: true,
   agentNotificationMode: "smart",
   memoryNotifications: true,
+  syncEnabled: false,
+  syncHost: "ai-server",
+  syncPathRoot: "",
   handsFreeMode: false,
   autoRetryEnabled: false,
   usageGuardEnabled: false,
@@ -539,6 +559,10 @@ export async function loadPreferences(): Promise<Preferences> {
     agentNotifications:
       get<boolean>(KEY_AGENT_NOTIFICATIONS) ??
       DEFAULT_PREFERENCES.agentNotifications,
+    syncEnabled: get<boolean>(KEY_SYNC_ENABLED) ?? DEFAULT_PREFERENCES.syncEnabled,
+    syncHost: get<string>(KEY_SYNC_HOST) ?? DEFAULT_PREFERENCES.syncHost,
+    syncPathRoot:
+      get<string>(KEY_SYNC_PATH_ROOT) ?? DEFAULT_PREFERENCES.syncPathRoot,
     agentNotificationMode: normalizeAgentNotificationMode(
       get<string>(KEY_AGENT_NOTIFICATION_MODE),
     ),
@@ -926,6 +950,18 @@ export async function setAgentNotificationMode(
 
 export async function setMemoryNotifications(value: boolean): Promise<void> {
   await writePref(KEY_MEMORY_NOTIFICATIONS, value);
+}
+
+export async function setSyncEnabled(value: boolean): Promise<void> {
+  await writePref(KEY_SYNC_ENABLED, value);
+}
+
+export async function setSyncHost(value: string): Promise<void> {
+  await writePref(KEY_SYNC_HOST, value.trim());
+}
+
+export async function setSyncPathRoot(value: string): Promise<void> {
+  await writePref(KEY_SYNC_PATH_ROOT, value.trim());
 }
 
 export async function setHandsFreeMode(value: boolean): Promise<void> {
