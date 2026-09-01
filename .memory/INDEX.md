@@ -309,8 +309,11 @@ change); worktree Spaces machine-local; path portability via `syncPathRoot`
 wire token. Opt-in prefs + Settings Sync group + statusbar segment; first
 per-machine deviceId (`koden-sync-meta.json`). An adversarial /code-review
 (high) confirmed 10 defects in the first cut — all fixed same night, revised
-invariants in the ADR ("Consistency model" section). Sweep: tsc clean,
-vitest 685/685 (32 new), biome clean. Read
+invariants in the ADR ("Consistency model" section). **2026-09-02: identity
+fold added** (live incident: per-device duplicate spaces with derived names
+like "Snorlax" — spaces sharing ssh:host:path / local:root identity now
+collapse deterministically to one; ADR "Identity fold" section). Sweep: tsc
+clean, vitest 696/696, biome clean. Read
 `MORNING-REPORT-2026-09-01-sync-and-buddy.md` (then delete it).
 
 ## Key decisions (`decisions/`)
