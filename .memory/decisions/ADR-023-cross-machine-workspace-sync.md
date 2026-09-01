@@ -88,6 +88,38 @@ hydrate as cold tabs and fall back to the default folder on warm —
   before writing gen+1). No server locking: a lost race costs one extra cycle,
   never data — per-entry LWW re-converges because losers re-push their copy.
 
+### Consistency model (revised after the 2026-09-01 adversarial review)
+
+The review confirmed 10 defects in the first cut; the fixes hardened the
+model into these invariants:
+
+- **docs `lastGen`** = "fully merged into the live store". Docs sync is gated
+  on `hydrateDocs()` (a pre-hydration pull would let older remote entries
+  shadow newer local disk state), and `docsDirty` is restored when a push
+  throws so edits are never stranded.
+- **ws `lastGen` is BOOT-ONLY.** Mid-session pushes fold newer remote layout
+  into the pushed envelope but never advance `lastGen` and never touch local
+  state — the next boot still pulls and adopts. (Marking it consumed both
+  skipped adoption and let a later skip-merge push erase remote changes.)
+- **`stateMeta.at` stamps only on real layout-content change**: `saveState`
+  diffs serialized tabs against disk and excludes `activeTabIndex`, so tab
+  switches and boot's seeded first flush can't make layout merge degrade to
+  "last machine booted wins" — the layout twin of `contentUpdatedAt`.
+- **Boot pull is cancellable and adaptive**: past the budget the merge is
+  abandoned (no late writes from a pre-boot snapshot behind the booted UI),
+  and after a failed boot the next boot waits 2 s, not 8 s.
+- **Torn manifests self-heal**: a writer crashing between part writes and the
+  index write leaves gen-mixed manifests; readers detect this (TORN) and
+  schedule a push, which rewrites parts+index consistently.
+- **Tombstones merge-write** (max-clock per id, 90-day TTL prune) — a delete
+  recorded between a cycle's snapshot and its write survives. Ceiling: a
+  machine offline > 90 days can resurrect a deleted space.
+- **No boot chatter**: the docs subscription attaches after hydration and the
+  ws push signature persists in `koden-sync-meta.json`, so an idle boot pushes
+  nothing and peers aren't forced into re-pulls.
+- Enabled-but-invalid `syncHost` surfaces as an error (statusbar + inline in
+  Settings), never as a silent "disabled".
+
 ### Identity, settings, surface
 
 - `koden-sync-meta.json` (LazyStore): minted `deviceId`, last pulled/pushed
