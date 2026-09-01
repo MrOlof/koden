@@ -321,10 +321,15 @@ async function bootPullInner(
   const stateMeta = new Map(
     Object.entries(merged.stateMeta).map(([k, v]) => [k, { at: v.at }]),
   );
+  // An absorbed duplicate follows its survivor; a truly removed space
+  // (tombstone) falls back to boot's first-space default.
+  const mappedActive = loaded.activeId
+    ? (merged.idRemap[loaded.activeId] ?? loaded.activeId)
+    : null;
   const activeId =
-    loaded.activeId && merged.removedSpaces.includes(loaded.activeId)
+    mappedActive && merged.removedSpaces.includes(mappedActive)
       ? null
-      : loaded.activeId;
+      : mappedActive;
   return { spaces: merged.spaces, activeId, states: merged.states, stateMeta };
 }
 

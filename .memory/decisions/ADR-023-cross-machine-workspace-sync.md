@@ -120,6 +120,23 @@ model into these invariants:
 - Enabled-but-invalid `syncHost` surfaces as an error (statusbar + inline in
   Settings), never as a silent "disabled".
 
+### Identity fold (added 2026-09-02, live incident)
+
+Spaces created independently per device for the same real thing (each "Open
+folder as Space" of `~/Snorlax`, each connect to the same ssh host+path) hold
+different random ids, so id-keyed union produced side-by-side duplicates and
+per-machine derived names ("Snorlax" from the folder basename) survived next
+to the user's designated name. `mergeWorkspace` now folds spaces sharing a
+machine-independent identity — `ssh:host:path`, `wsl:distro:root`, or
+`local:root` after the wire-token rewrite (null roots and worktrees never
+fold; Windows paths compared case-insensitively, separators normalized).
+Survivor = oldest `createdAt` (tiebreak: smaller id) so every machine
+deterministically picks the same one; content = clock winner across the
+group; the best-stamped layout follows the survivor; the fold keeps the
+user's local list position; `idRemap` lets the boot path re-point `activeId`.
+Ceiling: local spaces fold only when both devices set `syncPathRoot` (roots
+must be comparable); exact-tie clocks resolve slightly order-dependently.
+
 ### Identity, settings, surface
 
 - `koden-sync-meta.json` (LazyStore): minted `deviceId`, last pulled/pushed
