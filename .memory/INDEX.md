@@ -423,3 +423,17 @@ recon findings, plan-artifact link, and the open-decision list all in
 `buddy-character-design-2026-09-01.md`. Open-LLM-VTuber = idea source only
 (param rig, emotion tags), rejected as dependency.
 
+
+**2026-09-01 — brain daemon live on ai-server (M2.7-A2) + knowledge pipeline
+day.** `koden-brain daemon` subcommand (bin, ~130 lines): marker-based
+project discovery (depth 4, prunes at project roots) + polling loop over the
+sandbox-proven `index_dir`/`scan_project_memory`; systemd user unit
+`koden-brain-daemon` on ai-server, fresh store (HQ-seeded ids would double
+projects — seed in `brain/seed-bak-0831/`), first cycle 63 projects/19.5k
+files/56 s, MCP verified against day-old files. Ships via the PRIVATE
+homelab mirror `git/koden.git` (commit 0d97dc7) — GitHub untouched. Same
+day, same session: Nordomatic-Group + dashboard + blixt got remotes
+(homelab / private GitHub), `knowledge-sync.sh` hooks (SessionStart pull /
+Stop push) went into shared settings, and the director-bus hook path became
+`$HOME`-relative (literal `C:/` was littering Linux CWDs). Crate split (A1)
+and host Librarian (A3) still open.
