@@ -294,6 +294,28 @@ manifest, cross-device tab discovery) NOT built — spec in
 `To-Do\Workbench-Setup\KODEN-REMOTE.md` §M2.5. Committed on restored `.git`
 (main `3d18407 → 35159df → ab1ad5a`); NOT pushed.
 
+**2026-09-01 (overnight) — CROSS-MACHINE WORKSPACE SYNC BUILT (ADR-023)** on
+branch `feat/workspace-sync-2026-09-01` (2 commits, NOT merged, NOT pushed,
+GUI verification HELD). Trigger: Kosta's notes written at home didn't exist
+on the laptop (docs/layout are per-machine appdata; his notes were recovered
+from HQ over ssh by hand). Scope per Kosta: everything incl. layout.
+Frontend-only engine (`src/modules/sync/`, zero new Rust) over the existing
+ssh space-manifest commands: chunked gen-stamped envelopes at
+`~/.koden/spaces/sync-*` on a canonical host (default ai-server); docs =
+live per-entry LWW; spaces = merge on new `contentUpdatedAt` (LRU updatedAt
+can't beat a rename) + tombstones (90d TTL); layouts = boot-only adoption,
+per-space LWW on new `stateMeta` stamps (stamped only on real content
+change); worktree Spaces machine-local; path portability via `syncPathRoot`
+wire token. Opt-in prefs + Settings Sync group + statusbar segment; first
+per-machine deviceId (`koden-sync-meta.json`). An adversarial /code-review
+(high) confirmed 10 defects in the first cut — all fixed same night, revised
+invariants in the ADR ("Consistency model" section). **2026-09-02: identity
+fold added** (live incident: per-device duplicate spaces with derived names
+like "Snorlax" — spaces sharing ssh:host:path / local:root identity now
+collapse deterministically to one; ADR "Identity fold" section). Sweep: tsc
+clean, vitest 696/696, biome clean. Read
+`MORNING-REPORT-2026-09-01-sync-and-buddy.md` (then delete it).
+
 ## Key decisions (`decisions/`)
 - **ADR-011 — Gist known-unknowns + per-claim freshness labels** *(Accepted + implemented
   2026-07-06, commit `3036916`)*. Two adoptions from an external design review: the gist

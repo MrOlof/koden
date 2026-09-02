@@ -113,6 +113,7 @@ import {
 } from "@/modules/source-control";
 import {
   SpaceSwitcher,
+  usePaneEventsBridge,
   useSpacePersistence,
   useSpaces,
   useSpacesBoot,
@@ -161,6 +162,7 @@ import {
 } from "@/modules/spaces/lib/scrollbackStore";
 import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
 import { StatusBar } from "@/modules/statusbar";
+import { SyncBridge } from "@/modules/sync";
 import {
   GridDialog,
   type TerminalTab,
@@ -498,6 +500,10 @@ export default function App() {
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
     enabled: spacesHydrated,
   });
+
+  // M2.8: remote tabs get working/attention dots from the host's
+  // pane-events.jsonl (tmux eats OSC 777, so the local hook path can't).
+  usePaneEventsBridge(tabs, spaces);
 
   const prevSpaceRef = useRef(activeSpaceId);
   useEffect(() => {
@@ -3213,6 +3219,8 @@ export default function App() {
             busPath={directorLive ? busPath : null}
             onCommand={handleDirectorCommand}
           />
+          {/* ADR-023: cross-machine docs/layout sync engine (self-gated on pref). */}
+          <SyncBridge />
           <Toaster position="bottom-right" />
 
           {hasComposer ? (

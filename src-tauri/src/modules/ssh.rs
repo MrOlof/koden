@@ -357,17 +357,20 @@ pub struct TmuxWindow {
     pub name: String,
     pub command: String,
     pub path: String,
+    /// tmux pane id (`%N`) of the window's single pane; the join column for
+    /// pane-events (M2.8). Empty when the host sends something malformed.
+    pub pane: String,
 }
 
-/// Lines of `tmux list-windows -F "#W\t#{pane_current_command}\t#{pane_current_path}"`.
+/// Lines of `tmux list-windows -F "#W\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"`.
 /// Malformed lines and window names outside the tmux-safe charset are skipped;
 /// command/path are host-controlled display strings, passed through verbatim.
 pub fn parse_tmux_windows(out: &str) -> Vec<TmuxWindow> {
     let mut windows = Vec::new();
     for line in out.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let (Some(name), Some(command), Some(path)) =
-            (parts.next(), parts.next(), parts.next())
+        let mut parts = line.splitn(4, '\t');
+        let (Some(name), Some(pane), Some(command), Some(path)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
@@ -379,10 +382,15 @@ pub fn parse_tmux_windows(out: &str) -> Vec<TmuxWindow> {
         {
             continue;
         }
+        let pane_ok = pane.len() <= 16
+            && pane.starts_with('%')
+            && pane[1..].chars().all(|c| c.is_ascii_digit())
+            && pane.len() > 1;
         windows.push(TmuxWindow {
             name: name.to_string(),
             command: command.to_string(),
             path: path.to_string(),
+            pane: if pane_ok { pane.to_string() } else { String::new() },
         });
     }
     windows
@@ -394,7 +402,7 @@ fn tmux_windows_blocking(host: &str, space_key: &str) -> Result<Vec<TmuxWindow>,
     // string through (same convention as shell_ssh's remote_command).
     // `|| true`: no session / no tmux reads as "0 live windows", not an error.
     let cmd = format!(
-        "sh -c 'tmux list-windows -t ={session} -F \"#W\t#{{pane_current_command}}\t#{{pane_current_path}}\" 2>/dev/null || true'"
+        "sh -c 'tmux list-windows -t ={session} -F \"#W\t#{{pane_id}}\t#{{pane_current_command}}\t#{{pane_current_path}}\" 2>/dev/null || true'"
     );
     let out = ssh_exec_capture(host, &cmd, Duration::from_secs(10), None)?;
     Ok(parse_tmux_windows(&out))
@@ -571,6 +579,126 @@ pub async fn ssh_tmux_kill_session(host: String, space_key: String) -> Result<()
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---- remote pane-events tail (M2.8) --------------------------------------
+// One long-lived `tail -F` per host streams ~/.koden/pane-events.jsonl lines
+// (written by the shared Claude Code hooks on the host) to the webview, which
+// joins pane ids to tabs. The tailed path is fixed on this side: the webview
+// never chooses what gets read off a host.
+
+const PANE_EVENTS_TAIL_CMD: &str = "sh -c 'mkdir -p \"$HOME/.koden\"; touch \"$HOME/.koden/pane-events.jsonl\"; exec tail -n 0 -F \"$HOME/.koden/pane-events.jsonl\" 2>/dev/null'";
+const TAIL_MAX_LINE_BYTES: usize = 8 * 1024;
+const TAIL_KEEPALIVE_ARGS: &[&str] = &[
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=2",
+];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TailEvent {
+    Line { line: String },
+    End,
+}
+
+static TAIL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn tail_registry() -> &'static Mutex<HashMap<u64, Arc<SharedChild>>> {
+    static REG: OnceLock<Mutex<HashMap<u64, Arc<SharedChild>>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Feeds tail bytes to the channel line by line. Oversized lines are dropped
+/// whole (a hostile or garbled host can't balloon memory), non-UTF8 lines are
+/// skipped, and a failed channel send (webview reloaded/closed) stops the
+/// caller's loop so the ssh child gets killed instead of leaking.
+fn pump_tail_lines<R: Read>(
+    reader: &mut R,
+    send: &mut dyn FnMut(&str) -> bool,
+) {
+    let mut buf = [0u8; 4096];
+    let mut acc: Vec<u8> = Vec::new();
+    let mut oversized = false;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' {
+                if !oversized {
+                    if let Ok(s) = std::str::from_utf8(&acc) {
+                        let line = s.trim_end_matches('\r');
+                        if !line.is_empty() && !send(line) {
+                            return;
+                        }
+                    }
+                }
+                acc.clear();
+                oversized = false;
+            } else if acc.len() < TAIL_MAX_LINE_BYTES {
+                acc.push(b);
+            } else {
+                oversized = true;
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn ssh_pane_events_start(
+    host: String,
+    on_event: tauri::ipc::Channel<TailEvent>,
+) -> Result<u64, String> {
+    validate_ssh_host(&host)?;
+    let bin = resolve_ssh_binary().ok_or_else(|| SSH_BINARY_MISSING.to_string())?;
+
+    let mut cmd = Command::new(bin);
+    cmd.args(BATCH_ARGS)
+        .args(TAIL_KEEPALIVE_ARGS)
+        .arg(&host)
+        .arg(PANE_EVENTS_TAIL_CMD)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::modules::proc::hide_console(&mut cmd);
+
+    let child =
+        Arc::new(SharedChild::spawn(&mut cmd).map_err(|e| format!("spawn ssh: {e}"))?);
+    let mut stdout = child
+        .take_stdout()
+        .ok_or_else(|| "ssh: no stdout pipe".to_string())?;
+    let id = TAIL_SEQ.fetch_add(1, Ordering::Relaxed);
+    tail_registry().lock().unwrap().insert(id, Arc::clone(&child));
+
+    let reader_child = Arc::clone(&child);
+    thread::spawn(move || {
+        pump_tail_lines(&mut stdout, &mut |line| {
+            on_event
+                .send(TailEvent::Line {
+                    line: line.to_string(),
+                })
+                .is_ok()
+        });
+        let _ = reader_child.kill();
+        let _ = reader_child.wait();
+        tail_registry().lock().unwrap().remove(&id);
+        let _ = on_event.send(TailEvent::End);
+    });
+
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn ssh_pane_events_stop(id: u64) -> Result<(), String> {
+    let child = tail_registry().lock().unwrap().remove(&id);
+    if let Some(child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -782,17 +910,56 @@ Host docker
 
     #[test]
     fn parses_tmux_window_lines_and_skips_junk() {
-        let out = "w-rk-abc\tclaude\t/home/k/proj\n\
-                   w-rk-def\tbash\t/home/k\n\
-                   bad name!\tzsh\t/tmp\n\
-                   only-two-fields\tbash\n\
+        let out = "w-rk-abc\t%3\tclaude\t/home/k/proj\n\
+                   w-rk-def\t%12\tbash\t/home/k\n\
+                   bad name!\t%1\tzsh\t/tmp\n\
+                   only-three-fields\t%2\tbash\n\
                    \n";
         let ws = parse_tmux_windows(out);
         assert_eq!(ws.len(), 2);
         assert_eq!(ws[0].name, "w-rk-abc");
+        assert_eq!(ws[0].pane, "%3");
         assert_eq!(ws[0].command, "claude");
         assert_eq!(ws[0].path, "/home/k/proj");
         assert_eq!(ws[1].name, "w-rk-def");
+        assert_eq!(ws[1].pane, "%12");
+    }
+
+    #[test]
+    fn malformed_pane_id_becomes_empty_not_a_skip() {
+        let out = "w-rk-abc\tnot-a-pane\tclaude\t/home/k\n\
+                   w-rk-def\t%\tbash\t/home/k\n";
+        let ws = parse_tmux_windows(out);
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws[0].pane, "");
+        assert_eq!(ws[1].pane, "");
+    }
+
+    #[test]
+    fn tail_pump_splits_lines_and_drops_oversized_and_non_utf8() {
+        let mut big = vec![b'x'; TAIL_MAX_LINE_BYTES + 10];
+        big.push(b'\n');
+        let mut input = b"one\r\ntwo\n".to_vec();
+        input.extend_from_slice(&big);
+        input.extend_from_slice(b"\xff\xfe\n");
+        input.extend_from_slice(b"three\n\ntrailing-no-newline");
+        let mut got = Vec::new();
+        pump_tail_lines(&mut input.as_slice(), &mut |line| {
+            got.push(line.to_string());
+            true
+        });
+        assert_eq!(got, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn tail_pump_stops_when_send_fails() {
+        let input = b"a\nb\nc\n".to_vec();
+        let mut got = Vec::new();
+        pump_tail_lines(&mut input.as_slice(), &mut |line| {
+            got.push(line.to_string());
+            false
+        });
+        assert_eq!(got, vec!["a"]);
     }
 
     #[test]
@@ -801,10 +968,11 @@ Host docker
             name: "w-a".into(),
             command: "claude".into(),
             path: "/x".into(),
+            pane: "%7".into(),
         };
         assert_eq!(
             serde_json::to_string(&w).unwrap(),
-            r#"{"name":"w-a","command":"claude","path":"/x"}"#
+            r#"{"name":"w-a","command":"claude","path":"/x","pane":"%7"}"#
         );
     }
 }

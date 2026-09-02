@@ -6,7 +6,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-export type RemoteWindow = { name: string; command: string; path: string };
+export type RemoteWindow = {
+  name: string;
+  command: string;
+  path: string;
+  /** tmux pane id (`%N`) of the window's single pane; "" when the host sent
+   * something malformed. The pane-events join column (M2.8). */
+  pane: string;
+};
 
 const WINDOW_PREFIX = "w-";
 const NAME_CAP = 48;

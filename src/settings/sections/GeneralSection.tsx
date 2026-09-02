@@ -6,6 +6,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { isValidSyncHost } from "@/modules/sync/lib/transport";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -31,6 +32,9 @@ import {
   setRestoreWindowState,
   setShowHidden,
   setShowLauncherOnStart,
+  setSyncEnabled,
+  setSyncHost,
+  setSyncPathRoot,
   setUsageGuardEnabled,
   setUsageGuardHardStop,
   setUsageGuardPausePct,
@@ -105,6 +109,13 @@ export function GeneralSection() {
   const agentNotificationMode = usePreferencesStore(
     (s) => s.agentNotificationMode,
   );
+  const syncEnabled = usePreferencesStore((s) => s.syncEnabled);
+  const syncHost = usePreferencesStore((s) => s.syncHost);
+  const syncPathRoot = usePreferencesStore((s) => s.syncPathRoot);
+  const [syncHostDraft, setSyncHostDraft] = useState(syncHost);
+  useEffect(() => setSyncHostDraft(syncHost), [syncHost]);
+  const [syncRootDraft, setSyncRootDraft] = useState(syncPathRoot);
+  useEffect(() => setSyncRootDraft(syncPathRoot), [syncPathRoot]);
   const autoRetryEnabled = usePreferencesStore((s) => s.autoRetryEnabled);
   const usageGuardEnabled = usePreferencesStore((s) => s.usageGuardEnabled);
   const usageGuardWarnPct = usePreferencesStore((s) => s.usageGuardWarnPct);
@@ -411,6 +422,55 @@ export function GeneralSection() {
             </SettingRow>
           </>
         )}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>Sync</Label>
+        <SettingRow
+          title="Cross-machine workspace sync"
+          description="Keep notes, tasks, boards, spaces and tab layout in sync across your machines through an always-on ssh host. Notes and tasks merge live; layout is adopted at app start."
+        >
+          <Switch
+            checked={syncEnabled}
+            onCheckedChange={(v) => void setSyncEnabled(v)}
+          />
+        </SettingRow>
+        {syncEnabled ? (
+          <>
+            <SettingRow
+              title="Sync host"
+              description="ssh alias or user@host holding the shared state (key auth, must be in known_hosts). The canonical copy lives in ~/.koden/spaces/ on this host."
+            >
+              <div className="flex flex-col items-end gap-1">
+                <Input
+                  value={syncHostDraft}
+                  onChange={(e) => setSyncHostDraft(e.target.value)}
+                  onBlur={() => void setSyncHost(syncHostDraft)}
+                  placeholder="ai-server"
+                  className="h-8 w-44 text-[12px]"
+                />
+                {syncHostDraft.trim() !== "" &&
+                !isValidSyncHost(syncHostDraft.trim()) ? (
+                  <span className="text-[11px] text-destructive">
+                    Not a valid ssh host (letters, digits, . _ - : @ only)
+                  </span>
+                ) : null}
+              </div>
+            </SettingRow>
+            <SettingRow
+              title="Tree root on this machine"
+              description="Your project tree's local path (e.g. C:/Users/you/Tree or /home/you/Tree). Terminal cwds under it are rewritten so they resolve on every machine. Empty: paths sync as-is."
+            >
+              <Input
+                value={syncRootDraft}
+                onChange={(e) => setSyncRootDraft(e.target.value)}
+                onBlur={() => void setSyncPathRoot(syncRootDraft)}
+                placeholder="/home/you/Tree"
+                className="h-8 w-64 text-[12px]"
+              />
+            </SettingRow>
+          </>
+        ) : null}
       </div>
 
       <div className="flex flex-col gap-2">
