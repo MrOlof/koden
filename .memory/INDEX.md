@@ -437,3 +437,12 @@ day, same session: Nordomatic-Group + dashboard + blixt got remotes
 Stop push) went into shared settings, and the director-bus hook path became
 `$HOME`-relative (literal `C:/` was littering Linux CWDs). Crate split (A1)
 and host Librarian (A3) still open.
+
+**2026-09-02 — v0.11.3 released: true 1:1 remote Spaces.** Kosta's dogfood
+report (three tabs stuck as "snorlax", notes per-device) → manifest titles
+carry `custom` (only explicit renames cross devices; junk cwd-basename
+"renames" self-heal), reconcile is a live loop (activation + 15 s while
+focused), and notes/tasks/boards sync via `~/.koden/spaces/<key>-docs.json`
+(whole-doc LWW, close propagates, push pull-gated against connect races).
+New: `remoteDocs.ts`(+tests), `adoptDocTab`, `applyRemote*` in docsStore;
+manifest write cap 16 KB→256 KB. vitest 659, clippy clean.
