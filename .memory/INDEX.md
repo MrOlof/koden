@@ -488,3 +488,18 @@ host, devices render/write-through; manifests v0.11.3–5 become the
 migration bridge then get DELETED. Sequenced AFTER feat/workspace-sync
 identity fold. Control plane (hub → devices) = M3 in KODEN-REMOTE.md. No
 further investment in the replication layer beyond critical bugs.
+
+**2026-09-02 (night) — ONE HUB SHIPPED: sync branch merged + ADR-024
+liveness, v0.12.0.** Under Kosta's full mandate: workspace-sync branch
+(ADR-023 engine — Kosta-accepted 2026-09-01, found mid-planning with 3.1k
+lines only on ai-server, backed up to homelab first) merged into main
+zero-conflict, 702/702 green; F2 `-docs.json` replication DELETED
+(remoteDocs.ts, applyRemote*, App effects); ADR-024 added: fast cadences
+(docs push 2.5s/pull 10s, ws live 10s, push-on-layout-edit 3s, visible
+window only), `liveAdopt.ts` additive adopter (new doc tabs + doc renames
+live, never closes/reorders, never touches ws lastGen — boot merge
+invariants intact), sync default ON → host ai-server. My earlier
+"host-authoritative" ADR renumbered to ADR-024 with that model kept as
+north star. Ledger + Kosta's 8-step two-device GUI checklist:
+`.memory/plans/one-hub-EXECUTION_PLAN.md`. NOT yet GUI-verified — that's
+Kosta's first task back.

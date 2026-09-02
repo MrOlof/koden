@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
+import { describe, expect, it } from "vitest";
 import {
   fromWirePath,
   mapSpacePaths,

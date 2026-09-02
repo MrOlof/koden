@@ -1,5 +1,6 @@
-import { LazyStore } from "@tauri-apps/plugin-store";
+import { notifyWsChanged } from "@/modules/sync/lib/syncSignals";
 import type { WorkspaceEnv } from "@/modules/workspace";
+import { LazyStore } from "@tauri-apps/plugin-store";
 import type { SerializedTab } from "./serialize";
 
 export type SpaceWorktree = {
@@ -104,6 +105,9 @@ export async function saveState(
     await store.set(stateMetaKey(id), {
       at: Date.now(),
     } satisfies SpaceStateMeta);
+    // Real local layout edit → let the sync engine push soon (ADR-024
+    // liveness). Adoption writes (at !== undefined) never signal.
+    notifyWsChanged();
   }
 }
 

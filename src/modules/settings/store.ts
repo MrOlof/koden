@@ -363,7 +363,10 @@ export const DEFAULT_PREFERENCES: Preferences = {
   agentNotifications: true,
   agentNotificationMode: "smart",
   memoryNotifications: true,
-  syncEnabled: false,
+  // Default ON since 2026-09-02 (ADR-024): the one-hub workflow is the
+  // product. An unreachable host degrades to a visible offline state, never
+  // an error — so the default is safe on machines without the host too.
+  syncEnabled: true,
   syncHost: "ai-server",
   syncPathRoot: "",
   handsFreeMode: false,

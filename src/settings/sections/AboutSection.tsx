@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Wordmark } from "@/components/Wordmark";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setAutoUpdateCheck } from "@/modules/settings/store";
 import { useUpdater } from "@/modules/updater";
@@ -9,7 +10,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { arch, platform } from "@tauri-apps/plugin-os";
 import { useEffect, useState } from "react";
-import { Wordmark } from "@/components/Wordmark";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
 
@@ -143,7 +143,7 @@ export function AboutSection() {
 
       <SettingRow
         title="Automatically check for updates"
-        description="Off until a Koden release feed is configured. The manual check above always works."
+        description="Checks the release feed on launch and offers one-click updates. The manual check above always works."
       >
         <Switch
           checked={autoUpdateCheck}

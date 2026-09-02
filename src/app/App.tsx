@@ -43,11 +43,11 @@ import type {
 import {
   BrainActivityBridge,
   brainBuildGist,
+  type OpenTerminalForResume,
   RecoveredPanesBanner,
   requestBrainView,
   resolveProjectForCwd,
   useRecoveredPanes,
-  type OpenTerminalForResume,
 } from "@/modules/brain";
 import { CliBridge } from "@/modules/cli";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
@@ -69,8 +69,8 @@ import {
   LauncherPane,
   normalizeFolderPath,
   type RemoteConnectOptions,
-  sameEnv,
   type SshEnv,
+  sameEnv,
 } from "@/modules/launcher";
 import { OnboardingWizard } from "@/modules/onboarding/OnboardingWizard";
 import {
@@ -125,37 +125,6 @@ import {
   type RemoteWindow,
 } from "@/modules/spaces/lib/remoteSessions";
 import {
-  buildDocsManifest,
-  docKeys,
-  parseDocsManifest,
-  planDocsApply,
-  type RemoteDoc,
-  type RemoteDocKind,
-} from "@/modules/spaces/lib/remoteDocs";
-import { useDocsStore } from "@/modules/workspace-docs/store/docsStore";
-import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
-
-/** Docs-backed panes (a note/tasks SPLIT inside a terminal tab) of a pane
- * tree — they join the remote docs manifest like doc tabs do, so a note
- * beside a terminal follows you to the other device (as a tab there;
- * split layout stays per-device, same philosophy as terminal splits). */
-function paneDocLeaves(
-  tree: PaneNode,
-): { kind: "notes" | "tasks"; id: string; leafId: number }[] {
-  if (isLeaf(tree)) {
-    return tree.content && tree.docId
-      ? [
-          {
-            kind: tree.content === "note" ? "notes" : "tasks",
-            id: tree.docId,
-            leafId: tree.id,
-          },
-        ]
-      : [];
-  }
-  return tree.children.flatMap(paneDocLeaves);
-}
-import {
   leafRestoreKey,
   peekLeafRestoreKey,
   seedLeafRestoreKey,
@@ -163,6 +132,7 @@ import {
 import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
 import { StatusBar } from "@/modules/statusbar";
 import { SyncBridge } from "@/modules/sync";
+import { registerLiveAdopters } from "@/modules/sync/lib/liveAdopt";
 import {
   GridDialog,
   type TerminalTab,
@@ -201,8 +171,8 @@ import {
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
 import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
-import { NewWorktreeDialog, RemoveWorktreeDialog } from "@/modules/worktrees";
 import { hydrateDocs } from "@/modules/workspace-docs";
+import { NewWorktreeDialog, RemoveWorktreeDialog } from "@/modules/worktrees";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -677,9 +647,7 @@ export default function App() {
   // A configured default folder wins over the launch dir / OS home as the base
   // the explorer roots at and new terminals open in (Settings → General).
   const defaultFolder = usePreferencesStore((s) => s.defaultFolder);
-  const showLauncherOnStart = usePreferencesStore(
-    (s) => s.showLauncherOnStart,
-  );
+  const showLauncherOnStart = usePreferencesStore((s) => s.showLauncherOnStart);
   // Default accent colors for newly created note/task panes (Settings → General).
   const paneColorNotes = usePreferencesStore((s) => s.paneColorNotes);
   const paneColorTask = usePreferencesStore((s) => s.paneColorTask);
@@ -798,7 +766,8 @@ export default function App() {
       editorRefs.current.delete(id);
       previewRefs.current.delete(id);
       const t = tabsRef.current.find((x) => x.id === id);
-      if (t?.kind === "terminal") killRemoteLeaves(leafIds(t.paneTree), t.spaceId);
+      if (t?.kind === "terminal")
+        killRemoteLeaves(leafIds(t.paneTree), t.spaceId);
       closeTab(id);
     },
     [closeTab, killRemoteLeaves],
@@ -2377,8 +2346,7 @@ export default function App() {
         directory: true,
         multiple: false,
         title: "Open folder as a new Space",
-        defaultPath:
-          start && IS_WINDOWS ? start.replace(/\//g, "\\") : start,
+        defaultPath: start && IS_WINDOWS ? start.replace(/\//g, "\\") : start,
       });
     } catch (e) {
       toast.error(`Could not open the folder picker: ${String(e)}`);
@@ -2387,7 +2355,11 @@ export default function App() {
     if (typeof picked !== "string" || !picked) return;
     const root = normalizeFolderPath(picked);
     const { create, setActive } = useSpaces.getState();
-    const meta = create({ name: folderBasename(root), root, env: workspaceEnv });
+    const meta = create({
+      name: folderBasename(root),
+      root,
+      env: workspaceEnv,
+    });
     void native.workspaceAuthorize(root).catch(() => {});
     setActiveSpaceForNewTabs(meta.id);
     newTab(root);
@@ -2478,14 +2450,20 @@ export default function App() {
       const cwdBase = t.cwd?.split(/[\\/]/).filter(Boolean).pop();
       const custom = Boolean(t.customTitle?.trim());
       const title =
-        t.customTitle?.trim() || (t.title === "shell" && cwdBase ? cwdBase : t.title);
+        t.customTitle?.trim() ||
+        (t.title === "shell" && cwdBase ? cwdBase : t.title);
       return leafIds(t.paneTree).map((lid) => ({
         key: leafRestoreKey(lid),
         title,
         ...(custom && { custom: true }),
       }));
     });
-    const json = JSON.stringify({ v: 1, name: space.name, tabs: entries, updatedAt: Date.now() });
+    const json = JSON.stringify({
+      v: 1,
+      name: space.name,
+      tabs: entries,
+      updatedAt: Date.now(),
+    });
     // Compare without the timestamp so identical layouts don't re-push.
     const sig = `${tmuxKey}:${JSON.stringify(entries)}`;
     if (sig === lastManifest.current) return;
@@ -2502,19 +2480,12 @@ export default function App() {
 
   // M2.5 F2, live (2026-09-02): sync an ssh+tmux Space with host truth —
   // adopt live windows no local pane owns, stamp EXPLICIT renames from the
-  // manifest, heal junk custom titles, and mirror the docs manifest
-  // (notes/tasks/boards) both ways. Runs on activation AND every 15 s while
-  // the app is focused, so two connected devices converge without restarts.
+  // manifest, heal junk custom titles. Runs on activation AND every 15 s
+  // while the app is focused, so two connected devices converge without
+  // restarts. Docs (notes/tasks/boards) are NOT handled here any more —
+  // the sync engine's docs domain owns content (ADR-023) and the live
+  // adopter (liveAdopt.ts) materializes doc tabs mid-session.
   const syncingSpaces = useRef(new Set<string>());
-  /** Doc ids last seen in each space's remote docs manifest ("kind:id"). */
-  const seenRemoteDocs = useRef(new Map<string, Set<string>>());
-  /** Spaces whose docs manifest was READ successfully at least once this
-   * run — pushing before the first read would wipe the other device's
-   * registry in a first-connect race. */
-  const docsPulled = useRef(new Set<string>());
-  /** Bumped when a space's docs manifest is first pulled — wakes the push
-   * effect, which cannot observe the ref. */
-  const [docsPullTick, setDocsPullTick] = useState(0);
   const syncRemoteSpace = useCallback(
     async (spaceId: string) => {
       const space = useSpaces.getState().spaces.find((s) => s.id === spaceId);
@@ -2525,7 +2496,7 @@ export default function App() {
       if (syncingSpaces.current.has(space.id)) return;
       syncingSpaces.current.add(space.id);
       try {
-        const [windows, manifestJson, docsJson] = await Promise.all([
+        const [windows, manifestJson] = await Promise.all([
           invoke<RemoteWindow[]>("ssh_tmux_windows", {
             host: env.host,
             spaceKey: tmuxKey,
@@ -2534,10 +2505,6 @@ export default function App() {
             host: env.host,
             spaceKey: tmuxKey,
           }).catch(() => ""),
-          invoke<string>("ssh_read_space_manifest", {
-            host: env.host,
-            spaceKey: `${tmuxKey}-docs`,
-          }),
         ]);
         const titles = parseManifestTitles(manifestJson);
         if (windows.length > 0) {
@@ -2552,7 +2519,11 @@ export default function App() {
           for (const pane of planAdoption(windows, localKeys, titles)) {
             adoptTerminalTab(
               space.id,
-              { title: pane.title, leafKey: pane.key, ...(pane.cwd && { cwd: pane.cwd }) },
+              {
+                title: pane.title,
+                leafKey: pane.key,
+                ...(pane.cwd && { cwd: pane.cwd }),
+              },
               seedLeafRestoreKey,
             );
           }
@@ -2560,11 +2531,16 @@ export default function App() {
         for (const t of tabsRef.current) {
           if (t.spaceId !== space.id || t.kind !== "terminal") continue;
           const firstLeaf = leafIds(t.paneTree)[0];
-          const key = firstLeaf !== undefined ? peekLeafRestoreKey(firstLeaf) : undefined;
+          const key =
+            firstLeaf !== undefined ? peekLeafRestoreKey(firstLeaf) : undefined;
           const entry = key ? titles.get(key) : undefined;
           const custom = t.customTitle?.trim();
           const cwdBase = t.cwd?.split(/[\\/]/).filter(Boolean).pop();
-          if (custom && cwdBase && custom.toLowerCase() === cwdBase.toLowerCase()) {
+          if (
+            custom &&
+            cwdBase &&
+            custom.toLowerCase() === cwdBase.toLowerCase()
+          ) {
             // Heal titles stamped from weak manifest entries by older
             // builds: a "rename" equal to the cwd basename says nothing.
             updateTab(t.id, { customTitle: "" });
@@ -2575,76 +2551,13 @@ export default function App() {
             updateTab(t.id, { customTitle: entry.title });
           }
         }
-        // Docs: remote truth → local tabs + payloads (whole-doc LWW).
-        const remoteDocs = parseDocsManifest(docsJson);
-        if (!docsPulled.current.has(space.id)) {
-          docsPulled.current.add(space.id);
-          // The push effect gates on this ref, and a ref flip re-runs no
-          // effect — without this nudge the first push waits for an
-          // unrelated change and the other device sees no docs
-          // (v0.11.4 field bug: note pane never appeared on the laptop).
-          setDocsPullTick((n) => n + 1);
-        }
-        if (remoteDocs) {
-          // tabId -1 marks a docs-backed PANE: it dedupes creation (so the
-          // origin device doesn't grow a duplicate tab for its own split)
-          // but is never closed or retitled from the manifest.
-          const localDocTabs: { kind: RemoteDocKind; id: string; tabId: number; title: string }[] =
-            [];
-          for (const t of tabsRef.current) {
-            if (t.spaceId !== space.id) continue;
-            if (t.kind === "notes")
-              localDocTabs.push({ kind: "notes", id: t.docId, tabId: t.id, title: t.title });
-            else if (t.kind === "board")
-              localDocTabs.push({ kind: "board", id: t.boardId, tabId: t.id, title: t.title });
-            else if (t.kind === "tasks")
-              localDocTabs.push({ kind: "tasks", id: t.listId, tabId: t.id, title: t.title });
-            else if (t.kind === "terminal")
-              for (const p of paneDocLeaves(t.paneTree))
-                localDocTabs.push({ kind: p.kind, id: p.id, tabId: -1, title: "" });
-          }
-          const ds = useDocsStore.getState();
-          const plan = planDocsApply(
-            remoteDocs,
-            localDocTabs,
-            (kind, id) =>
-              kind === "notes"
-                ? ds.notes[id]?.updatedAt
-                : kind === "board"
-                  ? ds.boards[id]?.updatedAt
-                  : ds.tasks[id]?.updatedAt,
-            seenRemoteDocs.current.get(space.id) ?? new Set(),
-          );
-          for (const d of plan.create) adoptDocTab(space.id, d.kind, d.id, d.title);
-          for (const d of plan.apply) {
-            const p = d.payload as { updatedAt?: unknown } | undefined;
-            if (!p || typeof p.updatedAt !== "number") continue;
-            if (d.kind === "notes" && typeof (p as { content?: unknown }).content === "string")
-              ds.applyRemoteNote(d.id, p as Parameters<typeof ds.applyRemoteNote>[1]);
-            else if (d.kind === "board" && Array.isArray((p as { columns?: unknown }).columns))
-              ds.applyRemoteBoard(d.id, p as Parameters<typeof ds.applyRemoteBoard>[1]);
-            else if (d.kind === "tasks" && Array.isArray((p as { items?: unknown }).items))
-              ds.applyRemoteTasks(d.id, p as Parameters<typeof ds.applyRemoteTasks>[1]);
-          }
-          for (const c of plan.close) {
-            const t = localDocTabs.find((x) => x.kind === c.kind && x.id === c.id);
-            if (t && t.tabId >= 0) closeTab(t.tabId);
-          }
-          // Doc tab renames follow the manifest (docs have no weak titles).
-          for (const d of remoteDocs) {
-            const t = localDocTabs.find((x) => x.kind === d.kind && x.id === d.id);
-            if (t && t.tabId >= 0 && d.title && t.title !== d.title)
-              updateTab(t.tabId, { title: d.title });
-          }
-          seenRemoteDocs.current.set(space.id, docKeys(remoteDocs));
-        }
       } catch (e) {
         console.warn("[koden] remote space sync failed:", e);
       } finally {
         syncingSpaces.current.delete(space.id);
       }
     },
-    [adoptTerminalTab, adoptDocTab, updateTab, closeTab],
+    [adoptTerminalTab, updateTab],
   );
 
   // First activation of a Space this run syncs immediately…
@@ -2667,60 +2580,15 @@ export default function App() {
     return () => clearInterval(timer);
   }, [spacesHydrated, activeSpaceId, syncRemoteSpace]);
 
-  // Push this device's docs (notes/tasks/boards) for the active ssh Space to
-  // the host, so the other device can render the same workspace. Gated on a
-  // successful pull (docsPulled) and sig-deduped like the tab manifest.
-  const notesDocs = useDocsStore((s) => s.notes);
-  const boardDocs = useDocsStore((s) => s.boards);
-  const taskDocs = useDocsStore((s) => s.tasks);
-  const paneTitles = usePaneTitleStore((s) => s.titles);
-  const lastDocsManifest = useRef("");
+  // The sync engine (ADR-023 docs domain + the live adopter) needs tab
+  // operations that live in this hook scope; hand them over once.
   useEffect(() => {
-    const space = spaces.find((s) => s.id === activeSpaceId);
-    const tmuxKey = tmuxKeyFor(space);
-    if (!space || !tmuxKey) return;
-    const env = spaceEnv(space);
-    if (env.kind !== "ssh") return;
-    if (!docsPulled.current.has(space.id)) return;
-    const byKey = new Map<string, RemoteDoc>();
-    for (const t of tabs) {
-      if (t.spaceId !== space.id) continue;
-      if (t.kind === "notes") {
-        const p = notesDocs[t.docId];
-        byKey.set(`notes:${t.docId}`, { kind: "notes", id: t.docId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 });
-      } else if (t.kind === "board") {
-        const p = boardDocs[t.boardId];
-        byKey.set(`board:${t.boardId}`, { kind: "board", id: t.boardId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 });
-      } else if (t.kind === "tasks") {
-        const p = taskDocs[t.listId];
-        byKey.set(`tasks:${t.listId}`, { kind: "tasks", id: t.listId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 });
-      } else if (t.kind === "terminal") {
-        // Note/tasks SPLITS inside terminal tabs travel too.
-        for (const pd of paneDocLeaves(t.paneTree)) {
-          if (byKey.has(`${pd.kind}:${pd.id}`)) continue;
-          const p = pd.kind === "notes" ? notesDocs[pd.id] : taskDocs[pd.id];
-          const title =
-            paneTitles[pd.leafId]?.label || (pd.kind === "notes" ? "Notes" : "Tasks");
-          byKey.set(`${pd.kind}:${pd.id}`, { kind: pd.kind, id: pd.id, title, payload: p, updatedAt: p?.updatedAt ?? 0 });
-        }
-      }
-    }
-    const docs: RemoteDoc[] = [...byKey.values()];
-    const sig = `${tmuxKey}:${JSON.stringify(docs)}`;
-    if (sig === lastDocsManifest.current) return;
-    const timer = setTimeout(() => {
-      lastDocsManifest.current = sig;
-      // Union with the remote registry is unnecessary: by the time we push,
-      // every remote doc was adopted locally (pull-gated), so this list is
-      // the union.
-      void invoke("ssh_write_space_manifest", {
-        host: env.host,
-        spaceKey: `${tmuxKey}-docs`,
-        json: buildDocsManifest(docs),
-      }).catch(() => {});
-    }, 2500);
-    return () => clearTimeout(timer);
-  }, [tabs, spaces, activeSpaceId, notesDocs, boardDocs, taskDocs, paneTitles, docsPullTick]);
+    registerLiveAdopters({
+      listTabs: () => tabsRef.current,
+      adoptDocTab,
+      renameTab: (tabId, title) => updateTab(tabId, { title }),
+    });
+  }, [adoptDocTab, updateTab]);
 
   const spaceSwitcher = (
     <SpaceSwitcher

@@ -1,8 +1,8 @@
-import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
 import type {
   SerializedNode,
   SerializedTab,
 } from "@/modules/spaces/lib/serialize";
+import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
 
 // Absolute paths (leaf cwd, space root, editor/markdown tab paths) are
 // machine-specific. Each device configures its tree root (syncPathRoot pref);

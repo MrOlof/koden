@@ -1,9 +1,9 @@
+import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
 import type {
   Board,
   NoteDoc,
   TaskList,
 } from "@/modules/workspace-docs/store/docsStore";
-import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
 
 export const SYNC_WIRE_VERSION = 1;
 

@@ -1,16 +1,18 @@
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   deleteSpaceData,
-  loadAll,
   type LoadedSpaces,
+  loadAll,
+  type SpaceState,
   saveSpacesList,
   saveState,
-  type SpaceState,
 } from "@/modules/spaces/lib/store";
-import { usePreferencesStore } from "@/modules/settings/preferences";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import {
   hydrateDocs,
   useDocsStore,
 } from "@/modules/workspace-docs/store/docsStore";
+import { getLiveAdopters, planLiveDocAdoption } from "./liveAdopt";
 import { mergeDocs } from "./mergeDocs";
 import {
   isSyncableSpace,
@@ -34,6 +36,7 @@ import {
   mapStatePaths,
   toWirePath,
 } from "./pathMap";
+import { setWsChangedListener } from "./syncSignals";
 import { useSyncStore } from "./syncStore";
 import {
   isValidSyncHost,
@@ -58,10 +61,16 @@ import {
 //   adoption happens only at boot. A mid-session pull folded into a push is
 //   NOT locally adopted, so marking it consumed would both skip the next
 //   boot's adoption and let a later skip-merge push erase it from the host.
+// ADR-024 liveness: while the window is visible, both domains poll fast —
+// an unchanged gen costs exactly one ssh handshake, so a 10 s cadence is
+// cheap on a LAN/tailnet host. Hidden windows fall back to the slow timer.
 const DOCS_PULL_INTERVAL_MS = 5 * 60_000;
-const DOCS_PULL_FOCUS_GAP_MS = 30_000;
-const DOCS_PUSH_DEBOUNCE_MS = 15_000;
+const DOCS_PULL_FAST_MS = 10_000;
+const DOCS_PULL_FOCUS_GAP_MS = 8_000;
+const DOCS_PUSH_DEBOUNCE_MS = 2_500;
 const WS_CHECK_INTERVAL_MS = 60_000;
+const WS_LIVE_POLL_MS = 10_000;
+const WS_PUSH_SOON_MS = 3_000;
 const BOOT_PULL_BUDGET_MS = 8_000;
 // After a failed boot pull, later boots wait far less: an unreachable host
 // (asleep, VPN down) must not stall every launch for the full budget.
@@ -408,7 +417,41 @@ function wsPushSoon(force = false): void {
     wsPushTimer = null;
     const cfg = config();
     if (cfg) void syncWorkspace(cfg, force);
-  }, 15_000);
+  }, WS_PUSH_SOON_MS);
+}
+
+// ---------------------------------------------------- live adoption (ADR-024)
+
+// Tracked separately from the persisted ws lastGen ON PURPOSE: live adoption
+// is additive-only (new doc tabs, doc renames) and must not consume the gen —
+// the next boot still pulls the same envelope and does the full structural
+// merge. Session-local, so a restart re-adopts harmlessly (idempotent).
+let lastLiveWsGen = 0;
+
+async function liveWsAdopt(cfg: SyncConfig): Promise<void> {
+  const a = getLiveAdopters();
+  if (!a) return;
+  try {
+    const pulled = await pullDomain<WorkspaceEnvelope>(
+      cfg.host,
+      "ws",
+      lastLiveWsGen,
+    );
+    if (pulled.status !== "ok") return;
+    lastLiveWsGen = pulled.gen;
+    const remote = envelopeFromWire(pulled.envelope, cfg.pathRoot);
+    const localSpaces = new Set(useSpaces.getState().spaces.map((s) => s.id));
+    const tabs = a.listTabs();
+    for (const [spaceId, st] of Object.entries(remote.states ?? {})) {
+      if (!localSpaces.has(spaceId)) continue; // unseen spaces are boot's job
+      const plan = planLiveDocAdoption(spaceId, tabs, st);
+      for (const d of plan.create)
+        a.adoptDocTab(spaceId, d.kind, d.id, d.title);
+      for (const r of plan.rename) a.renameTab(r.tabId, r.title);
+    }
+  } catch {
+    // Best-effort by design; the docs/ws sync paths own error surfacing.
+  }
 }
 
 /** Manual "sync now" from the statusbar segment; ignores backoff. */
@@ -465,7 +508,18 @@ export function startSyncEngine(): () => void {
     if (cfg && docsDirty) void syncDocs(cfg);
   }, DOCS_PUSH_DEBOUNCE_MS);
 
+  // Visible windows poll fast (ADR-024 liveness: a note typed on the other
+  // machine lands within ~10 s); hidden windows keep the slow timer only.
+  const docsFastTimer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    const cfg = config();
+    if (!cfg) return;
+    lastDocsPull = Date.now();
+    void syncDocs(cfg);
+  }, DOCS_PULL_FAST_MS);
+
   const docsPullTimer = setInterval(() => {
+    if (document.visibilityState === "visible") return; // fast timer covers it
     const cfg = config();
     if (!cfg) return;
     lastDocsPull = Date.now();
@@ -476,6 +530,15 @@ export function startSyncEngine(): () => void {
     const cfg = config();
     if (cfg) void syncWorkspace(cfg);
   }, WS_CHECK_INTERVAL_MS);
+
+  const wsLiveTimer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    const cfg = config();
+    if (cfg) void liveWsAdopt(cfg);
+  }, WS_LIVE_POLL_MS);
+
+  // Local layout edits push soon instead of waiting for the 60 s check.
+  setWsChangedListener(() => wsPushSoon());
 
   const onFocus = () => {
     const cfg = config();
@@ -500,8 +563,11 @@ export function startSyncEngine(): () => void {
     () => unsubDocs?.(),
     unsubPrefs,
     () => clearInterval(docsPushTimer),
+    () => clearInterval(docsFastTimer),
     () => clearInterval(docsPullTimer),
     () => clearInterval(wsTimer),
+    () => clearInterval(wsLiveTimer),
+    () => setWsChangedListener(null),
     () => window.removeEventListener("focus", onFocus),
     () => document.removeEventListener("visibilitychange", onHide),
     () => {
