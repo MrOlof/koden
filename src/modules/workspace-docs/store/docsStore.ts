@@ -61,6 +61,9 @@ type DocsState = {
   hydrated: boolean;
 
   setNote: (docId: string, content: string) => void;
+  applyRemoteNote: (docId: string, doc: NoteDoc) => void;
+  applyRemoteBoard: (boardId: string, board: Board) => void;
+  applyRemoteTasks: (listId: string, list: TaskList) => void;
 
   ensureBoard: (boardId: string) => void;
   addCard: (boardId: string, columnId: string, text: string) => void;
@@ -114,6 +117,25 @@ export const useDocsStore = create<DocsState>((set, get) => ({
       const doc: NoteDoc = { content, updatedAt: now() };
       persistNote(s.hydrated, docId, doc);
       return { notes: { ...s.notes, [docId]: doc } };
+    }),
+
+  // Remote-sync appliers (ssh Spaces, remoteDocs.ts): replace the whole doc
+  // with the other device's copy, KEEPING its updatedAt — last-writer-wins
+  // needs the remote timestamp, not now(), or every apply would win forever.
+  applyRemoteNote: (docId, doc) =>
+    set((s) => {
+      persistNote(s.hydrated, docId, doc);
+      return { notes: { ...s.notes, [docId]: doc } };
+    }),
+  applyRemoteBoard: (boardId, board) =>
+    set((s) => {
+      persistBoard(s.hydrated, boardId, board);
+      return { boards: { ...s.boards, [boardId]: board } };
+    }),
+  applyRemoteTasks: (listId, list) =>
+    set((s) => {
+      persistTaskList(s.hydrated, listId, list);
+      return { tasks: { ...s.tasks, [listId]: list } };
     }),
 
   ensureBoard: (boardId) => {

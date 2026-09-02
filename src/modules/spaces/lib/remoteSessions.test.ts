@@ -56,20 +56,22 @@ describe("planAdoption", () => {
     expect(plan).toEqual([]);
   });
 
-  it("prefers manifest titles over the pane command", () => {
-    const titles = new Map([["rk-live1", "test 2"]]);
+  it("prefers manifest titles (even weak ones) over the pane command", () => {
+    const titles = new Map([["rk-live1", { title: "test 2", custom: false }]]);
     const plan = planAdoption([windows[0]], new Set(), titles);
     expect(plan[0].title).toBe("test 2");
   });
 });
 
 describe("parseManifestTitles", () => {
-  it("maps keys to titles and survives garbage", () => {
+  it("maps keys to titles with the custom flag and survives garbage", () => {
     const t = parseManifestTitles(
-      '{"v":1,"tabs":[{"key":"rk-a","title":"test 2"},{"key":7,"title":"x"},{"key":"rk-b"}]}',
+      '{"v":1,"tabs":[{"key":"rk-a","title":"test 2","custom":true},{"key":"rk-w","title":"snorlax"},{"key":7,"title":"x"},{"key":"rk-b"}]}',
     );
-    expect(t.get("rk-a")).toBe("test 2");
-    expect(t.size).toBe(1);
+    expect(t.get("rk-a")).toEqual({ title: "test 2", custom: true });
+    // Pre-custom schema and fallback titles read as weak.
+    expect(t.get("rk-w")).toEqual({ title: "snorlax", custom: false });
+    expect(t.size).toBe(2);
     expect(parseManifestTitles("").size).toBe(0);
     expect(parseManifestTitles("not json").size).toBe(0);
   });

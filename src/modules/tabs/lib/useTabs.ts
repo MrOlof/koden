@@ -873,6 +873,41 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     [],
   );
 
+  /** Adopt a notes/board/tasks tab from a remote Space's docs manifest:
+   * fixed shared doc id, target space, never steals focus, dedupes. */
+  const adoptDocTab = useCallback(
+    (
+      spaceId: string,
+      kind: "notes" | "board" | "tasks",
+      docId: string,
+      title: string,
+    ) => {
+      setTabs((curr) => {
+        const exists = curr.some(
+          (t) =>
+            t.spaceId === spaceId &&
+            t.kind === kind &&
+            (t.kind === "notes"
+              ? t.docId === docId
+              : t.kind === "board"
+                ? t.boardId === docId
+                : t.kind === "tasks" && t.listId === docId),
+        );
+        if (exists) return curr;
+        const id = nextIdRef.current++;
+        const base = { id, spaceId, title };
+        const tab: Tab =
+          kind === "notes"
+            ? ({ ...base, kind, docId } satisfies NotesTab)
+            : kind === "board"
+              ? ({ ...base, kind, boardId: docId } satisfies BoardTab)
+              : ({ ...base, kind, listId: docId } satisfies TasksTab);
+        return [...curr, tab];
+      });
+    },
+    [],
+  );
+
   // Orchestration views are one-per-space: focus an existing one if present.
   const openOrchestrationTab = useCallback((view: OrchestrationView) => {
     let targetId: number | null = null;
@@ -1486,6 +1521,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     openLibraryTab,
     openLauncherTab,
     adoptTerminalTab,
+    adoptDocTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,

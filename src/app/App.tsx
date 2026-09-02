@@ -124,6 +124,15 @@ import {
   type RemoteWindow,
 } from "@/modules/spaces/lib/remoteSessions";
 import {
+  buildDocsManifest,
+  docKeys,
+  parseDocsManifest,
+  planDocsApply,
+  type RemoteDoc,
+  type RemoteDocKind,
+} from "@/modules/spaces/lib/remoteDocs";
+import { useDocsStore } from "@/modules/workspace-docs/store/docsStore";
+import {
   leafRestoreKey,
   peekLeafRestoreKey,
   seedLeafRestoreKey,
@@ -340,6 +349,7 @@ export default function App() {
     openLibraryTab,
     openLauncherTab,
     adoptTerminalTab,
+    adoptDocTab,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,
@@ -2433,13 +2443,18 @@ export default function App() {
     const entries = tabs.flatMap((t) => {
       if (t.spaceId !== space.id || t.kind !== "terminal") return [];
       // A fresh tab's internal title is the "shell" placeholder while the UI
-      // shows the cwd basename; mirror what the user actually sees.
+      // shows the cwd basename; mirror what the user actually sees. Only an
+      // explicit rename is `custom` — weak fallbacks label dashboards and
+      // adoptions but must never overwrite another device's naming
+      // (2026-09-02: three $HOME tabs all became "snorlax" everywhere).
       const cwdBase = t.cwd?.split(/[\\/]/).filter(Boolean).pop();
+      const custom = Boolean(t.customTitle?.trim());
       const title =
         t.customTitle?.trim() || (t.title === "shell" && cwdBase ? cwdBase : t.title);
       return leafIds(t.paneTree).map((lid) => ({
         key: leafRestoreKey(lid),
         title,
+        ...(custom && { custom: true }),
       }));
     });
     const json = JSON.stringify({ v: 1, name: space.name, tabs: entries, updatedAt: Date.now() });
@@ -2457,25 +2472,29 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [tabs, spaces, activeSpaceId]);
 
-  // M2.5 F2 (lean): on first activation of an ssh+tmux Space, ask the host
-  // what's actually running and adopt live windows no local pane owns — a
-  // deleted Space, another device's work, or a survived crash all come back
-  // as background tabs instead of orphaned tmux sessions. Once per Space per
-  // app run; a Koden restart re-reconciles.
-  const reconciledSpaces = useRef(new Set<string>());
-  useEffect(() => {
-    if (!spacesHydrated) return;
-    const space = spaces.find((s) => s.id === activeSpaceId);
-    if (!space) return;
-    const tmuxKey = tmuxKeyFor(space);
-    if (!tmuxKey) return;
-    const env = spaceEnv(space);
-    if (env.kind !== "ssh") return;
-    if (reconciledSpaces.current.has(space.id)) return;
-    reconciledSpaces.current.add(space.id);
-    void (async () => {
+  // M2.5 F2, live (2026-09-02): sync an ssh+tmux Space with host truth —
+  // adopt live windows no local pane owns, stamp EXPLICIT renames from the
+  // manifest, heal junk custom titles, and mirror the docs manifest
+  // (notes/tasks/boards) both ways. Runs on activation AND every 15 s while
+  // the app is focused, so two connected devices converge without restarts.
+  const syncingSpaces = useRef(new Set<string>());
+  /** Doc ids last seen in each space's remote docs manifest ("kind:id"). */
+  const seenRemoteDocs = useRef(new Map<string, Set<string>>());
+  /** Spaces whose docs manifest was READ successfully at least once this
+   * run — pushing before the first read would wipe the other device's
+   * registry in a first-connect race. */
+  const docsPulled = useRef(new Set<string>());
+  const syncRemoteSpace = useCallback(
+    async (spaceId: string) => {
+      const space = useSpaces.getState().spaces.find((s) => s.id === spaceId);
+      if (!space) return;
+      const tmuxKey = tmuxKeyFor(space);
+      const env = spaceEnv(space);
+      if (!tmuxKey || env.kind !== "ssh") return;
+      if (syncingSpaces.current.has(space.id)) return;
+      syncingSpaces.current.add(space.id);
       try {
-        const [windows, manifestJson] = await Promise.all([
+        const [windows, manifestJson, docsJson] = await Promise.all([
           invoke<RemoteWindow[]>("ssh_tmux_windows", {
             host: env.host,
             spaceKey: tmuxKey,
@@ -2484,39 +2503,176 @@ export default function App() {
             host: env.host,
             spaceKey: tmuxKey,
           }).catch(() => ""),
+          invoke<string>("ssh_read_space_manifest", {
+            host: env.host,
+            spaceKey: `${tmuxKey}-docs`,
+          }),
         ]);
-        if (windows.length === 0) return;
         const titles = parseManifestTitles(manifestJson);
-        const localKeys = new Set<string>();
-        for (const t of tabsRef.current) {
-          if (t.spaceId !== space.id || t.kind !== "terminal") continue;
-          for (const lid of leafIds(t.paneTree)) {
-            const k = peekLeafRestoreKey(lid);
-            if (k) localKeys.add(k);
+        if (windows.length > 0) {
+          const localKeys = new Set<string>();
+          for (const t of tabsRef.current) {
+            if (t.spaceId !== space.id || t.kind !== "terminal") continue;
+            for (const lid of leafIds(t.paneTree)) {
+              const k = peekLeafRestoreKey(lid);
+              if (k) localKeys.add(k);
+            }
+          }
+          for (const pane of planAdoption(windows, localKeys, titles)) {
+            adoptTerminalTab(
+              space.id,
+              { title: pane.title, leafKey: pane.key, ...(pane.cwd && { cwd: pane.cwd }) },
+              seedLeafRestoreKey,
+            );
           }
         }
-        for (const pane of planAdoption(windows, localKeys, titles)) {
-          adoptTerminalTab(
-            space.id,
-            { title: pane.title, leafKey: pane.key, ...(pane.cwd && { cwd: pane.cwd }) },
-            seedLeafRestoreKey,
-          );
-        }
-        // Manifest is truth for names: sync EXISTING tabs too, so a rename
-        // on one device shows up on the other at next activation.
         for (const t of tabsRef.current) {
           if (t.spaceId !== space.id || t.kind !== "terminal") continue;
           const firstLeaf = leafIds(t.paneTree)[0];
           const key = firstLeaf !== undefined ? peekLeafRestoreKey(firstLeaf) : undefined;
-          const wanted = key ? titles.get(key) : undefined;
-          const current = t.customTitle?.trim() || t.title;
-          if (wanted && wanted !== current) updateTab(t.id, { customTitle: wanted });
+          const entry = key ? titles.get(key) : undefined;
+          const custom = t.customTitle?.trim();
+          const cwdBase = t.cwd?.split(/[\\/]/).filter(Boolean).pop();
+          if (custom && cwdBase && custom.toLowerCase() === cwdBase.toLowerCase()) {
+            // Heal titles stamped from weak manifest entries by older
+            // builds: a "rename" equal to the cwd basename says nothing.
+            updateTab(t.id, { customTitle: "" });
+            continue;
+          }
+          // Only explicit renames cross devices.
+          if (entry?.custom && entry.title !== (custom || t.title)) {
+            updateTab(t.id, { customTitle: entry.title });
+          }
+        }
+        // Docs: remote truth → local tabs + payloads (whole-doc LWW).
+        const remoteDocs = parseDocsManifest(docsJson);
+        docsPulled.current.add(space.id);
+        if (remoteDocs) {
+          const localDocTabs: { kind: RemoteDocKind; id: string; tabId: number; title: string }[] =
+            [];
+          for (const t of tabsRef.current) {
+            if (t.spaceId !== space.id) continue;
+            if (t.kind === "notes")
+              localDocTabs.push({ kind: "notes", id: t.docId, tabId: t.id, title: t.title });
+            else if (t.kind === "board")
+              localDocTabs.push({ kind: "board", id: t.boardId, tabId: t.id, title: t.title });
+            else if (t.kind === "tasks")
+              localDocTabs.push({ kind: "tasks", id: t.listId, tabId: t.id, title: t.title });
+          }
+          const ds = useDocsStore.getState();
+          const plan = planDocsApply(
+            remoteDocs,
+            localDocTabs,
+            (kind, id) =>
+              kind === "notes"
+                ? ds.notes[id]?.updatedAt
+                : kind === "board"
+                  ? ds.boards[id]?.updatedAt
+                  : ds.tasks[id]?.updatedAt,
+            seenRemoteDocs.current.get(space.id) ?? new Set(),
+          );
+          for (const d of plan.create) adoptDocTab(space.id, d.kind, d.id, d.title);
+          for (const d of plan.apply) {
+            const p = d.payload as { updatedAt?: unknown } | undefined;
+            if (!p || typeof p.updatedAt !== "number") continue;
+            if (d.kind === "notes" && typeof (p as { content?: unknown }).content === "string")
+              ds.applyRemoteNote(d.id, p as Parameters<typeof ds.applyRemoteNote>[1]);
+            else if (d.kind === "board" && Array.isArray((p as { columns?: unknown }).columns))
+              ds.applyRemoteBoard(d.id, p as Parameters<typeof ds.applyRemoteBoard>[1]);
+            else if (d.kind === "tasks" && Array.isArray((p as { items?: unknown }).items))
+              ds.applyRemoteTasks(d.id, p as Parameters<typeof ds.applyRemoteTasks>[1]);
+          }
+          for (const c of plan.close) {
+            const t = localDocTabs.find((x) => x.kind === c.kind && x.id === c.id);
+            if (t) closeTab(t.tabId);
+          }
+          // Doc tab renames follow the manifest (docs have no weak titles).
+          for (const d of remoteDocs) {
+            const t = localDocTabs.find((x) => x.kind === d.kind && x.id === d.id);
+            if (t && d.title && t.title !== d.title) updateTab(t.tabId, { title: d.title });
+          }
+          seenRemoteDocs.current.set(space.id, docKeys(remoteDocs));
         }
       } catch (e) {
-        console.warn("[koden] remote session adoption failed:", e);
+        console.warn("[koden] remote space sync failed:", e);
+      } finally {
+        syncingSpaces.current.delete(space.id);
       }
-    })();
-  }, [spacesHydrated, activeSpaceId, spaces, adoptTerminalTab, updateTab]);
+    },
+    [adoptTerminalTab, adoptDocTab, updateTab, closeTab],
+  );
+
+  // First activation of a Space this run syncs immediately…
+  const reconciledSpaces = useRef(new Set<string>());
+  useEffect(() => {
+    if (!spacesHydrated || !activeSpaceId) return;
+    if (reconciledSpaces.current.has(activeSpaceId)) return;
+    reconciledSpaces.current.add(activeSpaceId);
+    void syncRemoteSpace(activeSpaceId);
+  }, [spacesHydrated, activeSpaceId, syncRemoteSpace]);
+
+  // …and while it stays active, keep converging (renames, new tabs, docs
+  // from the other device) without needing a restart.
+  useEffect(() => {
+    if (!spacesHydrated || !activeSpaceId) return;
+    const spaceId = activeSpaceId;
+    const timer = setInterval(() => {
+      if (document.hasFocus()) void syncRemoteSpace(spaceId);
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [spacesHydrated, activeSpaceId, syncRemoteSpace]);
+
+  // Push this device's docs (notes/tasks/boards) for the active ssh Space to
+  // the host, so the other device can render the same workspace. Gated on a
+  // successful pull (docsPulled) and sig-deduped like the tab manifest.
+  const notesDocs = useDocsStore((s) => s.notes);
+  const boardDocs = useDocsStore((s) => s.boards);
+  const taskDocs = useDocsStore((s) => s.tasks);
+  const lastDocsManifest = useRef("");
+  useEffect(() => {
+    const space = spaces.find((s) => s.id === activeSpaceId);
+    const tmuxKey = tmuxKeyFor(space);
+    if (!space || !tmuxKey) return;
+    const env = spaceEnv(space);
+    if (env.kind !== "ssh") return;
+    if (!docsPulled.current.has(space.id)) return;
+    const docs: RemoteDoc[] = tabs.flatMap((t): RemoteDoc[] => {
+      if (t.spaceId !== space.id) return [];
+      if (t.kind === "notes") {
+        const p = notesDocs[t.docId];
+        return [
+          { kind: "notes" as const, id: t.docId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 },
+        ];
+      }
+      if (t.kind === "board") {
+        const p = boardDocs[t.boardId];
+        return [
+          { kind: "board" as const, id: t.boardId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 },
+        ];
+      }
+      if (t.kind === "tasks") {
+        const p = taskDocs[t.listId];
+        return [
+          { kind: "tasks" as const, id: t.listId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 },
+        ];
+      }
+      return [];
+    });
+    const sig = `${tmuxKey}:${JSON.stringify(docs)}`;
+    if (sig === lastDocsManifest.current) return;
+    const timer = setTimeout(() => {
+      lastDocsManifest.current = sig;
+      // Union with the remote registry is unnecessary: by the time we push,
+      // every remote doc was adopted locally (pull-gated), so this list is
+      // the union.
+      void invoke("ssh_write_space_manifest", {
+        host: env.host,
+        spaceKey: `${tmuxKey}-docs`,
+        json: buildDocsManifest(docs),
+      }).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [tabs, spaces, activeSpaceId, notesDocs, boardDocs, taskDocs]);
 
   const spaceSwitcher = (
     <SpaceSwitcher

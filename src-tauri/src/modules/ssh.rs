@@ -525,7 +525,10 @@ pub async fn ssh_write_space_manifest(
     {
         return Err("bad space key".into());
     }
-    if json.len() > 16 * 1024 {
+    // 256 KB: the tab manifest is tiny, but the docs manifest (<key>-docs)
+    // carries note contents (2026-09-02). Still far below anything that
+    // could hurt the exec channel.
+    if json.len() > 256 * 1024 {
         return Err("manifest too large".into());
     }
     let cmd = format!(

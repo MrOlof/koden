@@ -50,15 +50,27 @@ export type AdoptablePane = {
   cwd?: string;
 };
 
+export type ManifestTitle = {
+  title: string;
+  /** True when the title is an explicit user rename. Weak titles (cwd
+   * basename fallbacks like "snorlax") name adopted tabs but must never be
+   * stamped onto another device as a rename (2026-09-02: three tabs at
+   * $HOME all propagated as "snorlax"). */
+  custom: boolean;
+};
+
 /** Titles by restore key from the host-side manifest json ("manifest is
- * truth for titles"). Tolerates absent/garbled input. */
-export function parseManifestTitles(json: string): Map<string, string> {
-  const out = new Map<string, string>();
+ * truth for titles"). Tolerates absent/garbled input and the pre-custom
+ * schema (entries without the flag read as weak). */
+export function parseManifestTitles(json: string): Map<string, ManifestTitle> {
+  const out = new Map<string, ManifestTitle>();
   try {
-    const m = JSON.parse(json) as { tabs?: { key?: unknown; title?: unknown }[] };
+    const m = JSON.parse(json) as {
+      tabs?: { key?: unknown; title?: unknown; custom?: unknown }[];
+    };
     for (const t of m.tabs ?? []) {
       if (typeof t.key === "string" && typeof t.title === "string" && t.title) {
-        out.set(t.key, t.title);
+        out.set(t.key, { title: t.title, custom: t.custom === true });
       }
     }
   } catch {
@@ -74,7 +86,7 @@ export function parseManifestTitles(json: string): Map<string, string> {
 export function planAdoption(
   windows: readonly RemoteWindow[],
   localKeys: ReadonlySet<string>,
-  titles?: ReadonlyMap<string, string>,
+  titles?: ReadonlyMap<string, ManifestTitle>,
 ): AdoptablePane[] {
   const out: AdoptablePane[] = [];
   for (const w of windows) {
@@ -82,7 +94,8 @@ export function planAdoption(
     if (!key || localKeys.has(key)) continue;
     out.push({
       key,
-      title: titles?.get(key) || w.command.trim() || "session",
+      // Any manifest title (weak included) beats the bare pane command.
+      title: titles?.get(key)?.title || w.command.trim() || "session",
       ...(w.path.startsWith("/") || w.path.startsWith("~")
         ? { cwd: w.path }
         : {}),
