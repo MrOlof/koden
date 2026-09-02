@@ -22,5 +22,22 @@ for ($i = 0; $i -lt 12 -and -not $runId; $i++) {
 }
 if (-not $runId) { throw "CI run for $tag never appeared" }
 gh run watch $runId --repo MrOlof/koden --exit-status
+
+# Guard against a half-release before undrafting (v0.11.5: a create-release
+# race put the Windows assets in an orphan draft; the published release had
+# no exe and a latest.json without a windows entry).
+$releaseCount = gh api repos/MrOlof/koden/releases --jq "[.[] | select(.tag_name == `"$tag`")] | length"
+if ($releaseCount -ne "1") { throw "$releaseCount releases exist for $tag - merge them before undrafting" }
+$assets = gh release view $tag --repo MrOlof/koden --json assets --jq "[.assets[].name] | join(`" `")"
+foreach ($must in @("x64-setup.exe", "x64-setup.exe.sig", ".AppImage", "latest.json")) {
+    if ($assets -notlike "*$must*") { throw "release $tag is missing $must - not undrafting" }
+}
+$tmp = Join-Path $env:TEMP "koden-latest-check"
+Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue; New-Item -ItemType Directory $tmp | Out-Null
+gh release download $tag --repo MrOlof/koden --pattern latest.json --dir $tmp
+if (-not (Select-String -Path (Join-Path $tmp "latest.json") -Pattern "windows-x86_64" -Quiet)) {
+    throw "latest.json for $tag has no windows-x86_64 entry - not undrafting"
+}
+
 gh release edit $tag --repo MrOlof/koden --draft=false
 Write-Host "released $tag - installs pick it up on their next update check"

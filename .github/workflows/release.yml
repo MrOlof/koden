@@ -7,7 +7,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Create THE draft release before the matrix fans out. Without this, both
+  # matrix legs "find or create" the release concurrently and can each create
+  # their own draft (v0.11.5: Windows assets landed in an orphan draft while
+  # the Linux-only release was published — repaired by hand). With the draft
+  # pre-created, tauri-action always finds it. `|| true` tolerates re-runs.
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" \
+            --draft --title "Koden ${GITHUB_REF_NAME}" \
+            --notes "See the assets to download and install. Auto-update is available once enabled in Settings." \
+            || true
+
   publish-tauri:
+    needs: create-release
+    if: always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     permissions:
       contents: write
     strategy:
