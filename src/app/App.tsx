@@ -2506,6 +2506,9 @@ export default function App() {
    * run — pushing before the first read would wipe the other device's
    * registry in a first-connect race. */
   const docsPulled = useRef(new Set<string>());
+  /** Bumped when a space's docs manifest is first pulled — wakes the push
+   * effect, which cannot observe the ref. */
+  const [docsPullTick, setDocsPullTick] = useState(0);
   const syncRemoteSpace = useCallback(
     async (spaceId: string) => {
       const space = useSpaces.getState().spaces.find((s) => s.id === spaceId);
@@ -2568,7 +2571,14 @@ export default function App() {
         }
         // Docs: remote truth → local tabs + payloads (whole-doc LWW).
         const remoteDocs = parseDocsManifest(docsJson);
-        docsPulled.current.add(space.id);
+        if (!docsPulled.current.has(space.id)) {
+          docsPulled.current.add(space.id);
+          // The push effect gates on this ref, and a ref flip re-runs no
+          // effect — without this nudge the first push waits for an
+          // unrelated change and the other device sees no docs
+          // (v0.11.4 field bug: note pane never appeared on the laptop).
+          setDocsPullTick((n) => n + 1);
+        }
         if (remoteDocs) {
           // tabId -1 marks a docs-backed PANE: it dedupes creation (so the
           // origin device doesn't grow a duplicate tab for its own split)
@@ -2704,7 +2714,7 @@ export default function App() {
       }).catch(() => {});
     }, 2500);
     return () => clearTimeout(timer);
-  }, [tabs, spaces, activeSpaceId, notesDocs, boardDocs, taskDocs, paneTitles]);
+  }, [tabs, spaces, activeSpaceId, notesDocs, boardDocs, taskDocs, paneTitles, docsPullTick]);
 
   const spaceSwitcher = (
     <SpaceSwitcher
