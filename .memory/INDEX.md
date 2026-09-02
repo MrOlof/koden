@@ -446,3 +446,12 @@ focused), and notes/tasks/boards sync via `~/.koden/spaces/<key>-docs.json`
 (whole-doc LWW, close propagates, push pull-gated against connect races).
 New: `remoteDocs.ts`(+tests), `adoptDocTab`, `applyRemote*` in docsStore;
 manifest write cap 16 KB→256 KB. vitest 659, clippy clean.
+
+**2026-09-02 (later) — v0.11.4: pane-notes travel + blank tmux fill.**
+Dogfood round 2: the "weird characters" on the laptop = tmux fill pattern
+when the other device drives the window size → `fill-character " "` (set
+live on ai-server + baked into the connect script); the desktop's note was
+a SPLIT pane, not a note tab → `paneDocLeaves` walks terminal pane trees
+and pane-notes/tasks join the docs manifest (arrive as tabs on the other
+device; tabId -1 sentinel = dedupe-create but never close/retitle from
+the manifest). vitest 659, shell_ssh 17/17.
