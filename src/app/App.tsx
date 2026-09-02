@@ -132,6 +132,28 @@ import {
   type RemoteDocKind,
 } from "@/modules/spaces/lib/remoteDocs";
 import { useDocsStore } from "@/modules/workspace-docs/store/docsStore";
+import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
+
+/** Docs-backed panes (a note/tasks SPLIT inside a terminal tab) of a pane
+ * tree — they join the remote docs manifest like doc tabs do, so a note
+ * beside a terminal follows you to the other device (as a tab there;
+ * split layout stays per-device, same philosophy as terminal splits). */
+function paneDocLeaves(
+  tree: PaneNode,
+): { kind: "notes" | "tasks"; id: string; leafId: number }[] {
+  if (isLeaf(tree)) {
+    return tree.content && tree.docId
+      ? [
+          {
+            kind: tree.content === "note" ? "notes" : "tasks",
+            id: tree.docId,
+            leafId: tree.id,
+          },
+        ]
+      : [];
+  }
+  return tree.children.flatMap(paneDocLeaves);
+}
 import {
   leafRestoreKey,
   peekLeafRestoreKey,
@@ -2548,6 +2570,9 @@ export default function App() {
         const remoteDocs = parseDocsManifest(docsJson);
         docsPulled.current.add(space.id);
         if (remoteDocs) {
+          // tabId -1 marks a docs-backed PANE: it dedupes creation (so the
+          // origin device doesn't grow a duplicate tab for its own split)
+          // but is never closed or retitled from the manifest.
           const localDocTabs: { kind: RemoteDocKind; id: string; tabId: number; title: string }[] =
             [];
           for (const t of tabsRef.current) {
@@ -2558,6 +2583,9 @@ export default function App() {
               localDocTabs.push({ kind: "board", id: t.boardId, tabId: t.id, title: t.title });
             else if (t.kind === "tasks")
               localDocTabs.push({ kind: "tasks", id: t.listId, tabId: t.id, title: t.title });
+            else if (t.kind === "terminal")
+              for (const p of paneDocLeaves(t.paneTree))
+                localDocTabs.push({ kind: p.kind, id: p.id, tabId: -1, title: "" });
           }
           const ds = useDocsStore.getState();
           const plan = planDocsApply(
@@ -2584,12 +2612,13 @@ export default function App() {
           }
           for (const c of plan.close) {
             const t = localDocTabs.find((x) => x.kind === c.kind && x.id === c.id);
-            if (t) closeTab(t.tabId);
+            if (t && t.tabId >= 0) closeTab(t.tabId);
           }
           // Doc tab renames follow the manifest (docs have no weak titles).
           for (const d of remoteDocs) {
             const t = localDocTabs.find((x) => x.kind === d.kind && x.id === d.id);
-            if (t && d.title && t.title !== d.title) updateTab(t.tabId, { title: d.title });
+            if (t && t.tabId >= 0 && d.title && t.title !== d.title)
+              updateTab(t.tabId, { title: d.title });
           }
           seenRemoteDocs.current.set(space.id, docKeys(remoteDocs));
         }
@@ -2628,6 +2657,7 @@ export default function App() {
   const notesDocs = useDocsStore((s) => s.notes);
   const boardDocs = useDocsStore((s) => s.boards);
   const taskDocs = useDocsStore((s) => s.tasks);
+  const paneTitles = usePaneTitleStore((s) => s.titles);
   const lastDocsManifest = useRef("");
   useEffect(() => {
     const space = spaces.find((s) => s.id === activeSpaceId);
@@ -2636,28 +2666,30 @@ export default function App() {
     const env = spaceEnv(space);
     if (env.kind !== "ssh") return;
     if (!docsPulled.current.has(space.id)) return;
-    const docs: RemoteDoc[] = tabs.flatMap((t): RemoteDoc[] => {
-      if (t.spaceId !== space.id) return [];
+    const byKey = new Map<string, RemoteDoc>();
+    for (const t of tabs) {
+      if (t.spaceId !== space.id) continue;
       if (t.kind === "notes") {
         const p = notesDocs[t.docId];
-        return [
-          { kind: "notes" as const, id: t.docId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 },
-        ];
-      }
-      if (t.kind === "board") {
+        byKey.set(`notes:${t.docId}`, { kind: "notes", id: t.docId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 });
+      } else if (t.kind === "board") {
         const p = boardDocs[t.boardId];
-        return [
-          { kind: "board" as const, id: t.boardId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 },
-        ];
-      }
-      if (t.kind === "tasks") {
+        byKey.set(`board:${t.boardId}`, { kind: "board", id: t.boardId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 });
+      } else if (t.kind === "tasks") {
         const p = taskDocs[t.listId];
-        return [
-          { kind: "tasks" as const, id: t.listId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 },
-        ];
+        byKey.set(`tasks:${t.listId}`, { kind: "tasks", id: t.listId, title: t.title, payload: p, updatedAt: p?.updatedAt ?? 0 });
+      } else if (t.kind === "terminal") {
+        // Note/tasks SPLITS inside terminal tabs travel too.
+        for (const pd of paneDocLeaves(t.paneTree)) {
+          if (byKey.has(`${pd.kind}:${pd.id}`)) continue;
+          const p = pd.kind === "notes" ? notesDocs[pd.id] : taskDocs[pd.id];
+          const title =
+            paneTitles[pd.leafId]?.label || (pd.kind === "notes" ? "Notes" : "Tasks");
+          byKey.set(`${pd.kind}:${pd.id}`, { kind: pd.kind, id: pd.id, title, payload: p, updatedAt: p?.updatedAt ?? 0 });
+        }
       }
-      return [];
-    });
+    }
+    const docs: RemoteDoc[] = [...byKey.values()];
     const sig = `${tmuxKey}:${JSON.stringify(docs)}`;
     if (sig === lastDocsManifest.current) return;
     const timer = setTimeout(() => {
@@ -2672,7 +2704,7 @@ export default function App() {
       }).catch(() => {});
     }, 2500);
     return () => clearTimeout(timer);
-  }, [tabs, spaces, activeSpaceId, notesDocs, boardDocs, taskDocs]);
+  }, [tabs, spaces, activeSpaceId, notesDocs, boardDocs, taskDocs, paneTitles]);
 
   const spaceSwitcher = (
     <SpaceSwitcher

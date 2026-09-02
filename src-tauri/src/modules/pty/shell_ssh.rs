@@ -241,6 +241,7 @@ pub fn remote_command(
                  tmux has-session -t ={name} 2>/dev/null || tmux new-session -d -s {name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
                  tmux list-windows -t ={name} -F \"#W\" 2>/dev/null | grep -qx -- {win} || tmux new-window -d -t ={name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
                  tmux set-option -t {name} status off 2>/dev/null || true; \
+                 tmux set-option -g fill-character \" \" 2>/dev/null || true; \
                  tmux set-option -w -t ={name}:={win} window-size latest 2>/dev/null || true; \
                  tmux set-option -w -t ={name}:={win} aggressive-resize on 2>/dev/null || true; \
                  exec tmux new-session -t ={name} -s {name}-$$ \\; set-option destroy-unattached on \\; set-option status off \\; select-window -t :={win}; \
