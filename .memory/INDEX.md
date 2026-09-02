@@ -455,3 +455,14 @@ a SPLIT pane, not a note tab → `paneDocLeaves` walks terminal pane trees
 and pane-notes/tasks join the docs manifest (arrive as tabs on the other
 device; tabId -1 sentinel = dedupe-create but never close/retitle from
 the manifest). vitest 659, shell_ssh 17/17.
+
+**2026-09-02 (evening) — ADR-023 drafted: host-authoritative workspace
+state.** Kosta called the architecture question after the replication-layer
+bug day ("not a true 1:1 — look over architecture instead of update and
+hope"; field case: same tab = 1 terminal on desktop, 2 + note on laptop —
+structure is per-device state nothing owns). Decision: ssh-Space structure
+(tabs, pane trees, order, docs) moves to `~/.koden/spaces/<key>/` on the
+host, devices render/write-through; manifests v0.11.3–5 become the
+migration bridge then get DELETED. Sequenced AFTER feat/workspace-sync
+identity fold. Control plane (hub → devices) = M3 in KODEN-REMOTE.md. No
+further investment in the replication layer beyond critical bugs.
