@@ -53,6 +53,16 @@ end
 # Wrapped so `fish -C __koden_install_prompt` can re-run it AFTER config.fish,
 # where a framework prompt (starship etc.) would otherwise override fish_prompt
 # and drop our markers.
+# Inside tmux (Koden ssh Spaces) an OSC never reaches the client unless it
+# rides a DCS passthrough: ESC P tmux; <sequence, every ESC doubled> ESC \.
+function __koden_osc
+    if set -q TMUX
+        printf '\ePtmux;%s\e\\' (string replace -a -- \e \e\e -- "$argv[1]")
+    else
+        printf '%s' "$argv[1]"
+    end
+end
+
 function __koden_install_prompt
     __koden_capture_user_prompt
     if set -q KODEN_BLOCKS
@@ -63,9 +73,9 @@ function __koden_install_prompt
     end
     function fish_prompt
         set -l __koden_status $status
-        printf '\e]133;D;%d\e\\' $__koden_status
-        printf '\e]7;file://%s%s\e\\' "$__KODEN_HOST" (__koden_urlencode_path "$PWD")
-        printf '\e]133;A\e\\'
+        __koden_osc (printf '\e]133;D;%d\e\\' $__koden_status)
+        __koden_osc (printf '\e]7;file://%s%s\e\\' "$__KODEN_HOST" (__koden_urlencode_path "$PWD"))
+        __koden_osc (printf '\e]133;A\e\\')
         # Block mode: host renders its own input bar, so suppress the shell prompt
         # (B marker only) and reserve header/gap rows, mirroring zsh.
         if set -q KODEN_BLOCKS
@@ -74,7 +84,7 @@ function __koden_install_prompt
             else
                 printf '\n'
             end
-            printf '\e]133;B\e\\'
+            __koden_osc (printf '\e]133;B\e\\')
             return
         end
         __koden_restore_status $__koden_status
@@ -83,7 +93,7 @@ function __koden_install_prompt
         else
             printf '%s > ' (prompt_pwd)
         end
-        printf '\e]133;B\e\\'
+        __koden_osc (printf '\e]133;B\e\\')
     end
 end
 __koden_install_prompt
@@ -91,7 +101,7 @@ __koden_install_prompt
 function __koden_preexec --on-event fish_preexec
     set -g __koden_block_seen 1
     set -l cmd (string replace -ra '[\x00-\x1f\x7f]' ' ' -- "$argv")
-    printf '\e]133;C;%s\e\\' (string sub -l 256 -- "$cmd")
+    __koden_osc (printf '\e]133;C;%s\e\\' (string sub -l 256 -- "$cmd"))
 end
 
 # `koden` CLI (modules/cli): defined only where Koden planted KODEN_EXE, so a

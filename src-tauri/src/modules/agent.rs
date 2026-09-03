@@ -26,11 +26,48 @@ const OWNED_MARKERS: [&str; 6] = [
     HOOK_ARTIFACT_BASENAME,
 ];
 
+// The OSC 777 status marker, chosen at run time by the hook's shell. Inside
+// tmux (a Koden ssh Space runs every terminal in a tmux window) a raw OSC
+// never reaches the client: tmux consumes unknown OSC. Wrapped in a DCS
+// passthrough (`ESC P tmux;` + the sequence with every ESC doubled + `ESC \`)
+// tmux forwards it verbatim once `allow-passthrough` is on (shell_ssh.rs
+// sets it). Every byte is spelled as a JSON escape (`\u001b`, and `\u005c`
+// for the final backslash) so the hook text carries no literal backslash:
+// Windows shells and argv quoting eat those (the test below caught it).
+fn osc_notify_pick(event: &str) -> String {
+    format!(
+        r#"s='\u001b]777;notify;Koden;{event}\u0007'; [ -n "$TMUX" ] && s='\u001bPtmux;\u001b\u001b]777;notify;Koden;{event}\u0007\u001b\u005c'"#
+    )
+}
+
 // Gated on KODEN_TERMINAL; no-op outside Koden. Returns the sequence via
 // `terminalSequence` because hooks lost /dev/tty access in v2.1.139.
 fn hook_cmd(event: &str) -> String {
+    let pick = osc_notify_pick(event);
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && printf '%s' '{{"terminalSequence":"\u001b]777;notify;Koden;{event}\u0007"}}' || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && {{ {pick}; printf '{{"terminalSequence":"%s"}}' "$s"; }} || true"#
+    )
+}
+
+// Remote pane events (M2.8): inside a tmux pane on an ssh host, append one
+// JSONL line per lifecycle event to ~/.koden/pane-events.jsonl, which Koden
+// tails over ssh and joins to the tab through the pane -> window-name ->
+// restore-key chain. Its OWN ownership class (own hook group, own stdin): the
+// status/turn command already consumes stdin for the bus, and a foreign
+// command appended inside an owned group is stripped on every re-install,
+// which is exactly how these hooks vanished from HQ on 2026-09-03.
+const PANE_EVENTS_MARKER: &str = "pane-events.jsonl";
+
+const PANE_EVENT_HOOKS: [(&str, &str); 4] = [
+    ("UserPromptSubmit", "user-prompt"),
+    ("Notification", "notification"),
+    ("Stop", "stop"),
+    ("SessionStart", "session-start"),
+];
+
+fn pane_event_hook_cmd(kind: &str) -> String {
+    format!(
+        r#"[ -n "$TMUX_PANE" ] && {{ mkdir -p "$HOME/.koden"; sid=$(grep -o '"session_id":"[^"]*"' | head -n1 | cut -d'"' -f4); printf '{{"pane":"%s","sessionId":"%s","event":"{kind}","ts":%s}}\n' "$TMUX_PANE" "$sid" "$(date +%s)" >> "$HOME/.koden/{PANE_EVENTS_MARKER}"; }} >/dev/null 2>&1; true"#
     )
 }
 
@@ -83,8 +120,9 @@ fn bus_cat_cmd() -> String {
 // authoritative turn channel; the OSC marker is best-effort status only.
 fn user_turn_hook_cmd() -> String {
     let bus = bus_path_str();
+    let pick = osc_notify_pick("working");
     format!(
-        r#"[ -n "$KODEN_TERMINAL" ] && {{ mkdir -p "$(dirname "{bus}")" 2>/dev/null; p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; printf '%s' '{{"terminalSequence":"\u001b]777;notify;Koden;working\u0007"}}'; }} || true"#
+        r#"[ -n "$KODEN_TERMINAL" ] && {{ mkdir -p "$(dirname "{bus}")" 2>/dev/null; p="$(cat | tr -d '\r\n')"; [ -z "$p" ] && p=null; printf '{{"cmd":"user-turn","id":"%s","data":%s}}\n' "$KODEN_SESSION" "$p" >> "{bus}"; {pick}; printf '{{"terminalSequence":"%s"}}' "$s"; }} || true"#
     )
 }
 
@@ -137,6 +175,12 @@ fn is_ours(group: &Value) -> bool {
 // versa) — one event could never carry both. Each class replaces only itself.
 fn is_gist_group(group: &Value) -> bool {
     group_has_marker(group, &[HOOK_ARTIFACT_BASENAME])
+}
+
+// The M2.8 pane-events class: replaces only itself, survives every other
+// re-install. (Not in OWNED_MARKERS on purpose: `is_ours` must not see it.)
+fn is_pane_events_group(group: &Value) -> bool {
+    group_has_marker(group, &[PANE_EVENTS_MARKER])
 }
 
 // A group with no hooks is inert cruft (e.g. left behind when someone deletes
@@ -226,6 +270,18 @@ fn merge_hooks(mut root: Value) -> Value {
     // class, so it coexists with (and is replaced independently of) the
     // status/turn group above.
     add_command_group_where(hooks, "UserPromptSubmit", None, &gist_inject_hook_cmd(), is_gist_group);
+    // M2.8 remote pane events: one group per event, own class. Legacy copies
+    // that were hand-appended inside the status groups are stripped with
+    // those groups above and come back here, as their own groups.
+    for (event, kind) in PANE_EVENT_HOOKS {
+        add_command_group_where(
+            hooks,
+            event,
+            None,
+            &pane_event_hook_cmd(kind),
+            is_pane_events_group,
+        );
+    }
     root
 }
 
@@ -286,6 +342,11 @@ pub fn agent_claude_hooks_status() -> bool {
         .iter()
         .all(|(_, m)| content.contains(&format!("notify;Koden;{m}")))
         && content.contains(HOOK_ARTIFACT_BASENAME)
+        // Pre-M2.8-generator installs (hand-added pane-events, or none, or the
+        // unwrapped OSC) read "not installed" until the startup auto-install
+        // rewrites them.
+        && content.contains(PANE_EVENTS_MARKER)
+        && content.contains("Ptmux;")
 }
 
 #[cfg(test)]
@@ -306,11 +367,17 @@ mod tests {
     #[test]
     fn adds_all_event_hooks_to_empty_config() {
         let out = merge_hooks(json!({}));
-        // UserPromptSubmit carries BOTH owned groups: status/turn-capture + the
-        // ADR-019 gist-injection group.
-        assert_eq!(hook_count(&out, "UserPromptSubmit"), 2);
-        assert_eq!(hook_count(&out, "Notification"), 1);
-        assert_eq!(hook_count(&out, "Stop"), 1);
+        // UserPromptSubmit carries THREE owned groups: status/turn-capture, the
+        // ADR-019 gist-injection group, and the M2.8 pane-events group.
+        assert_eq!(hook_count(&out, "UserPromptSubmit"), 3);
+        assert_eq!(hook_count(&out, "Notification"), 2);
+        assert_eq!(hook_count(&out, "Stop"), 2);
+        assert_eq!(hook_count(&out, "SessionStart"), 1);
+        assert!(command(&out, "SessionStart", 0).contains("session-start"));
+        assert!(command(&out, "Notification", 1).contains(PANE_EVENTS_MARKER));
+        // Inside tmux the OSC 777 rides a DCS passthrough; outside it is raw.
+        assert!(command(&out, "Notification", 0).contains("Ptmux;"));
+        assert!(command(&out, "Notification", 0).contains(r#"[ -n "$TMUX" ]"#));
         assert!(command(&out, "Notification", 0).contains("notify;Koden;attention"));
         assert!(command(&out, "Stop", 0).contains("notify;Koden;finished"));
         assert!(command(&out, "UserPromptSubmit", 0).contains("notify;Koden;working"));
@@ -322,13 +389,73 @@ mod tests {
         assert!(!command(&out, "Stop", 0).contains("/dev/tty"));
     }
 
+    /// 2026-09-03: the host's pane-events hooks had been appended inside the
+    /// Koden-owned Notification/Stop groups; every Koden launch on HQ replaced
+    /// those groups and the remote status pipeline silently lost its source.
+    /// A re-install must leave exactly one pane-events group per event, never
+    /// nested in a status group.
+    #[test]
+    fn pane_events_survive_reinstall_even_when_legacy_copies_sit_in_owned_groups() {
+        let legacy = json!({
+            "hooks": {
+                "Notification": [{
+                    "hooks": [
+                        { "type": "command", "command": hook_cmd("attention") },
+                        { "type": "command", "command": pane_event_hook_cmd("notification") }
+                    ]
+                }],
+                "Stop": [{
+                    "hooks": [
+                        { "type": "command", "command": hook_cmd("finished") },
+                        { "type": "command", "command": pane_event_hook_cmd("stop") }
+                    ]
+                }]
+            }
+        });
+        let out = merge_hooks(legacy);
+        for (event, kind) in PANE_EVENT_HOOKS {
+            let groups = out["hooks"][event].as_array().unwrap();
+            let pane_groups: Vec<_> = groups.iter().filter(|g| is_pane_events_group(g)).collect();
+            assert_eq!(pane_groups.len(), 1, "{event}");
+            assert!(pane_groups[0]["hooks"][0]["command"].as_str().unwrap().contains(kind));
+            assert!(!groups.iter().any(|g| is_ours(g) && is_pane_events_group(g)));
+        }
+    }
+
+    /// The hook must hand Claude Code valid JSON in both worlds. Run the shell
+    /// text through sh (present on every CI runner and dev box) with TMUX
+    /// unset and set, and parse what it prints.
+    #[test]
+    fn hook_cmd_prints_valid_json_raw_and_tmux_wrapped() {
+        for (tmux, wrapped) in [(false, false), (true, true)] {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(hook_cmd("attention")).env("KODEN_TERMINAL", "1");
+            if tmux {
+                c.env("TMUX", "/tmp/tmux-1/default,1,0");
+            } else {
+                c.env_remove("TMUX");
+            }
+            let Ok(out) = c.output() else { return }; // no sh here: skip
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let v: Value = serde_json::from_str(&text).expect(&text);
+            let seq = v["terminalSequence"].as_str().unwrap();
+            assert_eq!(seq.starts_with("\u{1b}Ptmux;"), wrapped, "{text}");
+            assert!(seq.contains("]777;notify;Koden;attention\u{7}"));
+            if wrapped {
+                assert!(seq.ends_with("\u{1b}\\"));
+                assert!(seq.contains("\u{1b}\u{1b}]777;"));
+            }
+        }
+    }
+
     #[test]
     fn is_idempotent() {
         let once = merge_hooks(json!({}));
         let twice = merge_hooks(once.clone());
         assert_eq!(once, twice);
-        assert_eq!(hook_count(&twice, "UserPromptSubmit"), 2);
-        assert_eq!(hook_count(&twice, "Notification"), 1);
+        assert_eq!(hook_count(&twice, "UserPromptSubmit"), 3);
+        assert_eq!(hook_count(&twice, "Notification"), 2);
+        assert_eq!(hook_count(&twice, "SessionStart"), 1);
         assert_eq!(hook_count(&twice, "PreToolUse"), 1);
         assert_eq!(hook_count(&twice, "SubagentStop"), 1);
         assert_eq!(hook_count(&twice, "PostToolUse"), 1);
@@ -366,7 +493,7 @@ mod tests {
             }
         });
         let migrated = merge_hooks(prev);
-        assert_eq!(hook_count(&migrated, "UserPromptSubmit"), 2);
+        assert_eq!(hook_count(&migrated, "UserPromptSubmit"), 3);
         assert!(command(&migrated, "UserPromptSubmit", 0).contains("user-turn"));
         assert!(command(&migrated, "UserPromptSubmit", 1).contains(HOOK_ARTIFACT_BASENAME));
         // Re-install over BOTH groups is a fixed point (idempotent bytes).
@@ -383,7 +510,7 @@ mod tests {
             }
         });
         let upgraded = merge_hooks(stale);
-        assert_eq!(hook_count(&upgraded, "UserPromptSubmit"), 2);
+        assert_eq!(hook_count(&upgraded, "UserPromptSubmit"), 3);
         assert_eq!(
             command(&upgraded, "UserPromptSubmit", 1),
             gist_inject_hook_cmd(),
@@ -425,7 +552,7 @@ mod tests {
             }
         });
         let out = merge_hooks(legacy);
-        assert_eq!(hook_count(&out, "Notification"), 1);
+        assert_eq!(hook_count(&out, "Notification"), 2);
         assert!(command(&out, "Notification", 0).contains("terminalSequence"));
         assert!(!command(&out, "Notification", 0).contains("/dev/tty"));
     }
@@ -447,7 +574,7 @@ mod tests {
         let out = merge_hooks(legacy);
         // Both dead Terax groups are gone; what remains is the current pair
         // (status/turn + ADR-019 gist injection).
-        assert_eq!(hook_count(&out, "UserPromptSubmit"), 2);
+        assert_eq!(hook_count(&out, "UserPromptSubmit"), 3);
         let cmd = command(&out, "UserPromptSubmit", 0);
         assert!(cmd.contains("notify;Koden;working"));
         assert!(cmd.contains("user-turn"));
@@ -467,14 +594,14 @@ mod tests {
         });
         let out = merge_hooks(input);
         assert_eq!(out["permissions"]["allow"][0], "Bash");
-        assert_eq!(hook_count(&out, "Notification"), 2);
+        assert_eq!(hook_count(&out, "Notification"), 3);
         assert_eq!(command(&out, "Notification", 0), "say hi");
     }
 
     #[test]
     fn replaces_non_object_root() {
         let out = merge_hooks(json!("garbage"));
-        assert_eq!(hook_count(&out, "Notification"), 1);
+        assert_eq!(hook_count(&out, "Notification"), 2);
     }
 
     #[test]
@@ -488,7 +615,7 @@ mod tests {
             }
         });
         let out = merge_hooks(input);
-        assert_eq!(hook_count(&out, "Notification"), 1);
+        assert_eq!(hook_count(&out, "Notification"), 2);
         assert!(command(&out, "Notification", 0).contains("notify;Koden;attention"));
     }
 

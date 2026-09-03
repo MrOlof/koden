@@ -21,14 +21,10 @@ describe("parsePaneEventLine", () => {
     expect(parsePaneEventLine("[1,2]")).toBeNull();
     expect(parsePaneEventLine('"just a string"')).toBeNull();
     expect(
-      parsePaneEventLine(
-        '{"pane":"51","sessionId":"s","event":"stop","ts":1}',
-      ),
+      parsePaneEventLine('{"pane":"51","sessionId":"s","event":"stop","ts":1}'),
     ).toBeNull();
     expect(
-      parsePaneEventLine(
-        '{"pane":"%x","sessionId":"s","event":"stop","ts":1}',
-      ),
+      parsePaneEventLine('{"pane":"%x","sessionId":"s","event":"stop","ts":1}'),
     ).toBeNull();
     expect(
       parsePaneEventLine(
@@ -54,16 +50,19 @@ describe("paneEventStep", () => {
       tab: "working",
       midTurn: true,
     });
-    expect(paneEventStep("stop", true)).toEqual({ tab: "done", midTurn: false });
+    expect(paneEventStep("stop", true)).toEqual({
+      tab: "done",
+      midTurn: false,
+    });
   });
 
-  it("notification is orange only mid-turn", () => {
+  it("notification is orange whenever it arrives, like the local path", () => {
     expect(paneEventStep("notification", true)).toEqual({
       tab: "waiting",
       midTurn: true,
     });
     expect(paneEventStep("notification", false)).toEqual({
-      tab: null,
+      tab: "waiting",
       midTurn: false,
     });
   });

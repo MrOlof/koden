@@ -61,11 +61,14 @@ export type PaneEventStep = {
   midTurn: boolean;
 };
 
-/** The status decision, mirroring AgentBusBridge's local semantics: a prompt
+/** The status decision, matching the LOCAL semantics exactly: a prompt
  * starts a working turn, a stop finishes it green, and a notification is
- * orange "needs you" only while mid-turn (an idle "waiting for input" ping
- * must not flip a finished agent back to orange). session-start only resets
- * the turn flag: a fresh session has said nothing worth a pill yet. */
+ * orange "needs you" whenever it arrives, mid-turn or not, because that is
+ * what the local OSC 777 path does (App.tsx escalates every attention
+ * marker); 66 of 70 notifications on the host were idle "waiting for your
+ * input" pings, so the old mid-turn gate was why remote almost never showed
+ * amber while local always did (2026-09-03). session-start resets the turn
+ * flag: a fresh session has said nothing worth a pill yet. */
 export function paneEventStep(
   kind: PaneEventKind,
   midTurn: boolean,
@@ -76,7 +79,7 @@ export function paneEventStep(
     case "stop":
       return { tab: "done", midTurn: false };
     case "notification":
-      return midTurn ? { tab: "waiting", midTurn } : { tab: null, midTurn };
+      return { tab: "waiting", midTurn };
     case "session-start":
       return { tab: null, midTurn: false };
   }

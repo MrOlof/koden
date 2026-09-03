@@ -35,23 +35,45 @@ if [ -z "$__KODEN_HOOKS_LOADED" ]; then
     done
   }
 
+  # Inside tmux (Koden ssh Spaces) an OSC never reaches the client unless it
+  # rides a DCS passthrough: ESC P tmux; <sequence, every ESC doubled> ESC \.
+  # Koden turns allow-passthrough on when it creates the session.
+  _koden_osc() {
+    if [ -n "$TMUX" ]; then
+      local s="$1"
+      s="${s//$'\e'/$'\e\e'}"
+      printf '\ePtmux;%s\e\\' "$s"
+    else
+      printf '%s' "$1"
+    fi
+  }
+  # Prompt markers are PS1/PS0 escapes, expanded by bash at prompt time, so
+  # the tmux form is spelled in that syntax too (\e -> ESC, \\ -> backslash).
+  if [ -n "$TMUX" ]; then
+    _koden_ps_b='\[\ePtmux;\e\e]133;B\e\e\\\e\\\]'
+    _koden_ps_c='\[\ePtmux;\e\e]133;C\e\e\\\e\\\]'
+  else
+    _koden_ps_b='\[\e]133;B\e\\\]'
+    _koden_ps_c='\[\e]133;C\e\\\]'
+  fi
+
   _koden_precmd() {
     local _koden_ret=$?
-    printf '\e]133;D;%s\e\\' "$_koden_ret"
-    printf '\e]7;file://%s%s\e\\' "${HOSTNAME:-$(uname -n 2>/dev/null)}" "$(_koden_urlencode "$PWD")"
+    _koden_osc "$(printf '\e]133;D;%s\e\\' "$_koden_ret")"
+    _koden_osc "$(printf '\e]7;file://%s%s\e\\' "${HOSTNAME:-$(uname -n 2>/dev/null)}" "$(_koden_urlencode "$PWD")")"
     if [ -n "$KODEN_BLOCKS" ]; then
       # Host renders its own input bar: suppress the shell prompt (B marker
       # only) and reserve header/gap rows, mirroring the zsh integration.
       if [ -n "$_koden_block_seen" ]; then
-        PS1='\n\n\[\e]133;B\e\\\]'
+        PS1='\n\n'"$_koden_ps_b"
       else
-        PS1='\n\[\e]133;B\e\\\]'
+        PS1='\n'"$_koden_ps_b"
       fi
     elif [ -z "$__KODEN_PS1_INJECTED" ]; then
-      PS1='\[\e]133;B\e\\\]'"$PS1"
+      PS1="$_koden_ps_b$PS1"
       __KODEN_PS1_INJECTED=1
     fi
-    printf '\e]133;A\e\\'
+    _koden_osc "$(printf '\e]133;A\e\\')"
   }
 
   case ":${PROMPT_COMMAND:-}:" in
@@ -67,9 +89,9 @@ if [ -z "$__KODEN_HOOKS_LOADED" ]; then
     if [ -n "$KODEN_BLOCKS" ]; then
       # PS0 only expands, never executes: the arithmetic inside the array
       # subscript sets the seen flag while the unset array expands to nothing.
-      PS0='\[\e]133;C\e\\\]${_koden_noop[$((_koden_block_seen=1))]}'"${PS0:-}"
+      PS0="$_koden_ps_c"'${_koden_noop[$((_koden_block_seen=1))]}'"${PS0:-}"
     else
-      PS0='\[\e]133;C\e\\\]'"${PS0:-}"
+      PS0="$_koden_ps_c${PS0:-}"
     fi
   fi
 

@@ -526,3 +526,16 @@ run: derived fields ignored, key-order independent compare, per-field
 clocks (structure + name), live structural adoption (a peer's split
 appears beside your running terminal, additive only, Undo toast). 114
 tests, 400 seeds. Ledger + rescue steps in `plans/one-hub-EXECUTION_PLAN.md`.
+
+**2026-09-03 (afternoon), remote pane parity: ADR-026, v0.12.3.** Kosta:
+tab/agent activity indicators dead in ssh Spaces. Scout + host probe: tmux
+had allow-passthrough off and Koden never set it, so OSC 133/7/777 never
+left the host; pane-events fed only the tab pill. Found the M2.8 pane-events
+hooks were hand-added inside Koden-owned groups and Koden's hook generator
+deleted them on every launch (HQ lost them at the 0.12.2 restart, sync would
+have published the loss). Fix: generator-owned pane-events groups (own
+class), hooks and all three shell bundles DCS-wrap their OSC inside tmux,
+Koden sets allow-passthrough all, remote notification rule = local. Also
+this afternoon: vertical tab rail drag-and-drop (dnd-kit, `fa28199`),
+Codex CLI + claudex-loop skills on ai-server and HQ. Director bus still
+blind for remote panes (KODEN_SESSION does not cross ssh): next.
