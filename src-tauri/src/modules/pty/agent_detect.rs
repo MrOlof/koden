@@ -170,8 +170,7 @@ impl AgentDetector {
                 }
                 b"attention" => {
                     self.ensure_armed(emit);
-                    self.status = Status::Waiting;
-                    emit(Transition::Attention);
+                    self.set_waiting(emit);
                 }
                 b"finished" => {
                     self.ensure_armed(emit);
@@ -223,6 +222,19 @@ impl AgentDetector {
 
     fn generic_attention<F: FnMut(Transition)>(&mut self, emit: &mut F) {
         if self.armed {
+            self.set_waiting(emit);
+        }
+    }
+
+    /// Attention is a STATE, not a pulse: an agent already waiting for the
+    /// user that says so again (Claude Code re-sends its idle notification on
+    /// the ghostty/kitty channels, and our own hook marker can arrive beside
+    /// it) must not raise a second toast. `working` resets the state, so the
+    /// next real turn notifies again. 2026-09-03: nine idle remote sessions
+    /// spammed the desktop the moment tmux passthrough let their sequences
+    /// through.
+    fn set_waiting<F: FnMut(Transition)>(&mut self, emit: &mut F) {
+        if self.status != Status::Waiting {
             self.status = Status::Waiting;
             emit(Transition::Attention);
         }
@@ -326,11 +338,33 @@ mod tests {
     }
 
     #[test]
+    fn repeated_attention_while_waiting_is_one_signal() {
+        let mut d = AgentDetector::new();
+        assert_eq!(
+            run(&mut d, &osc("777;notify;Koden;attention")),
+            vec![Transition::Started { agent: "claude".into() }, Transition::Attention]
+        );
+        // Claude Code's own ghostty/kitty notification and our marker again.
+        assert!(run(&mut d, &osc("777;notify;Claude Code;Claude is waiting for your input")).is_empty());
+        assert!(run(&mut d, &osc("9;Claude is waiting for your input")).is_empty());
+        assert!(run(&mut d, &osc("777;notify;Koden;attention")).is_empty());
+        // A new turn resets it: the next attention notifies again.
+        assert_eq!(run(&mut d, &osc("777;notify;Koden;working")), vec![Transition::Working]);
+        assert_eq!(run(&mut d, &osc("777;notify;Koden;attention")), vec![Transition::Attention]);
+        // Finished puts it in Waiting too; an idle ping after that is silent.
+        assert_eq!(run(&mut d, &osc("777;notify;Koden;finished")), vec![Transition::Finished]);
+        assert!(run(&mut d, &osc("9;idle")).is_empty());
+    }
+
+    #[test]
     fn generic_osc777_and_osc9_attention_only_when_armed() {
         let mut d = AgentDetector::new();
         assert!(run(&mut d, &osc("777;notify;Other;ready")).is_empty());
         run(&mut d, &osc("133;C;codex"));
         assert_eq!(run(&mut d, &osc("777;notify;Codex;ready")), vec![Transition::Attention]);
+        // Already waiting: a second notification is not a second signal.
+        assert!(run(&mut d, &osc("9;needs you")).is_empty());
+        run(&mut d, &osc("777;notify;Koden;working"));
         assert_eq!(run(&mut d, &osc("9;needs you")), vec![Transition::Attention]);
         assert!(run(&mut d, &osc("9;4;1;50")).is_empty());
     }

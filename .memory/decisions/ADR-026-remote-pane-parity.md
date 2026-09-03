@@ -2,7 +2,8 @@
 
 Status: Accepted, 2026-09-03 (Kosta: "the entire functionality of tabs and
 agents blinking when they are working, idle etc doesn't work when we use the
-remote feature"). Ships as v0.12.3.
+remote feature"). Shipped as v0.12.3; v0.12.4 the same afternoon fixes the
+fan-out it introduced (addendum below).
 Builds on: M2.8 (pane-events tail), ADR-019 (hook ownership classes).
 
 ## Context
@@ -50,8 +51,11 @@ pane-events lines gone, nine generated lines added.
    on the next spawn (content hash), no manual host edit. Verified on
    ai-server: bash wrapper and prompt markers emit exactly the right bytes.
 4. **Koden turns passthrough on** when it creates the tmux session:
-   `allow-passthrough all` (tmux >= 3.3; falls back to `on`), so sequences
-   pass even from panes not currently visible to a client.
+   `allow-passthrough on`, NOT `all`. See the 0.12.4 addendum: `all`
+   broadcasts to every client of the session, and every Koden tab is a
+   client. With `on` tmux delivers to the clients where the pane is
+   visible, which in Koden's one-viewport-per-window model is exactly the
+   pane's own tab (plus a second device viewing the same tab).
 5. **Remote notification rule matches local.** pane-events "notification"
    escalates to orange whenever it arrives, as the local OSC 777 path does;
    the old mid-turn gate was why remote almost never showed amber while
@@ -83,3 +87,32 @@ idempotent source and as the dashboard's feed.
   nested-legacy case and the sh round trip; Rust suite 563 pass, 1
   pre-existing Windows symlink-privilege failure unrelated; clippy clean;
   frontend 77 in spaces + tabs, tsc clean.
+
+## Addendum, v0.12.4: the passthrough fan-out
+
+Within the hour of 0.12.3 Kosta was "spammed with notifications on tabs
+nobody is touching". The Windows notification database (wpndatabase.db)
+showed the toasts arriving in bursts inside one second, at exactly the
+moments the host logged ONE Claude notification in ONE pane: 4 toasts at
+15:17, 6 at 15:42, 9 at 15:47, naming Exchange, Intune, Laptop, Finance,
+"new". Tapping an idle pane's raw output proved it emits nothing at rest
+(a forced resize produced a redraw with title updates and no notification
+sequences), so the repeats were not the agent talking.
+
+Cause: `allow-passthrough all`. tmux forwards a DCS passthrough to every
+client of the session when the option is `all`, and every Koden tab holds
+its own client (a grouped-session viewport). One OSC 777 from one pane
+therefore reached every tab's terminal, each tab's detector self-armed on
+the Koden marker and raised its own attention toast. The scout's caveat
+that `on` only delivers to clients viewing the pane is exactly the property
+we want here: each viewport views its own window.
+
+Fixes:
+- `shell_ssh.rs`: `allow-passthrough on`. Set on the live ai-server tmux
+  immediately (stops the fan-out for existing tabs; a 0.12.3 client opening
+  a new tab flips it back to `all` until it updates).
+- `agent_detect.rs`: attention is a STATE, not a pulse. An agent already in
+  Waiting that announces attention again (Claude Code's own ghostty/kitty
+  notification arriving beside our hook marker, or any repeat) emits no
+  second signal; `working` resets it. Test added; the legacy "OSC 9 after
+  OSC 777" expectation updated to the new semantics.

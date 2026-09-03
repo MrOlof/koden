@@ -229,6 +229,12 @@ pub fn remote_command(
     ];
     match (tmux_session, tmux_window) {
         (Some(name), Some(win)) => {
+            // allow-passthrough ON, never ALL: `all` broadcasts every DCS
+            // passthrough to every client of the session, and every Koden tab
+            // is a client, so one agent notification became a toast per tab
+            // (2026-09-03, nine at once). `on` delivers to the clients where
+            // the pane is visible, which here is exactly the pane's own
+            // viewport (and a second device viewing the same tab).
             // Windowed mode. Guarded creates tolerate two panes racing on a
             // fresh host (the loser's create fails silently, the window check
             // runs after); `destroy-unattached` reaps the grouped viewport on
@@ -242,7 +248,7 @@ pub fn remote_command(
                  tmux list-windows -t ={name} -F \"#W\" 2>/dev/null | grep -qx -- {win} || tmux new-window -d -t ={name} -n {win} -c \"$PWD\" \"$c\" 2>/dev/null || true; \
                  tmux set-option -t {name} status off 2>/dev/null || true; \
                  tmux set-option -g fill-character \" \" 2>/dev/null || true; \
-                 tmux set-option -g allow-passthrough all 2>/dev/null || tmux set-option -g allow-passthrough on 2>/dev/null || true; \
+                 tmux set-option -g allow-passthrough on 2>/dev/null || true; \
                  tmux set-option -w -t ={name}:={win} window-size latest 2>/dev/null || true; \
                  tmux set-option -w -t ={name}:={win} aggressive-resize on 2>/dev/null || true; \
                  exec tmux new-session -t ={name} -s {name}-$$ \\; set-option destroy-unattached on \\; set-option status off \\; select-window -t :={win}; \
