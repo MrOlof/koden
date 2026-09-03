@@ -517,3 +517,12 @@ reader deleted. Two-device simulation test replays the incident and fuzzes
 400 interleavings; 110 sync/spaces tests green, whole suite green. Version
 0.12.1 staged in all four files, NOT yet committed/released (Kosta's call:
 `scripts/release-koden.ps1`, CI builds on tag). Then rerun checklist 3-8.
+
+**2026-09-03 (12:12), v0.12.1 second run: names live, split lost; v0.12.2
+built.** Derived pane fields (cwd from OSC 7, auto colour) counted as
+content, so the laptop re-stamped a tab it never edited; the widened fuzz
+then showed one clock per tab lets a rename erase a split. ADR-025 second
+run: derived fields ignored, key-order independent compare, per-field
+clocks (structure + name), live structural adoption (a peer's split
+appears beside your running terminal, additive only, Undo toast). 114
+tests, 400 seeds. Ledger + rescue steps in `plans/one-hub-EXECUTION_PLAN.md`.

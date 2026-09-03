@@ -6,6 +6,7 @@ import {
   liveTabIdentity,
   planLiveDocAdoption,
   planLiveRenames,
+  planLiveTrees,
 } from "./liveAdopt";
 
 const remote: SpaceState = {
@@ -263,5 +264,101 @@ describe("planLiveRenames (ADR-025)", () => {
         before: "old",
       },
     ]);
+  });
+});
+
+describe("planLiveTrees (ADR-025 live structural adoption)", () => {
+  const bare: SpaceState = {
+    activeTabIndex: 0,
+    tabs: [{ kind: "terminal", tree: { kind: "leaf", key: "k1" } }],
+  };
+  const withNote: SpaceState = {
+    activeTabIndex: 0,
+    tabs: [
+      {
+        kind: "terminal",
+        tree: {
+          kind: "split",
+          dir: "row",
+          children: [
+            { kind: "leaf", content: "note", docId: "n1", key: "kn" },
+            { kind: "leaf", key: "k1" },
+          ],
+        },
+      },
+    ],
+  };
+  const live = [liveTerminal(1, "s", 1)];
+
+  it("adopts a newer peer tree that keeps every local pane", () => {
+    const plan = planLiveTrees(
+      "s",
+      live,
+      bare,
+      { at: 10, tabs: { "t:k1": 10 } },
+      withNote,
+      { at: 20, tabs: { "t:k1": 20 } },
+      leafKey,
+    );
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatchObject({
+      tabId: 1,
+      identity: "t:k1",
+      clock: 20,
+      docIds: ["n1"],
+    });
+    expect(plan[0].tree).toEqual(
+      withNote.tabs[0].kind === "terminal" ? withNote.tabs[0].tree : null,
+    );
+  });
+
+  it("never drops a pane this device runs, and skips equal or older clocks", () => {
+    // Local has a second pane the peer does not know: wait for boot.
+    const twoPanes: Tab = {
+      ...liveTerminal(1, "s", 1),
+      paneTree: {
+        kind: "split",
+        id: 9,
+        dir: "row",
+        children: [
+          { kind: "leaf", id: 1 },
+          { kind: "leaf", id: 2 },
+        ],
+      },
+    } as Tab;
+    expect(
+      planLiveTrees(
+        "s",
+        [twoPanes],
+        bare,
+        { at: 10, tabs: { "t:k1": 10 } },
+        withNote,
+        { at: 20, tabs: { "t:k1": 20 } },
+        leafKey,
+      ),
+    ).toEqual([]);
+    expect(
+      planLiveTrees(
+        "s",
+        live,
+        bare,
+        { at: 20, tabs: { "t:k1": 20 } },
+        withNote,
+        { at: 20, tabs: { "t:k1": 20 } },
+        leafKey,
+      ),
+    ).toEqual([]);
+    // Same structure on disk already: nothing to do.
+    expect(
+      planLiveTrees(
+        "s",
+        live,
+        withNote,
+        { at: 10, tabs: { "t:k1": 10 } },
+        withNote,
+        { at: 20, tabs: { "t:k1": 20 } },
+        leafKey,
+      ),
+    ).toEqual([]);
   });
 });

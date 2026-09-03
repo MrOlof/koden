@@ -9,12 +9,18 @@
 // remote-space adoption loop (App.syncRemoteSpace) already materializes new
 // windows within 15 s.
 
-import type { SerializedNode } from "@/modules/spaces/lib/serialize";
+import type {
+  SerializedNode,
+  SerializedTab,
+} from "@/modules/spaces/lib/serialize";
 import type { SpaceState, SpaceStateMeta } from "@/modules/spaces/lib/store";
 import {
   oldestKey,
+  serializedLeafKeys,
   tabClocksOf,
   tabIdentities,
+  tabStructureJson,
+  titleClocksOf,
 } from "@/modules/spaces/lib/tabClocks";
 import type { Tab } from "@/modules/tabs/lib/useTabs";
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
@@ -37,6 +43,12 @@ export type LiveAdopters = {
   setCustomTitle: (tabId: number, title: string) => void;
   /** Restore key of a live terminal leaf, if it has one. */
   leafKey: (leafId: number) => string | undefined;
+  /** Rebuild a terminal tab's pane tree from a peer's serialized tree,
+   * keeping the leaves it already runs. Returns the previous live tree for
+   * Undo, or null when the tab is gone. */
+  replacePaneTree: (tabId: number, tree: SerializedNode) => PaneNode | null;
+  /** Undo of replacePaneTree. */
+  restorePaneTree: (tabId: number, tree: PaneNode) => void;
 };
 
 let adopters: LiveAdopters | null = null;
@@ -208,8 +220,8 @@ export function planLiveRenames(
   remoteMeta: SpaceStateMeta | undefined,
   leafKey: (leafId: number) => string | undefined,
 ): LiveRename[] {
-  const lClocks = tabClocksOf(localState, localMeta);
-  const rClocks = tabClocksOf(remoteState, remoteMeta);
+  const lClocks = titleClocksOf(localState, localMeta);
+  const rClocks = titleClocksOf(remoteState, remoteMeta);
   const rIds = tabIdentities(remoteState.tabs);
   const remoteLabel = new Map<string, string>();
   rIds.forEach((id, i) => {
@@ -238,6 +250,82 @@ export function planLiveRenames(
       title: want,
       clock: rc,
       before: have,
+    });
+  }
+  return out;
+}
+
+export type LiveTreeAdoption = {
+  tabId: number;
+  identity: string;
+  clock: number;
+  tree: SerializedNode;
+  remoteTab: SerializedTab;
+  /** Doc ids the adopted tree shows as panes (skip them as standalone tabs). */
+  docIds: string[];
+};
+
+function liveLeafKeys(
+  tree: PaneNode,
+  leafKey: (leafId: number) => string | undefined,
+): (string | undefined)[] {
+  if (isLeaf(tree)) return [leafKey(tree.id)];
+  return tree.children.flatMap((c) => liveLeafKeys(c, leafKey));
+}
+
+function docIdsIn(node: SerializedNode, out: string[]): string[] {
+  if (node.kind === "split") {
+    for (const c of node.children) docIdsIn(c, out);
+  } else if (node.docId) out.push(node.docId);
+  return out;
+}
+
+/** Pane trees a remote layout carries for terminal tabs this device shows,
+ * newer on the structure clock, and ADDITIVE: every pane this device runs
+ * survives in the peer's tree (a peer splitting a note in qualifies; a peer
+ * that closed one of our panes waits for boot). ADR-025 live layer. */
+export function planLiveTrees(
+  spaceId: string,
+  localTabs: readonly Tab[],
+  localState: SpaceState | undefined,
+  localMeta: SpaceStateMeta | undefined,
+  remoteState: SpaceState,
+  remoteMeta: SpaceStateMeta | undefined,
+  leafKey: (leafId: number) => string | undefined,
+): LiveTreeAdoption[] {
+  const lClocks = tabClocksOf(localState, localMeta);
+  const rClocks = tabClocksOf(remoteState, remoteMeta);
+  const lIds = localState ? tabIdentities(localState.tabs) : [];
+  const onDisk = new Map<string, SerializedTab>();
+  lIds.forEach((id, i) => {
+    if (localState) onDisk.set(id, localState.tabs[i]);
+  });
+  const rIds = tabIdentities(remoteState.tabs);
+  const remoteById = new Map<string, SerializedTab>();
+  rIds.forEach((id, i) => remoteById.set(id, remoteState.tabs[i]));
+  const out: LiveTreeAdoption[] = [];
+  for (const t of localTabs) {
+    if (t.spaceId !== spaceId || t.kind !== "terminal") continue;
+    const id = liveTabIdentity(t, leafKey);
+    if (id === null) continue;
+    const lc = lClocks[id];
+    const disk = onDisk.get(id);
+    if (lc === undefined || !disk) continue;
+    const r = remoteById.get(id);
+    if (!r || r.kind !== "terminal") continue;
+    const rc = rClocks[id] ?? 0;
+    if (rc <= lc) continue;
+    if (tabStructureJson(disk) === tabStructureJson(r)) continue;
+    const mine = liveLeafKeys(t.paneTree, leafKey);
+    const theirs = new Set(serializedLeafKeys(r.tree));
+    if (mine.some((k) => k === undefined || !theirs.has(k))) continue;
+    out.push({
+      tabId: t.id,
+      identity: id,
+      clock: rc,
+      tree: r.tree,
+      remoteTab: r,
+      docIds: docIdsIn(r.tree, []),
     });
   }
   return out;

@@ -8,7 +8,10 @@ import {
   saveSpacesList,
   saveState,
 } from "@/modules/spaces/lib/store";
-import { tabIdentities } from "@/modules/spaces/lib/tabClocks";
+import {
+  tabIdentities,
+  tabStructureJson,
+} from "@/modules/spaces/lib/tabClocks";
 import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import {
   hydrateDocs,
@@ -21,8 +24,10 @@ import {
   getLiveAdopters,
   planLiveDocAdoption,
   planLiveRenames,
+  planLiveTrees,
 } from "./liveAdopt";
 import { mergeDocs } from "./mergeDocs";
+import type { PaneNode } from "@/modules/terminal/lib/panes";
 import type { TabChange } from "./mergeState";
 import {
   isSyncableSpace,
@@ -506,8 +511,41 @@ async function liveWsAdopt(cfg: SyncConfig): Promise<void> {
       for (const id of tabIdentities(st.tabs)) {
         rClocks.set(id, remoteMeta?.tabs?.[id] ?? remoteMeta?.at ?? 0);
       }
+      // Structure first (a peer's split arrives as the split), so the doc
+      // adoption below does not also raise the same note as a standalone
+      // tab; tabs are read once per cycle and React lags this tick.
+      const inPanes = new Set<string>();
+      for (const p of planLiveTrees(
+        spaceId,
+        tabs,
+        loaded.states.get(spaceId),
+        loaded.stateMeta.get(spaceId),
+        st,
+        remoteMeta,
+        a.leafKey,
+      )) {
+        expectClock(
+          p.identity,
+          p.clock,
+          (tab) => tabStructureJson(tab) === tabStructureJson(p.remoteTab),
+        );
+        const prev = a.replacePaneTree(p.tabId, p.tree);
+        if (!prev) continue;
+        for (const d of p.docIds) inPanes.add(d);
+        journal.push({
+          at: now,
+          spaceId,
+          tabId: p.identity,
+          field: "layout",
+          before: "previous layout",
+          after: "layout from another device",
+          via: "live",
+        });
+        announceLayout(a, p.tabId, prev, tabLabel(p.remoteTab));
+      }
       const plan = planLiveDocAdoption(spaceId, tabs, st);
       for (const d of plan.create) {
+        if (inPanes.has(d.id)) continue;
         // The adopted tab persists with the AUTHOR's clock, never ours.
         const prefix =
           d.kind === "notes" ? "n" : d.kind === "board" ? "b" : "k";
@@ -553,6 +591,24 @@ async function liveWsAdopt(cfg: SyncConfig): Promise<void> {
   } catch {
     // Best-effort by design; the docs/ws sync paths own error surfacing.
   }
+}
+
+/** A peer changed the panes of a tab you show: say so and offer the way
+ * back. Undo restores the previous tree without a ledger entry, so it
+ * stamps now and wins the next merge. */
+function announceLayout(
+  a: NonNullable<ReturnType<typeof getLiveAdopters>>,
+  tabId: number,
+  prev: PaneNode,
+  label: string,
+): void {
+  toast(`Sync changed the layout of "${label || "a tab"}"`, {
+    description: "Panes added on another device",
+    action: {
+      label: "Undo",
+      onClick: () => a.restorePaneTree(tabId, prev),
+    },
+  });
 }
 
 /** A peer renamed a tab you are looking at: say so and offer the way back.

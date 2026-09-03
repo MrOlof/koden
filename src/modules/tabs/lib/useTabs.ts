@@ -470,34 +470,31 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // across the whole workspace. Bypasses the interactive split caps by design
   // (it builds the literal tree, never calling splitActivePane). Returns the leaf
   // ids in row-major order so the caller can auto-type a launch command per pane.
-  const newGridTab = useCallback(
-    (rows: number, cols: number, cwd?: string) => {
-      const tabId = nextIdRef.current++;
-      const { tree, leafIds: gridLeafIds } = buildGridTree(
-        rows,
-        cols,
-        () => nextIdRef.current++,
+  const newGridTab = useCallback((rows: number, cols: number, cwd?: string) => {
+    const tabId = nextIdRef.current++;
+    const { tree, leafIds: gridLeafIds } = buildGridTree(
+      rows,
+      cols,
+      () => nextIdRef.current++,
+      cwd,
+    );
+    const r = Math.min(8, Math.max(1, Math.floor(rows)));
+    const c = Math.min(8, Math.max(1, Math.floor(cols)));
+    setTabs((t) => [
+      ...t,
+      {
+        id: tabId,
+        kind: "terminal",
+        spaceId: activeSpaceIdRef.current,
+        title: `Grid ${r}×${c}`,
         cwd,
-      );
-      const r = Math.min(8, Math.max(1, Math.floor(rows)));
-      const c = Math.min(8, Math.max(1, Math.floor(cols)));
-      setTabs((t) => [
-        ...t,
-        {
-          id: tabId,
-          kind: "terminal",
-          spaceId: activeSpaceIdRef.current,
-          title: `Grid ${r}×${c}`,
-          cwd,
-          paneTree: tree,
-          activeLeafId: gridLeafIds[0],
-        },
-      ]);
-      setActiveId(tabId);
-      return { tabId, leafIds: gridLeafIds };
-    },
-    [],
-  );
+        paneTree: tree,
+        activeLeafId: gridLeafIds[0],
+      },
+    ]);
+    setActiveId(tabId);
+    return { tabId, leafIds: gridLeafIds };
+  }, []);
 
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
@@ -787,8 +784,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     let targetId: number | null = null;
     setTabs((curr) => {
       const existing = curr.find(
-        (t) =>
-          t.kind === "library" && t.spaceId === activeSpaceIdRef.current,
+        (t) => t.kind === "library" && t.spaceId === activeSpaceIdRef.current,
       );
       if (existing) {
         targetId = existing.id;
@@ -869,6 +865,25 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         } satisfies TerminalTab,
       ]);
       return id;
+    },
+    [],
+  );
+
+  /** Replace a terminal tab's pane tree with one hydrated from a peer
+   * (ADR-025 live structural adoption). The active leaf is kept when it is
+   * still in the tree. */
+  const adoptPaneTree = useCallback(
+    (tabId: number, tree: PaneNode, activeLeafId: number) => {
+      setTabs((curr) =>
+        curr.map((x) => {
+          if (x.id !== tabId || x.kind !== "terminal") return x;
+          const ids = leafIds(tree);
+          const active = ids.includes(x.activeLeafId)
+            ? x.activeLeafId
+            : activeLeafId;
+          return { ...x, paneTree: tree, activeLeafId: active };
+        }),
+      );
     },
     [],
   );
@@ -1136,15 +1151,18 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // Opens a fresh terminal tab in the same space as `id`, inheriting its cwd.
   // ponytail: only terminal/editor tabs carry a cwd worth cloning; every other
   // kind (notes/board/preview/diff/…) just gets a plain terminal in its space.
-  const duplicateTab = useCallback((id: number) => {
-    const tab = tabsRef.current.find((t) => t.id === id);
-    if (!tab) return;
-    const cwd = tab.kind === "terminal" ? tab.cwd : undefined;
-    const newId = newTabInSpace(tab.spaceId, cwd);
-    // newTabInSpace appends a cold tab without focus; duplicating is an explicit
-    // user action, so follow it like newTab does.
-    setActiveId(newId);
-  }, [newTabInSpace]);
+  const duplicateTab = useCallback(
+    (id: number) => {
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (!tab) return;
+      const cwd = tab.kind === "terminal" ? tab.cwd : undefined;
+      const newId = newTabInSpace(tab.spaceId, cwd);
+      // newTabInSpace appends a cold tab without focus; duplicating is an explicit
+      // user action, so follow it like newTab does.
+      setActiveId(newId);
+    },
+    [newTabInSpace],
+  );
 
   // Closes every other tab sharing this tab's space, leaving `id` open. Routes
   // each through closeTab so active-tab bookkeeping (and PTY disposal) stays
@@ -1197,7 +1215,11 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           // These derive their label from `title`; rename routes through the
           // customTitle patch (shared TabBar path), an empty value resets it.
           const fallbackTitle =
-            x.kind === "notes" ? "Notes" : x.kind === "board" ? "Board" : "Tasks";
+            x.kind === "notes"
+              ? "Notes"
+              : x.kind === "board"
+                ? "Board"
+                : "Tasks";
           const next =
             patch.customTitle !== undefined
               ? patch.customTitle.trim() || fallbackTitle
@@ -1522,6 +1544,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     openLauncherTab,
     adoptTerminalTab,
     adoptDocTab,
+    adoptPaneTree,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,

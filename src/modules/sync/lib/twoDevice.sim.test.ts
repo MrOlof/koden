@@ -12,13 +12,20 @@ import type {
   SerializedNode,
   SerializedTab,
 } from "@/modules/spaces/lib/serialize";
-import { serializeTabs } from "@/modules/spaces/lib/serialize";
+import {
+  hydrateTreeReusing,
+  serializeTabs,
+} from "@/modules/spaces/lib/serialize";
 import type {
   SpaceMeta,
   SpaceState,
   SpaceStateMeta,
 } from "@/modules/spaces/lib/store";
-import { stampTabs, tabIdentities } from "@/modules/spaces/lib/tabClocks";
+import {
+  stampTabs,
+  tabIdentities,
+  tabStructureJson,
+} from "@/modules/spaces/lib/tabClocks";
 import type { Tab } from "@/modules/tabs/lib/useTabs";
 import type { PaneNode } from "@/modules/terminal/lib/panes";
 import { describe, expect, it } from "vitest";
@@ -26,6 +33,7 @@ import {
   liveTabIdentity,
   planLiveDocAdoption,
   planLiveRenames,
+  planLiveTrees,
 } from "./liveAdopt";
 import { mergeWorkspace, type WorkspaceLocal } from "./mergeWorkspace";
 import type { WorkspaceEnvelope } from "./types";
@@ -79,6 +87,7 @@ class Device {
   disk: SpaceState | undefined;
   diskMeta: SpaceStateMeta | undefined;
   ledger: Ledger = new Map();
+  colors = new Map<number, string>();
   lastLiveGen = 0;
   pushes = 0;
   constructor(
@@ -170,6 +179,24 @@ class Device {
     return true;
   }
 
+  // Derived: the shell reports a new cwd, the pane gets an accent. Neither
+  // is an edit; a device doing only this must never win a merge.
+  churn(key: string, now: number): boolean {
+    const t = this.find(key);
+    if (!t || t.kind !== "terminal") return false;
+    const leafId = firstLeafId(t.paneTree);
+    const bump = (n: PaneNode): PaneNode =>
+      n.kind === "leaf"
+        ? n.id === leafId
+          ? { ...n, cwd: `/home/snorlax/dir-${now}` }
+          : n
+        : { ...n, children: n.children.map(bump) };
+    (t as { paneTree: PaneNode }).paneTree = bump(t.paneTree);
+    this.colors.set(leafId, `#${(now % 0xffffff).toString(16)}`);
+    this.persist(now);
+    return true;
+  }
+
   // Derived: the remote-space loop finds windows no local pane owns.
   materialize(now: number): void {
     let added = false;
@@ -184,7 +211,14 @@ class Device {
 
   serialize(): SpaceState {
     return {
-      tabs: serializeTabs(this.tabs, undefined, this.leafKey),
+      tabs: serializeTabs(
+        this.tabs,
+        (leafId) => {
+          const color = this.colors.get(leafId);
+          return color ? { color } : undefined;
+        },
+        this.leafKey,
+      ),
       activeTabIndex: 0,
     };
   }
@@ -255,7 +289,45 @@ class Device {
       const rClocks = new Map<string, number>();
       for (const id of tabIdentities(st.tabs))
         rClocks.set(id, meta?.tabs?.[id] ?? meta?.at ?? 0);
+      // Structure first: a peer's split arrives as the split (ADR-025).
+      const inPanes = new Set<string>();
+      for (const p of planLiveTrees(
+        SPACE,
+        this.tabs,
+        this.disk,
+        this.diskMeta,
+        st,
+        meta,
+        this.leafKey,
+      )) {
+        this.ledger.set(p.identity, {
+          clock: p.clock,
+          match: (tab) =>
+            tabStructureJson(tab) === tabStructureJson(p.remoteTab),
+        });
+        const t = this.tabs.find((x) => x.id === p.tabId);
+        if (!t || t.kind !== "terminal") continue;
+        const existing = new Map<string, Extract<PaneNode, { kind: "leaf" }>>();
+        const walk = (n: PaneNode): void => {
+          if (n.kind === "leaf") {
+            const k = this.keys.get(n.id);
+            if (k) existing.set(k, n);
+          } else for (const c of n.children) walk(c);
+        };
+        walk(t.paneTree);
+        const live = hydrateTreeReusing(
+          p.tree,
+          existing,
+          () => this.nextId++,
+          undefined,
+          (id, key) => this.keys.set(id, key),
+        );
+        (t as { paneTree: PaneNode }).paneTree = live.tree;
+        for (const d of p.docIds) inPanes.add(d);
+        dirty = true;
+      }
       for (const d of planLiveDocAdoption(SPACE, this.tabs, st).create) {
+        if (inPanes.has(d.id)) continue;
         const identity = `n:${d.id}`;
         this.ledger.set(identity, { clock: rClocks.get(identity) ?? 0 });
         this.tabs.push({
@@ -381,16 +453,22 @@ describe("two devices live: the 2026-09-03 incident", () => {
     hq.livePull(host, t++);
     expect(hq.label("k1")).toBe("TESTING TAB");
     expect(hq.hasNotePane("k1")).toBe(true);
-    // Laptop, live: the name arrives, the note as a tab (splits are boot's).
+    // Laptop, live: the name arrives, and so does the split itself: the
+    // terminal pane it already runs stays, the note pane appears beside it,
+    // and no standalone note tab is raised for a doc shown as a pane.
     laptop.livePull(host, t++);
     expect(laptop.label("k1")).toBe("TESTING TAB");
-    expect(
-      laptop.tabs.some((x) => x.kind === "notes" && x.docId === "note1"),
-    ).toBe(true);
-    // Laptop, boot: the split itself, and the duplicate note tab is gone.
-    laptop.boot(host, t++);
     expect(laptop.hasNotePane("k1")).toBe(true);
     expect(laptop.tabs.filter((x) => x.kind === "notes")).toHaveLength(0);
+    // Laptop, boot: unchanged, and its copy carries HQ's clocks, so its
+    // next push changes nothing on the host.
+    laptop.boot(host, t++);
+    expect(laptop.hasNotePane("k1")).toBe(true);
+    laptop.push(host, t++);
+    const k1After = host.tab("k1");
+    expect(k1After?.kind === "terminal" ? k1After.tree.kind : null).toBe(
+      "split",
+    );
     // And HQ's next boot keeps its tab.
     hq.boot(host, t++);
     expect(hq.label("k1")).toBe("TESTING TAB");
@@ -443,7 +521,20 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-type Authored = { at: number; closed: boolean; label: string };
+type Authored = {
+  createdAt: number;
+  labelAt: number;
+  label: string;
+  splitAt: number;
+  closedAt: number;
+  /** Devices that ever split this tab; with exactly one, the other must
+   * show the split LIVE (additive adoption), not just after boot. */
+  splitBy: Set<string>;
+};
+// Names and structure are separate authored fields; a tab is alive iff any
+// authored edit (create, rename, split) is newer than the last close.
+const alive = (a: Authored) =>
+  Math.max(a.createdAt, a.labelAt, a.splitAt) > a.closedAt;
 
 function fuzzRun(seed: number): void {
   const rnd = mulberry32(seed);
@@ -451,6 +542,8 @@ function fuzzRun(seed: number): void {
   const { host, hq, laptop } = world();
   const devices = [hq, laptop];
   const authored = new Map<string, Authored>();
+  // key -> time of the last authored note split; a split is authored
+  // content and must survive like a name does (unless closed after).
   const keys: string[] = [];
   let t = 1000;
   let nextKey = 1;
@@ -463,6 +556,9 @@ function fuzzRun(seed: number): void {
       "rename",
       "rename",
       "close",
+      "split",
+      "churn",
+      "churn",
       "materialize",
       "materialize",
       "push",
@@ -478,24 +574,47 @@ function fuzzRun(seed: number): void {
         const label = rnd() < 0.5 ? `name-${key}` : "";
         d.create(key, t, label || undefined);
         keys.push(key);
-        authored.set(key, { at: t, closed: false, label });
+        authored.set(key, {
+          createdAt: t,
+          labelAt: t,
+          label,
+          splitAt: -1,
+          closedAt: -1,
+          splitBy: new Set(),
+        });
         break;
       }
       case "rename": {
         if (keys.length === 0) break;
         const key = pick(keys);
         const label = `r${t}`;
-        if (d.rename(key, label, t))
-          authored.set(key, { at: t, closed: false, label });
+        const a = authored.get(key);
+        if (a && d.rename(key, label, t))
+          authored.set(key, { ...a, labelAt: t, label });
         break;
       }
       case "close": {
         if (keys.length === 0) break;
         const key = pick(keys);
-        if (d.close(key, t))
-          authored.set(key, { at: t, closed: true, label: "" });
+        const a = authored.get(key);
+        if (a && d.close(key, t)) authored.set(key, { ...a, closedAt: t });
         break;
       }
+      case "split": {
+        if (keys.length === 0) break;
+        const key = pick(keys);
+        const a = authored.get(key);
+        if (a && d.splitNote(key, `note-${t}`, t))
+          authored.set(key, {
+            ...a,
+            splitAt: t,
+            splitBy: new Set([...a.splitBy, d.name]),
+          });
+        break;
+      }
+      case "churn":
+        if (keys.length > 0) d.churn(pick(keys), t);
+        break;
       case "materialize":
         d.materialize(t);
         break;
@@ -510,16 +629,29 @@ function fuzzRun(seed: number): void {
         break;
     }
   }
-  // Settle: everyone pushes, everyone polls twice, everyone boots, polls.
+  // Settle: everyone pushes, everyone polls twice.
   for (const d of devices) d.push(host, ++t);
   for (let r = 0; r < 2; r++) for (const d of devices) d.livePull(host, ++t);
+  // (E) a split authored on exactly one device is visible on the other
+  // LIVE, before any restart, whenever the tab is alive on both.
+  for (const [key, a] of authored) {
+    if (!alive(a) || a.splitBy.size !== 1 || a.splitAt < a.closedAt) continue;
+    for (const d of devices) {
+      if (d.find(key) === undefined) continue;
+      expect(
+        d.hasNotePane(key),
+        `seed ${seed} key ${key} live split on ${d.name}`,
+      ).toBe(true);
+    }
+  }
+  // Then everyone boots and polls once more.
   for (const d of devices) d.boot(host, ++t);
   for (const d of devices) d.livePull(host, ++t);
 
   for (const [key, a] of authored) {
     const onHost = host.tab(key);
     const ctx = `seed ${seed} key ${key}`;
-    if (a.closed) {
+    if (!alive(a)) {
       expect(onHost, ctx).toBeUndefined();
       for (const d of devices)
         expect(d.find(key), `${ctx} on ${d.name}`).toBeUndefined();
@@ -535,6 +667,14 @@ function fuzzRun(seed: number): void {
     for (const d of devices) {
       const l = d.label(key);
       if (l !== undefined) expect(l, `${ctx} on ${d.name}`).toBe(a.label);
+    }
+    // (D) an authored split is on the host and, after boot, on both.
+    if (a.splitAt > a.closedAt) {
+      expect(onHost?.kind === "terminal" ? onHost.tree.kind : null, ctx).toBe(
+        "split",
+      );
+      for (const d of devices)
+        expect(d.hasNotePane(key), `${ctx} split on ${d.name}`).toBe(true);
     }
   }
   // (C) convergence: same tab set and labels on both disks.

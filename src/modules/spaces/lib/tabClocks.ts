@@ -14,9 +14,14 @@ export type SpaceStateMeta = {
   /** Space-level clock: max over the tab clocks. Kept for 0.12.0 peers,
    * whose envelopes carry no per-tab map and merge on this alone. */
   at: number;
-  /** identity -> clock of the last edit that touched the tab. Absent on
-   * envelopes written before ADR-025: every tab then takes `at`. */
+  /** identity -> clock of the last edit to the tab's STRUCTURE (pane tree,
+   * doc id). Absent on envelopes written before ADR-025: every tab then
+   * takes `at`. */
   tabs?: TabClocks;
+  /** identity -> clock of the last edit to the tab's NAME. A rename here
+   * and a split there are two edits to one tab; with one clock the later
+   * one erased the other (fuzz seed 4). Absent: falls back to `tabs`. */
+  titles?: TabClocks;
   /** identity -> time the tab was closed. Beats a tab whose clock is older. */
   gone?: TabClocks;
 };
@@ -36,6 +41,13 @@ function collectLeafKeys(
   if (!node.key) return;
   out.all.push(node.key);
   if (!node.content) out.terminal.push(node.key);
+}
+
+/** Every restore key in a serialized tree, panes of any kind. */
+export function serializedLeafKeys(node: SerializedNode): string[] {
+  const out = { terminal: [], all: [] };
+  collectLeafKeys(node, out);
+  return out.all;
 }
 
 /** Restore keys are `rk-<base36 ms>-<rand>`: same length until 2059, so the
@@ -109,19 +121,81 @@ export type LedgerLookup = (
   tab: SerializedTab,
 ) => number | undefined;
 
-function stripActive(node: SerializedNode): SerializedNode {
+/** Key-order independent JSON: a merge composes tabs from two sources and
+ * object key order must not read as a content difference. */
+function canon(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canon).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .filter((k) => o[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canon(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function stripDerived(node: SerializedNode): SerializedNode {
   if (node.kind === "split")
-    return { ...node, children: node.children.map(stripActive) };
-  const { active: _active, ...rest } = node;
+    return { ...node, children: node.children.map(stripDerived) };
+  const { active: _active, cwd: _cwd, color: _color, ...rest } = node;
   return rest;
 }
 
 /** A tab's content for equality and tie-breaks: the serialized tab minus
- * per-device UI state (which pane is active), so switching panes on one
- * machine is not an edit the other machine must reconcile. */
+ * everything a MACHINE writes on its own. Which pane is active, the cwd the
+ * shell reports over OSC 7, and the auto-assigned pane accent all change
+ * without anyone editing anything; counting them made a device that merely
+ * showed a tab re-stamp it as its own edit (2026-09-03, second incident:
+ * the laptop's copy of a split tab won on a colour). Structure, doc ids,
+ * restore keys, pane labels and the tab name are the authored content. */
 export function tabContentJson(tab: SerializedTab): string {
-  if (tab.kind !== "terminal") return JSON.stringify(tab);
-  return JSON.stringify({ ...tab, tree: stripActive(tab.tree) });
+  if (tab.kind !== "terminal") return canon(tab);
+  return canon({ ...tab, tree: stripDerived(tab.tree) });
+}
+
+/** The user-facing name a tab carries: a terminal's custom label ("" when
+ * none), a doc tab's title. Kinds without a name yield "". */
+export function tabTitle(tab: SerializedTab): string {
+  if (tab.kind === "terminal") return tab.customTitle ?? "";
+  return "title" in tab && typeof tab.title === "string" ? tab.title : "";
+}
+
+/** Content minus the name: what the structure clock covers. */
+export function tabStructureJson(tab: SerializedTab): string {
+  if (tab.kind === "terminal") {
+    const { customTitle: _t, ...rest } = tab;
+    return canon({ ...rest, tree: stripDerived(tab.tree) });
+  }
+  if ("title" in tab) {
+    const { title: _t, ...rest } = tab;
+    return canon(rest);
+  }
+  return canon(tab);
+}
+
+/** A tab with its name replaced (a merge composes the structure winner
+ * with the title winner). */
+export function withTitle(tab: SerializedTab, title: string): SerializedTab {
+  if (tab.kind === "terminal") {
+    const { customTitle: _t, ...rest } = tab;
+    return title ? { ...rest, customTitle: title } : rest;
+  }
+  if ("title" in tab) return { ...tab, title };
+  return tab;
+}
+
+/** Name clocks, falling back to the structure clock, then the space. */
+export function titleClocksOf(
+  state: SpaceState | undefined,
+  meta: SpaceStateMeta | undefined,
+): TabClocks {
+  const out: TabClocks = {};
+  if (!state) return out;
+  for (const id of tabIdentities(state.tabs))
+    out[id] = meta?.titles?.[id] ?? meta?.tabs?.[id] ?? meta?.at ?? 0;
+  return out;
 }
 
 export function pruneGone(gone: TabClocks | undefined, now: number): TabClocks {
@@ -133,9 +207,10 @@ export function pruneGone(gone: TabClocks | undefined, now: number): TabClocks {
 }
 
 /** The stamping rule, as a pure function of previous disk state and the next
- * layout: unchanged tab keeps its clock; changed or new tab takes the
- * ledger's clock when the ledger knows it, else `now`; a tab that vanished
- * gets a tombstone; the space clock is the max of everything. */
+ * layout, per tab and per field (structure, name): an unchanged field keeps
+ * its clock; a changed field takes the ledger's clock when the ledger knows
+ * the tab, else `now`; a new tab takes the ledger's clock or `now` for both;
+ * a tab that vanished gets a tombstone; the space clock is the max. */
 export function stampTabs(
   prev: SpaceState | undefined,
   prevMeta: SpaceStateMeta | undefined,
@@ -144,22 +219,30 @@ export function stampTabs(
   ledger: LedgerLookup,
 ): SpaceStateMeta {
   const prevIds = prev ? tabIdentities(prev.tabs) : [];
-  const prevJson = new Map<string, string>();
+  const prevTab = new Map<string, SerializedTab>();
   prevIds.forEach((id, i) => {
-    if (prev) prevJson.set(id, tabContentJson(prev.tabs[i]));
+    if (prev) prevTab.set(id, prev.tabs[i]);
   });
   const prevClocks = tabClocksOf(prev, prevMeta);
+  const prevTitleClocks = titleClocksOf(prev, prevMeta);
   const nextIds = tabIdentities(next.tabs);
 
   const tabs: TabClocks = {};
+  const titles: TabClocks = {};
   nextIds.forEach((id, i) => {
     const tab = next.tabs[i];
-    const before = prevJson.get(id);
-    if (before !== undefined && before === tabContentJson(tab)) {
-      tabs[id] = prevClocks[id] ?? 0;
+    const before = prevTab.get(id);
+    if (before === undefined) {
+      const c = ledger(id, tab) ?? now;
+      tabs[id] = c;
+      titles[id] = c;
       return;
     }
-    tabs[id] = ledger(id, tab) ?? now;
+    const structChanged = tabStructureJson(before) !== tabStructureJson(tab);
+    const titleChanged = tabTitle(before) !== tabTitle(tab);
+    const led = structChanged || titleChanged ? ledger(id, tab) : undefined;
+    tabs[id] = structChanged ? (led ?? now) : (prevClocks[id] ?? 0);
+    titles[id] = titleChanged ? (led ?? now) : (prevTitleClocks[id] ?? 0);
   });
 
   const gone = pruneGone(prevMeta?.gone, now);
@@ -169,6 +252,7 @@ export function stampTabs(
 
   let at = prevMeta?.at ?? 0;
   for (const c of Object.values(tabs)) if (c > at) at = c;
+  for (const c of Object.values(titles)) if (c > at) at = c;
   for (const c of Object.values(gone)) if (c > at) at = c;
-  return { at, tabs, gone };
+  return { at, tabs, titles, gone };
 }

@@ -89,3 +89,18 @@ Both devices on 0.12.0 (laptop installed over ssh), host ai-server.
   seeded interleavings). Version bumped to 0.12.1 in all four files
   (Cargo.toml finally off 0.11.0). Release = `scripts/release-koden.ps1`
   after Kosta's OK; then RERUN steps 3-8 on 0.12.1.
+
+## 2026-09-03 12:12, second run on 0.12.1: names live PASS; split FAIL; v0.12.2
+
+- Tab created + named on HQ showed up named on the laptop live: PASS.
+- Note split into that tab on HQ: never reached the laptop, and the host
+  lost the split to the laptop's bare copy again. Cause: pane cwd/colour
+  (machine-derived) counted as content, so the laptop re-stamped the tab.
+  Fixed (derived fields ignored). The widened fuzz then found that one
+  clock per tab still lets a rename erase a split; fixed with separate
+  structure and name clocks. Splits now also adopt LIVE when additive.
+  All in ADR-025 "Second run". v0.12.2.
+- RESCUE for the split created under 0.12.1: on HQ rename the TEST tab
+  (anything, then back) BEFORE updating, so HQ re-pushes the split with a
+  newer clock; the laptop's duplicate "Notes" tab clears on its next boot.
+- Then rerun steps 3-8 on 0.12.2.

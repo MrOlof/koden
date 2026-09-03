@@ -235,6 +235,41 @@ function hydrateTree(
   return { tree: paneTree, activeLeafId, firstLeafCwd };
 }
 
+/**
+ * Live structural adoption (ADR-025): hydrate a peer's pane tree AROUND the
+ * leaves this device already runs. A leaf whose restore key matches an
+ * existing leaf is reused verbatim (its PTY stays attached, its cwd stays);
+ * new leaves are allocated and seeded exactly as at boot.
+ */
+export function hydrateTreeReusing(
+  tree: SerializedNode,
+  existing: ReadonlyMap<string, Extract<PaneNode, { kind: "leaf" }>>,
+  allocId: () => number,
+  seedTitle?: PaneTitleSeeder,
+  seedKey?: LeafKeySeeder,
+): HydratedTree {
+  const acc: { activeLeafId: number | null } = { activeLeafId: null };
+  const build = (node: SerializedNode): PaneNode => {
+    if (node.kind === "leaf") {
+      const reused = node.key ? existing.get(node.key) : undefined;
+      if (reused) {
+        if (node.active && acc.activeLeafId === null)
+          acc.activeLeafId = reused.id;
+        return reused;
+      }
+      return hydrateNode(node, allocId, acc, seedTitle, seedKey);
+    }
+    const children = node.children.map(build);
+    if (children.length === 0) return { kind: "leaf", id: allocId() };
+    if (children.length === 1) return children[0];
+    return { kind: "split", id: allocId(), dir: node.dir, children };
+  };
+  const paneTree = build(tree);
+  const leaves = collectLeaves(paneTree);
+  const activeLeafId = acc.activeLeafId ?? leaves[0]?.id ?? allocId();
+  return { tree: paneTree, activeLeafId, firstLeafCwd: leaves[0]?.cwd };
+}
+
 function collectLeaves(node: PaneNode): Array<{ id: number; cwd?: string }> {
   if (isLeaf(node)) return [{ id: node.id, cwd: node.cwd }];
   return node.children.flatMap(collectLeaves);

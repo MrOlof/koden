@@ -2,7 +2,9 @@
 
 Status: Accepted, 2026-09-03 (Kosta, first two-device GUI run of v0.12.0:
 "we need a permanent fix, rework whatever we need to make this real,
-people are gonna use this"). Implemented the same day, ships as v0.12.1.
+people are gonna use this"). Implemented the same day as v0.12.1; the
+first live run of v0.12.1 found two more holes of the same class within
+the hour, fixed and widened in v0.12.2 (see "Second run" below).
 Builds on: ADR-023 (sync engine, merge rules), ADR-024 (liveness, additive
 live adoption). Supersedes the per-space layout LWW of ADR-023 and the F2
 title-manifest reader kept alive by ADR-024.
@@ -148,3 +150,42 @@ Revisit when the control plane (KODEN-REMOTE.md M3) lands.
   toast+Undo exist). Add when someone asks "what did sync change".
 - Verification: 110 tests in sync + spaces (85 before), whole frontend
   suite green, `tsc` clean, biome error-free; Rust untouched.
+
+## Second run, 2026-09-03 12:12 (v0.12.1 on both): two more holes, same class
+
+Tab names now arrived live. A note split into a tab on HQ did not arrive
+at all, and the host again held the laptop's bare copy of the tab, stamped
+12:13:26 against HQ's split at 12:12:14. The laptop had edited nothing.
+
+- **R2b, derived pane fields counted as content.** The laptop's copy of the
+  tab differed from HQ's in the shell-reported `cwd` (OSC 7) and the
+  auto-assigned pane accent `color`. Equality saw a change, stamping saw an
+  edit, the observer won again. Fix: `tabContentJson` strips `active`,
+  `cwd` and `color` from every leaf; only structure, doc ids, restore keys,
+  pane labels and the tab name are authored content. Comparison is
+  key-order independent (a merge composes tabs from two sources).
+- **R1b, one clock per tab still loses.** The fuzz, once it could churn
+  cwd/colour and split notes, found seed 4: a rename on device B two ticks
+  after a split on device A erased the split, because both are edits to
+  the same tab and the later one carried the whole tab. Fix: two clocks
+  per tab, `tabs` (structure) and `titles` (name); the merge picks the
+  structure winner and the name winner separately and composes them.
+  Losing an edit now needs the SAME field of the SAME tab edited on both
+  devices inside one debounce window.
+- **G1b, splits were boot-only and Kosta expects them live.** Added live
+  structural adoption to the ADR-024 layer, still additive: a peer's tree
+  is adopted mid-session only when it is newer on the structure clock AND
+  keeps every pane this device runs (`planLiveTrees`). The tree is
+  hydrated around the existing leaves (`hydrateTreeReusing`), so the
+  terminal keeps its PTY and the note pane appears beside it; a doc that
+  arrives as a pane is not also raised as a standalone tab. Journaled, with
+  a toast and Undo. A peer that CLOSED one of our panes still waits for
+  boot: the live layer never removes what you are looking at.
+- Fuzz widened accordingly: cwd/colour churn, note splits, per-field
+  oracle (a tab is alive iff any authored edit is newer than the last
+  close; the expected name is the latest rename; an authored split must be
+  on the host and on both devices after boot, and on the other device
+  LIVE when only one device split). 400 seeds, 114 tests in sync + spaces.
+- Ships as v0.12.2. Known ceiling: a standalone note tab the 0.12.1 live
+  layer already raised on a device stays until that device's next boot,
+  when the pane wins and the duplicate tab is dropped.

@@ -79,7 +79,8 @@ describe("stampTabs", () => {
       99,
       noLedger,
     );
-    expect(m.tabs).toEqual({ "t:a": 99, "t:b": 5 });
+    expect(m.tabs).toEqual({ "t:a": 10, "t:b": 5 });
+    expect(m.titles).toEqual({ "t:a": 99, "t:b": 5 });
     expect(m.at).toBe(99);
   });
 
@@ -107,7 +108,8 @@ describe("stampTabs", () => {
           ? 77
           : undefined,
     );
-    expect(m.tabs?.["t:a"]).toBe(77);
+    expect(m.titles?.["t:a"]).toBe(77);
+    expect(m.tabs?.["t:a"]).toBe(10);
   });
 
   it("a closed tab gets a tombstone; reopening clears it", () => {
@@ -141,6 +143,40 @@ describe("stampTabs", () => {
       noLedger,
     );
     expect(m.gone).toEqual({ "t:recent": now - 1 });
+  });
+
+  it("cwd, colour and active pane are not edits; labels and structure are", () => {
+    const prev = st({
+      kind: "terminal",
+      customTitle: "T",
+      tree: { kind: "leaf", key: "a", cwd: "/x", color: "#111", active: true },
+    });
+    const prevMeta = { at: 10, tabs: { "t:a": 10 } };
+    const churned = stampTabs(
+      prev,
+      prevMeta,
+      st({
+        kind: "terminal",
+        customTitle: "T",
+        tree: { kind: "leaf", key: "a", cwd: "/y", color: "#222" },
+      }),
+      99,
+      noLedger,
+    );
+    expect(churned.tabs?.["t:a"]).toBe(10);
+    expect(churned.titles?.["t:a"]).toBe(10);
+    const labelled = stampTabs(
+      prev,
+      prevMeta,
+      st({
+        kind: "terminal",
+        customTitle: "T",
+        tree: { kind: "leaf", key: "a", cwd: "/x", color: "#111", title: "L" },
+      }),
+      99,
+      noLedger,
+    );
+    expect(labelled.tabs?.["t:a"]).toBe(99);
   });
 
   it("the space clock never goes backwards", () => {

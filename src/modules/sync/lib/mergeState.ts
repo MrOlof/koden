@@ -14,6 +14,10 @@ import {
   tabClocksOf,
   tabContentJson,
   tabIdentities,
+  tabStructureJson,
+  tabTitle,
+  titleClocksOf,
+  withTitle,
 } from "@/modules/spaces/lib/tabClocks";
 
 export type TabChange = {
@@ -62,10 +66,15 @@ function dropDocTabsShownAsPanes(tabs: SerializedTab[]): SerializedTab[] {
 }
 
 /** Equal clocks with different content must resolve the same way on both
- * devices, or each keeps its own copy forever. Content order is arbitrary
- * but deterministic. */
-function remoteWinsTie(l: SerializedTab, r: SerializedTab): boolean {
-  return tabContentJson(r) > tabContentJson(l);
+ * devices, or each keeps its own copy forever. Order is arbitrary but
+ * deterministic. */
+function remoteWins(
+  lc: number,
+  rc: number,
+  lJson: string,
+  rJson: string,
+): boolean {
+  return rc > lc || (rc === lc && rJson > lJson);
 }
 
 export function mergeSpaceState(
@@ -77,6 +86,8 @@ export function mergeSpaceState(
 ): StateMergeResult {
   const lClocks = tabClocksOf(local, localMeta);
   const rClocks = tabClocksOf(remote, remoteMeta);
+  const lTitles = titleClocksOf(local, localMeta);
+  const rTitles = titleClocksOf(remote, remoteMeta);
   const gone: TabClocks = pruneGone(localMeta?.gone, now);
   for (const [id, at] of Object.entries(pruneGone(remoteMeta?.gone, now))) {
     gone[id] = Math.max(gone[id] ?? 0, at);
@@ -95,40 +106,53 @@ export function mergeSpaceState(
 
   const picked: SerializedTab[] = [];
   const clocks: TabClocks = {};
+  const titles: TabClocks = {};
   const changes: TabChange[] = [];
   let localNewer = false;
 
+  // Per tab, per field: the structure winner and the name winner are chosen
+  // separately, then composed, so a rename here never erases a split there.
   const decide = (id: string): SerializedTab | null => {
     const l = lTab.get(id);
     const r = rTab.get(id);
     const lc = l ? (lClocks[id] ?? 0) : -1;
     const rc = r ? (rClocks[id] ?? 0) : -1;
+    const ltc = l ? (lTitles[id] ?? 0) : -1;
+    const rtc = r ? (rTitles[id] ?? 0) : -1;
     const closedAt = gone[id];
-    if (closedAt !== undefined && closedAt > Math.max(lc, rc)) {
+    if (closedAt !== undefined && closedAt > Math.max(lc, rc, ltc, rtc)) {
       if (l) changes.push({ id, kind: "removed", before: l });
       return null;
     }
     if (l && !r) {
       clocks[id] = lc;
+      titles[id] = ltc;
       localNewer = true;
       return l;
     }
     if (r && !l) {
       clocks[id] = rc;
+      titles[id] = rtc;
       changes.push({ id, kind: "added", after: r });
       return r;
     }
     if (!l || !r) return null;
-    const remoteWins = rc > lc || (rc === lc && remoteWinsTie(l, r));
-    if (remoteWins) {
-      clocks[id] = rc;
-      if (!same(l, r))
-        changes.push({ id, kind: "replaced", before: l, after: r });
-      return r;
-    }
-    clocks[id] = lc;
-    if (!same(l, r)) localNewer = true;
-    return l;
+    const structFromRemote = remoteWins(
+      lc,
+      rc,
+      tabStructureJson(l),
+      tabStructureJson(r),
+    );
+    const titleFromRemote = remoteWins(ltc, rtc, tabTitle(l), tabTitle(r));
+    const base = structFromRemote ? r : l;
+    const title = tabTitle(titleFromRemote ? r : l);
+    const composed = withTitle(base, title);
+    clocks[id] = structFromRemote ? rc : lc;
+    titles[id] = titleFromRemote ? rtc : ltc;
+    if (!same(composed, l))
+      changes.push({ id, kind: "replaced", before: l, after: composed });
+    if (!same(composed, r)) localNewer = true;
+    return composed;
   };
 
   // Local order first, then remote-only tabs in remote order (ADR-023:
@@ -148,6 +172,7 @@ export function mergeSpaceState(
     for (const id of tabIdentities(picked)) {
       if (kept.has(id)) continue;
       delete clocks[id];
+      delete titles[id];
       const before = lTab.get(id);
       if (before) changes.push({ id, kind: "removed", before });
     }
@@ -156,6 +181,7 @@ export function mergeSpaceState(
 
   let at = Math.max(localMeta?.at ?? 0, remoteMeta?.at ?? 0);
   for (const c of Object.values(clocks)) if (c > at) at = c;
+  for (const c of Object.values(titles)) if (c > at) at = c;
   for (const c of Object.values(gone)) if (c > at) at = c;
 
   const srcActive = local?.activeTabIndex ?? remote?.activeTabIndex ?? 0;
@@ -168,7 +194,7 @@ export function mergeSpaceState(
     local.tabs.some((t, i) => !same(t, tabs[i]));
   return {
     state,
-    meta: { at, tabs: clocks, gone },
+    meta: { at, tabs: clocks, titles, gone },
     changed,
     localNewer,
     changes,

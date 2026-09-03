@@ -129,6 +129,7 @@ import {
   peekLeafRestoreKey,
   seedLeafRestoreKey,
 } from "@/modules/spaces/lib/scrollbackStore";
+import { hydrateTreeReusing } from "@/modules/spaces/lib/serialize";
 import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
 import { StatusBar } from "@/modules/statusbar";
 import { SyncBridge } from "@/modules/sync";
@@ -169,6 +170,7 @@ import {
   whenSessionReady,
   writeToSession,
 } from "@/modules/terminal";
+import type { PaneNode } from "@/modules/terminal/lib/panes";
 import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
 import { useWorkspaceEnvStore, type WorkspaceEnv } from "@/modules/workspace";
@@ -345,6 +347,7 @@ export default function App() {
     openLauncherTab,
     adoptTerminalTab,
     adoptDocTab,
+    adoptPaneTree,
     openOrchestrationTab,
     setMarkdownView,
     openAiDiffTab,
@@ -2587,6 +2590,34 @@ export default function App() {
       setCustomTitle: (tabId, title) =>
         updateTab(tabId, { customTitle: title }),
       leafKey: peekLeafRestoreKey,
+      replacePaneTree: (tabId, tree) => {
+        const t = tabsRef.current.find((x) => x.id === tabId);
+        if (!t || t.kind !== "terminal") return null;
+        const existing = new Map<string, Extract<PaneNode, { kind: "leaf" }>>();
+        const walk = (n: PaneNode): void => {
+          if (n.kind === "leaf") {
+            const k = peekLeafRestoreKey(n.id);
+            if (k) existing.set(k, n);
+            return;
+          }
+          for (const c of n.children) walk(c);
+        };
+        walk(t.paneTree);
+        const live = hydrateTreeReusing(
+          tree,
+          existing,
+          allocId,
+          (id, title, color) =>
+            usePaneTitleStore
+              .getState()
+              .setPaneTitle(id, title ?? "", false, color),
+          seedLeafRestoreKey,
+        );
+        adoptPaneTree(tabId, live.tree, live.activeLeafId);
+        return t.paneTree;
+      },
+      restorePaneTree: (tabId, prev) =>
+        adoptPaneTree(tabId, prev, leafIds(prev)[0] ?? 0),
     });
   }, [adoptDocTab, updateTab]);
 
