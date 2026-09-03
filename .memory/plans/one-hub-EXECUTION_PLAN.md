@@ -30,7 +30,7 @@ remains. Update it as phases land.
 - Defaults: sync ON, host ai-server.
 - Suite: 701/701 + tsc + biome clean.
 
-## Phase 3 — validation
+## Phase 3 — validation  (first run 2026-09-03: steps 1, 2, 6 PASS; 3-5 BLOCKED by ADR-025 bug, see below)
 
 Automated (done): liveAdopt planner suite (idempotence, pane-existence,
 rename discipline); engine merge/chunk/pathMap suites from the adversarial
@@ -69,3 +69,23 @@ release is not "verified" until this passes:**
 - **Control plane** (KODEN-REMOTE.md M3): hub pushes actions to devices.
 - **Sub-tabs / space groups** (Kosta's notes, 2026-09-02): separate feature
   track, design against the synced schema from day one.
+
+## 2026-09-03 — first two-device run: PASS 1/2/6, FAIL 3/4/5 → ADR-025 (fix built same day)
+
+Both devices on 0.12.0 (laptop installed over ssh), host ai-server.
+- Step 1 (fresh boot both), step 2 (sync dot), step 6 (boot merge: laptop
+  reopened with HQ's name + note split intact): PASS.
+- Steps 3/4/5 (two devices live): FAIL, root cause = per-space layout LWW
+  plus derived writes stamping as edits. HQ created "TESTING TAB" with a
+  note split; the laptop materialized the tmux window as a bare tab,
+  stamped the whole space 3 s later and pushed; host lost the name and
+  the split. Same again with tab "123". Full reconstruction + the fix in
+  `decisions/ADR-025-layout-sync-cannot-lose-an-edit.md`.
+- Fix: per-tab clocks (identity = oldest terminal pane key / doc id),
+  adoption ledger (observers stamp 0, adopters carry the author's clock),
+  self-healing push from the live poll, live renames for terminal tabs,
+  journal + toast/Undo, F2 manifest reader deleted, tmux loop gated on
+  visible not focused. Two-device simulation test (incident replay + 400
+  seeded interleavings). Version bumped to 0.12.1 in all four files
+  (Cargo.toml finally off 0.11.0). Release = `scripts/release-koden.ps1`
+  after Kosta's OK; then RERUN steps 3-8 on 0.12.1.

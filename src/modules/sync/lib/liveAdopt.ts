@@ -10,7 +10,12 @@
 // windows within 15 s.
 
 import type { SerializedNode } from "@/modules/spaces/lib/serialize";
-import type { SpaceState } from "@/modules/spaces/lib/store";
+import type { SpaceState, SpaceStateMeta } from "@/modules/spaces/lib/store";
+import {
+  oldestKey,
+  tabClocksOf,
+  tabIdentities,
+} from "@/modules/spaces/lib/tabClocks";
 import type { Tab } from "@/modules/tabs/lib/useTabs";
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
 
@@ -26,8 +31,12 @@ export type LiveAdopters = {
     docId: string,
     title: string,
   ) => void;
-  /** Retitle a tab (doc tabs only here). */
+  /** Retitle a doc tab. */
   renameTab: (tabId: number, title: string) => void;
+  /** Set (or clear with "") a terminal tab's user label (ADR-025). */
+  setCustomTitle: (tabId: number, title: string) => void;
+  /** Restore key of a live terminal leaf, if it has one. */
+  leafKey: (leafId: number) => string | undefined;
 };
 
 let adopters: LiveAdopters | null = null;
@@ -126,4 +135,110 @@ export function planLiveDocAdoption(
     }
   }
   return { create, rename };
+}
+
+export type LiveRename = {
+  tabId: number;
+  /** tabClocks identity, for the adoption ledger. */
+  identity: string;
+  kind: "terminal" | "doc";
+  /** New label; "" clears a terminal's custom title. */
+  title: string;
+  /** The remote clock the rename carries. */
+  clock: number;
+  before: string;
+};
+
+function collectLiveKeys(
+  tree: PaneNode,
+  leafKey: (leafId: number) => string | undefined,
+  out: { terminal: string[]; all: string[] },
+): void {
+  if (!isLeaf(tree)) {
+    for (const c of tree.children) collectLiveKeys(c, leafKey, out);
+    return;
+  }
+  const k = leafKey(tree.id);
+  if (!k) return;
+  out.all.push(k);
+  if (!tree.content) out.terminal.push(k);
+}
+
+/** Identity of a LIVE tab, matching tabClocks.tabIdentity of its serialized
+ * form (oldest terminal pane's key). Null for tabs without one yet. */
+export function liveTabIdentity(
+  tab: Tab,
+  leafKey: (leafId: number) => string | undefined,
+): string | null {
+  switch (tab.kind) {
+    case "terminal": {
+      const keys = { terminal: [], all: [] };
+      collectLiveKeys(tab.paneTree, leafKey, keys);
+      const k = oldestKey(keys.terminal.length > 0 ? keys.terminal : keys.all);
+      return k ? `t:${k}` : null;
+    }
+    case "notes":
+      return `n:${tab.docId}`;
+    case "board":
+      return `b:${tab.boardId}`;
+    case "tasks":
+      return `k:${tab.listId}`;
+    default:
+      return null;
+  }
+}
+
+function liveLabel(tab: Tab): string | null {
+  if (tab.kind === "terminal") return tab.customTitle ?? "";
+  if (tab.kind === "notes" || tab.kind === "board" || tab.kind === "tasks")
+    return tab.title;
+  return null;
+}
+
+/** Renames a remote layout carries for tabs this device already shows,
+ * whose remote clock beats the clock on THIS device's disk (ADR-025).
+ * Additive like everything live: labels only, never structure. A tab not
+ * yet on local disk is skipped (it is a fresh local edit, clocked now). */
+export function planLiveRenames(
+  spaceId: string,
+  localTabs: readonly Tab[],
+  localState: SpaceState | undefined,
+  localMeta: SpaceStateMeta | undefined,
+  remoteState: SpaceState,
+  remoteMeta: SpaceStateMeta | undefined,
+  leafKey: (leafId: number) => string | undefined,
+): LiveRename[] {
+  const lClocks = tabClocksOf(localState, localMeta);
+  const rClocks = tabClocksOf(remoteState, remoteMeta);
+  const rIds = tabIdentities(remoteState.tabs);
+  const remoteLabel = new Map<string, string>();
+  rIds.forEach((id, i) => {
+    const t = remoteState.tabs[i];
+    if (t.kind === "terminal") remoteLabel.set(id, t.customTitle ?? "");
+    else if (t.kind === "notes" || t.kind === "board" || t.kind === "tasks")
+      remoteLabel.set(id, t.title);
+  });
+  const out: LiveRename[] = [];
+  for (const t of localTabs) {
+    if (t.spaceId !== spaceId) continue;
+    const id = liveTabIdentity(t, leafKey);
+    if (id === null) continue;
+    const lc = lClocks[id];
+    if (lc === undefined) continue;
+    const want = remoteLabel.get(id);
+    if (want === undefined) continue;
+    const have = liveLabel(t);
+    if (have === null || have === want) continue;
+    const rc = rClocks[id] ?? 0;
+    if (rc <= lc) continue;
+    out.push({
+      tabId: t.id,
+      identity: id,
+      kind: t.kind === "terminal" ? "terminal" : "doc",
+      title: want,
+      clock: rc,
+      before: have,
+    });
+  }
+  return out;
 }

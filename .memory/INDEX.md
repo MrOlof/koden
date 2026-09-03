@@ -503,3 +503,17 @@ invariants intact), sync default ON → host ai-server. My earlier
 north star. Ledger + Kosta's 8-step two-device GUI checklist:
 `.memory/plans/one-hub-EXECUTION_PLAN.md`. NOT yet GUI-verified — that's
 Kosta's first task back.
+
+**2026-09-03 — first two-device GUI run found the LWW loss; ADR-025 built
+the same day.** Steps 1/2/6 of the checklist pass. Steps 3-5 lose edits:
+the laptop's tmux materialization stamped the whole ai-server space newer
+than HQ's rename + note split and overwrote it on the host (twice, "TESTING
+TAB" then "123"); the F2 title manifest never carried the name either
+(fire-and-forget writer, focus-gated reader). Kosta: "permanent fix, rework
+whatever we need, people are gonna use this". ADR-025: per-tab clocks +
+identity, adoption ledger (observed = clock 0), self-healing push in the
+live poll, live terminal-tab renames, sync journal with toast/Undo, F2
+reader deleted. Two-device simulation test replays the incident and fuzzes
+400 interleavings; 110 sync/spaces tests green, whole suite green. Version
+0.12.1 staged in all four files, NOT yet committed/released (Kosta's call:
+`scripts/release-koden.ps1`, CI builds on tag). Then rerun checklist 3-8.

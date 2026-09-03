@@ -1,7 +1,9 @@
+import { takeExpectedClock } from "@/modules/sync/lib/adoptionLedger";
 import { notifyWsChanged } from "@/modules/sync/lib/syncSignals";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { LazyStore } from "@tauri-apps/plugin-store";
 import type { SerializedTab } from "./serialize";
+import { type SpaceStateMeta, stampTabs } from "./tabClocks";
 
 export type SpaceWorktree = {
   repoRoot: string;
@@ -46,7 +48,7 @@ const stateMetaKey = (id: string) => `${STATE_META_PREFIX}${id}`;
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 500 });
 
-export type SpaceStateMeta = { at: number };
+export type { SpaceStateMeta } from "./tabClocks";
 
 export type LoadedSpaces = {
   spaces: SpaceMeta[];
@@ -91,24 +93,37 @@ export function layoutContentChanged(
   return !prev || JSON.stringify(prev.tabs) !== JSON.stringify(next.tabs);
 }
 
+/**
+ * Persist a space layout. Without `meta` this is a LOCAL write: every tab is
+ * stamped by the pure diff in tabClocks (unchanged keeps its clock, edited
+ * takes now, adopted takes the ledger's clock, closed gets a tombstone;
+ * ADR-025). With `meta` it is a sync adoption write that carries the merged
+ * clocks verbatim and never signals a push.
+ */
 export async function saveState(
   id: string,
   state: SpaceState,
-  at?: number,
+  meta?: SpaceStateMeta,
 ): Promise<void> {
   const prev = await store.get<SpaceState>(stateKey(id)).catch(() => undefined);
   await store.set(stateKey(id), state);
-  if (at !== undefined) {
-    // Sync adoption path: carry the remote stamp verbatim.
-    await store.set(stateMetaKey(id), { at } satisfies SpaceStateMeta);
-  } else if (layoutContentChanged(prev, state)) {
-    await store.set(stateMetaKey(id), {
-      at: Date.now(),
-    } satisfies SpaceStateMeta);
-    // Real local layout edit → let the sync engine push soon (ADR-024
-    // liveness). Adoption writes (at !== undefined) never signal.
-    notifyWsChanged();
+  if (meta !== undefined) {
+    await store.set(stateMetaKey(id), meta);
+    return;
   }
+  if (!layoutContentChanged(prev, state)) return;
+  const prevMeta = await store
+    .get<SpaceStateMeta>(stateMetaKey(id))
+    .catch(() => undefined);
+  const now = Date.now();
+  const next = stampTabs(prev, prevMeta, state, now, (identity, tab) =>
+    takeExpectedClock(identity, tab, now),
+  );
+  await store.set(stateMetaKey(id), next);
+  // A real local layout edit lets the sync engine push soon (ADR-024
+  // liveness). An adopted tab (ledger clock) is pushed too: the host must
+  // learn it exists, and its clock guarantees it cannot outrank the author.
+  notifyWsChanged();
 }
 
 export async function deleteSpaceData(id: string): Promise<void> {

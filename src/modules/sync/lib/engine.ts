@@ -4,20 +4,31 @@ import {
   type LoadedSpaces,
   loadAll,
   type SpaceState,
+  type SpaceStateMeta,
   saveSpacesList,
   saveState,
 } from "@/modules/spaces/lib/store";
+import { tabIdentities } from "@/modules/spaces/lib/tabClocks";
 import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import {
   hydrateDocs,
   useDocsStore,
 } from "@/modules/workspace-docs/store/docsStore";
-import { getLiveAdopters, planLiveDocAdoption } from "./liveAdopt";
+import { toast } from "sonner";
+import { expectClock, OBSERVED_CLOCK } from "./adoptionLedger";
+import { appendJournal, type JournalEntry } from "./journal";
+import {
+  getLiveAdopters,
+  planLiveDocAdoption,
+  planLiveRenames,
+} from "./liveAdopt";
 import { mergeDocs } from "./mergeDocs";
+import type { TabChange } from "./mergeState";
 import {
   isSyncableSpace,
   mergeWorkspace,
   type WorkspaceLocal,
+  type WorkspaceMergeResult,
 } from "./mergeWorkspace";
 import {
   getBootFailCount,
@@ -184,9 +195,51 @@ async function syncDocs(cfg: SyncConfig, force = false): Promise<void> {
 
 // ------------------------------------------------------------ workspace sync
 
-function metaMapToRecord(m: Map<string, { at: number }>): StateMeta {
+function metaMapToRecord(m: Map<string, SpaceStateMeta>): StateMeta {
   const out: StateMeta = {};
-  for (const [k, v] of m) out[k] = { at: v.at };
+  for (const [k, v] of m) out[k] = v;
+  return out;
+}
+
+function tabLabel(t: TabChange["before"]): string {
+  if (!t) return "";
+  if (t.kind === "terminal") return t.customTitle ?? "";
+  return "title" in t ? t.title : "";
+}
+
+/** Journal entries for what a merge did to tabs this device already had
+ * (ADR-025): replaced layouts and peer-closed tabs. Additions change
+ * nothing the user made. */
+function journalOf(
+  merged: WorkspaceMergeResult,
+  via: JournalEntry["via"],
+  now: number,
+): JournalEntry[] {
+  const out: JournalEntry[] = [];
+  for (const [spaceId, changes] of Object.entries(merged.stateChanges)) {
+    for (const c of changes) {
+      if (c.kind === "added") continue;
+      const isRename =
+        c.kind === "replaced" && tabLabel(c.before) !== tabLabel(c.after);
+      out.push({
+        at: now,
+        spaceId,
+        tabId: c.id,
+        field: c.kind === "removed" ? "closed" : isRename ? "title" : "layout",
+        before: isRename
+          ? tabLabel(c.before)
+          : c.before
+            ? JSON.stringify(c.before)
+            : "",
+        after: isRename
+          ? tabLabel(c.after)
+          : c.after
+            ? JSON.stringify(c.after)
+            : "",
+        via,
+      });
+    }
+  }
   return out;
 }
 
@@ -224,8 +277,8 @@ function envelopeToWire(
   for (const [id, st] of local.states) {
     if (!keep.has(id)) continue;
     states[id] = sshIds.has(id) ? st : mapStatePaths(st, map);
-    const at = local.stateMeta[id]?.at;
-    if (at !== undefined) stateMeta[id] = { at };
+    const meta = local.stateMeta[id];
+    if (meta !== undefined) stateMeta[id] = meta;
   }
   return {
     v: SYNC_WIRE_VERSION,
@@ -315,8 +368,9 @@ async function bootPullInner(
   for (const id of merged.changedStates) {
     if (isCancelled()) return null;
     const st = merged.states.get(id);
-    if (st) await saveState(id, st, merged.stateMeta[id]?.at ?? Date.now());
+    if (st) await saveState(id, st, merged.stateMeta[id] ?? { at: Date.now() });
   }
+  void appendJournal(journalOf(merged, "boot", Date.now()));
   for (const id of merged.removedSpaces) {
     if (isCancelled()) return null;
     await deleteSpaceData(id);
@@ -442,16 +496,86 @@ async function liveWsAdopt(cfg: SyncConfig): Promise<void> {
     const remote = envelopeFromWire(pulled.envelope, cfg.pathRoot);
     const localSpaces = new Set(useSpaces.getState().spaces.map((s) => s.id));
     const tabs = a.listTabs();
+    const loaded = await loadAll();
+    const now = Date.now();
+    const journal: JournalEntry[] = [];
     for (const [spaceId, st] of Object.entries(remote.states ?? {})) {
       if (!localSpaces.has(spaceId)) continue; // unseen spaces are boot's job
+      const remoteMeta = remote.stateMeta?.[spaceId];
+      const rClocks = new Map<string, number>();
+      for (const id of tabIdentities(st.tabs)) {
+        rClocks.set(id, remoteMeta?.tabs?.[id] ?? remoteMeta?.at ?? 0);
+      }
       const plan = planLiveDocAdoption(spaceId, tabs, st);
-      for (const d of plan.create)
+      for (const d of plan.create) {
+        // The adopted tab persists with the AUTHOR's clock, never ours.
+        const prefix =
+          d.kind === "notes" ? "n" : d.kind === "board" ? "b" : "k";
+        const identity = `${prefix}:${d.id}`;
+        expectClock(identity, rClocks.get(identity) ?? OBSERVED_CLOCK);
         a.adoptDocTab(spaceId, d.kind, d.id, d.title);
-      for (const r of plan.rename) a.renameTab(r.tabId, r.title);
+      }
+      const renames = planLiveRenames(
+        spaceId,
+        tabs,
+        loaded.states.get(spaceId),
+        loaded.stateMeta.get(spaceId),
+        st,
+        remoteMeta,
+        a.leafKey,
+      );
+      for (const r of renames) {
+        expectClock(r.identity, r.clock, (tab) =>
+          tab.kind === "terminal"
+            ? (tab.customTitle ?? "") === r.title
+            : "title" in tab && tab.title === r.title,
+        );
+        if (r.kind === "terminal") a.setCustomTitle(r.tabId, r.title);
+        else a.renameTab(r.tabId, r.title);
+        journal.push({
+          at: now,
+          spaceId,
+          tabId: r.identity,
+          field: "title",
+          before: r.before,
+          after: r.title,
+          via: "live",
+        });
+        announceRename(a, r.tabId, r.kind, r.before, r.title);
+      }
     }
+    void appendJournal(journal);
+    // Self-healing push (ADR-025): if the host lacks something local wins
+    // on clock, a lost push race is repaired here instead of waiting for a
+    // local edit that may never come.
+    const merged = mergeWorkspace(await loadedToLocal(loaded), remote, now);
+    if (merged.pushNeeded) wsPushSoon();
   } catch {
     // Best-effort by design; the docs/ws sync paths own error surfacing.
   }
+}
+
+/** A peer renamed a tab you are looking at: say so and offer the way back.
+ * Undo writes without a ledger entry, so it stamps now and wins the merge. */
+function announceRename(
+  a: NonNullable<ReturnType<typeof getLiveAdopters>>,
+  tabId: number,
+  kind: "terminal" | "doc",
+  before: string,
+  after: string,
+): void {
+  const from = before || "(no name)";
+  const to = after || "(no name)";
+  toast(`Sync renamed "${from}" to "${to}"`, {
+    description: "Changed on another device",
+    action: {
+      label: "Undo",
+      onClick: () => {
+        if (kind === "terminal") a.setCustomTitle(tabId, before);
+        else a.renameTab(tabId, before);
+      },
+    },
+  });
 }
 
 /** Manual "sync now" from the statusbar segment; ignores backoff. */

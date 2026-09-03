@@ -132,6 +132,7 @@ import {
 import { tmuxKeyFor } from "@/modules/spaces/lib/tmuxKey";
 import { StatusBar } from "@/modules/statusbar";
 import { SyncBridge } from "@/modules/sync";
+import { expectClock, OBSERVED_CLOCK } from "@/modules/sync/lib/adoptionLedger";
 import { registerLiveAdopters } from "@/modules/sync/lib/liveAdopt";
 import {
   GridDialog,
@@ -2517,6 +2518,9 @@ export default function App() {
             }
           }
           for (const pane of planAdoption(windows, localKeys, titles)) {
+            // ADR-025: we only observed this window exists; the tab persists
+            // with clock 0 so the device that named or split it always wins.
+            expectClock(`t:${pane.key}`, OBSERVED_CLOCK);
             adoptTerminalTab(
               space.id,
               {
@@ -2528,12 +2532,11 @@ export default function App() {
             );
           }
         }
+        // Titles no longer come from the manifest (ADR-025: they ride the
+        // ws domain with per-tab clocks, live). Only the junk-title heal
+        // from the manifest era remains.
         for (const t of tabsRef.current) {
           if (t.spaceId !== space.id || t.kind !== "terminal") continue;
-          const firstLeaf = leafIds(t.paneTree)[0];
-          const key =
-            firstLeaf !== undefined ? peekLeafRestoreKey(firstLeaf) : undefined;
-          const entry = key ? titles.get(key) : undefined;
           const custom = t.customTitle?.trim();
           const cwdBase = t.cwd?.split(/[\\/]/).filter(Boolean).pop();
           if (
@@ -2541,14 +2544,8 @@ export default function App() {
             cwdBase &&
             custom.toLowerCase() === cwdBase.toLowerCase()
           ) {
-            // Heal titles stamped from weak manifest entries by older
-            // builds: a "rename" equal to the cwd basename says nothing.
+            // A "rename" equal to the cwd basename says nothing.
             updateTab(t.id, { customTitle: "" });
-            continue;
-          }
-          // Only explicit renames cross devices.
-          if (entry?.custom && entry.title !== (custom || t.title)) {
-            updateTab(t.id, { customTitle: entry.title });
           }
         }
       } catch (e) {
@@ -2575,7 +2572,7 @@ export default function App() {
     if (!spacesHydrated || !activeSpaceId) return;
     const spaceId = activeSpaceId;
     const timer = setInterval(() => {
-      if (document.hasFocus()) void syncRemoteSpace(spaceId);
+      if (document.visibilityState === "visible") void syncRemoteSpace(spaceId);
     }, 15_000);
     return () => clearInterval(timer);
   }, [spacesHydrated, activeSpaceId, syncRemoteSpace]);
@@ -2587,6 +2584,9 @@ export default function App() {
       listTabs: () => tabsRef.current,
       adoptDocTab,
       renameTab: (tabId, title) => updateTab(tabId, { title }),
+      setCustomTitle: (tabId, title) =>
+        updateTab(tabId, { customTitle: title }),
+      leafKey: peekLeafRestoreKey,
     });
   }, [adoptDocTab, updateTab]);
 

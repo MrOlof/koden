@@ -8,7 +8,7 @@ name = "koden"
 # it; the Windows leg shipped it silently. Both binaries are declared explicitly
 # below, and tauri.conf.json carries the matching mainBinaryName.
 default-run = "koden"
-version = "0.11.0"
+version = "0.12.1"
 description = "Koden — an open-source AI-native terminal emulator"
 authors = ["Kosta Wadenfalk"]
 license = "Apache-2.0"

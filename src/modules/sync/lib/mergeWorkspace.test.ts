@@ -169,15 +169,103 @@ describe("layout state merge", () => {
     const m = mergeWorkspace(l, r);
     expect(m.states.get("a")).toEqual(state("localA"));
     expect(m.states.get("b")).toEqual(state("remoteB"));
-    expect(m.changedStates).toEqual(["b"]);
+    expect(m.changedStates).toContain("b");
+    expect(m.stateMeta.a.tabs).toEqual({ "n:d": 200 });
+    expect(m.stateMeta.b.tabs).toEqual({ "n:d": 300 });
   });
 
-  it("keeps local when both sides are unstamped (pre-sync data)", () => {
-    const m = mergeWorkspace(
+  it("resolves an unstamped tie the same way from either side (ADR-025)", () => {
+    const fromL = mergeWorkspace(
       local({ spaces: [space("a")], states: new Map([["a", state("L")]]) }),
       remote({ spaces: [space("a")], states: { a: state("R") } }),
     );
-    expect(m.states.get("a")).toEqual(state("L"));
+    const fromR = mergeWorkspace(
+      local({ spaces: [space("a")], states: new Map([["a", state("R")]]) }),
+      remote({ spaces: [space("a")], states: { a: state("L") } }),
+    );
+    expect(fromL.states.get("a")).toEqual(fromR.states.get("a"));
+  });
+
+  it("merges tab by tab: a rename here and a new tab there both survive", () => {
+    const mine: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [
+        {
+          kind: "terminal",
+          customTitle: "Power",
+          tree: { kind: "leaf", key: "k1" },
+        },
+      ],
+    };
+    const theirs: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [
+        { kind: "terminal", tree: { kind: "leaf", key: "k1" } },
+        {
+          kind: "terminal",
+          customTitle: "123",
+          tree: { kind: "leaf", key: "k2" },
+        },
+      ],
+    };
+    const m = mergeWorkspace(
+      local({
+        spaces: [space("a")],
+        states: new Map([["a", mine]]),
+        stateMeta: { a: { at: 500, tabs: { "t:k1": 500 } } },
+      }),
+      remote({
+        spaces: [space("a")],
+        states: { a: theirs },
+        stateMeta: { a: { at: 600, tabs: { "t:k1": 0, "t:k2": 600 } } },
+      }),
+    );
+    const got = m.states.get("a");
+    expect(
+      got?.tabs.map((t) => (t.kind === "terminal" ? t.customTitle : "")),
+    ).toEqual(["Power", "123"]);
+    expect(m.stateMeta.a.tabs).toEqual({ "t:k1": 500, "t:k2": 600 });
+    // Local won a tab on clock: the host must learn about it.
+    expect(m.pushNeeded).toBe(true);
+    expect(m.stateChanges.a).toEqual([
+      { id: "t:k2", kind: "added", after: theirs.tabs[1] },
+    ]);
+  });
+
+  it("a 0.12.0 peer without per-tab clocks is clocked at its space stamp", () => {
+    const mine: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [
+        {
+          kind: "terminal",
+          customTitle: "new",
+          tree: { kind: "leaf", key: "k1" },
+        },
+      ],
+    };
+    const theirs: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [
+        {
+          kind: "terminal",
+          customTitle: "old",
+          tree: { kind: "leaf", key: "k1" },
+        },
+      ],
+    };
+    const m = mergeWorkspace(
+      local({
+        spaces: [space("a")],
+        states: new Map([["a", mine]]),
+        stateMeta: { a: { at: 700, tabs: { "t:k1": 700 } } },
+      }),
+      remote({
+        spaces: [space("a")],
+        states: { a: theirs },
+        stateMeta: { a: { at: 300 } },
+      }),
+    );
+    expect(m.states.get("a")).toEqual(mine);
   });
 
   it("adopts a state for a newly-appended remote space", () => {
@@ -257,9 +345,13 @@ describe("identity fold (per-device duplicates)", () => {
     expect(folded.contentUpdatedAt).toBe(5000);
     expect(m.idRemap).toEqual({ "sp-b": "sp-a" });
     expect(m.removedSpaces).toContain("sp-b");
-    // The better-stamped layout (local, 400) follows the survivor.
+    // The survivor's layout is the tab-by-tab merge: same doc id on both
+    // sides, the better-stamped copy (local, 400) wins.
     expect(m.states.get("sp-a")).toEqual(state("localLayout"));
-    expect(m.stateMeta["sp-a"]).toEqual({ at: 400 });
+    expect(m.stateMeta["sp-a"]).toMatchObject({
+      at: 400,
+      tabs: { "n:d": 400 },
+    });
     expect(m.states.has("sp-b")).toBe(false);
     expect(m.pushNeeded).toBe(true);
   });

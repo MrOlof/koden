@@ -1,7 +1,12 @@
 import type { SpaceState } from "@/modules/spaces/lib/store";
 import type { Tab } from "@/modules/tabs/lib/useTabs";
 import { describe, expect, it } from "vitest";
-import { docsInRemoteState, planLiveDocAdoption } from "./liveAdopt";
+import {
+  docsInRemoteState,
+  liveTabIdentity,
+  planLiveDocAdoption,
+  planLiveRenames,
+} from "./liveAdopt";
 
 const remote: SpaceState = {
   activeTabIndex: 0,
@@ -116,5 +121,147 @@ describe("planLiveDocAdoption", () => {
     const plan = planLiveDocAdoption("sp", local, remote);
     expect(plan.create).toEqual([]);
     expect(plan.rename).toEqual([]);
+  });
+});
+
+function liveTerminal(
+  id: number,
+  spaceId: string,
+  leafId: number,
+  customTitle?: string,
+): Tab {
+  return {
+    id,
+    spaceId,
+    kind: "terminal",
+    title: "shell",
+    activeLeafId: leafId,
+    paneTree: { kind: "leaf", id: leafId },
+    ...(customTitle !== undefined && { customTitle }),
+  } as Tab;
+}
+
+const keys: Record<number, string> = { 1: "k1", 2: "k2" };
+const leafKey = (leafId: number) => keys[leafId];
+
+describe("liveTabIdentity", () => {
+  it("matches tabClocks.tabIdentity for terminals and docs", () => {
+    expect(liveTabIdentity(liveTerminal(1, "s", 1), leafKey)).toBe("t:k1");
+    expect(liveTabIdentity(liveTerminal(1, "s", 9), leafKey)).toBeNull();
+    expect(liveTabIdentity(noteTab(2, "s", "d", "N"), leafKey)).toBe("n:d");
+  });
+});
+
+describe("planLiveRenames (ADR-025)", () => {
+  const onDisk: SpaceState = {
+    activeTabIndex: 0,
+    tabs: [
+      {
+        kind: "terminal",
+        tree: { kind: "leaf", key: "k1" },
+        customTitle: "old",
+      },
+      { kind: "notes", docId: "d", title: "Notes" },
+    ],
+  };
+  const diskMeta = { at: 10, tabs: { "t:k1": 10, "n:d": 10 } };
+  const live = [liveTerminal(1, "s", 1, "old"), noteTab(2, "s", "d", "Notes")];
+
+  it("renames tabs whose remote clock beats the local one, labels only", () => {
+    const remote: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [
+        {
+          kind: "terminal",
+          tree: { kind: "leaf", key: "k1" },
+          customTitle: "123",
+        },
+        { kind: "notes", docId: "d", title: "Plan" },
+      ],
+    };
+    const plan = planLiveRenames(
+      "s",
+      live,
+      onDisk,
+      diskMeta,
+      remote,
+      { at: 20, tabs: { "t:k1": 20, "n:d": 20 } },
+      leafKey,
+    );
+    expect(plan).toEqual([
+      {
+        tabId: 1,
+        identity: "t:k1",
+        kind: "terminal",
+        title: "123",
+        clock: 20,
+        before: "old",
+      },
+      {
+        tabId: 2,
+        identity: "n:d",
+        kind: "doc",
+        title: "Plan",
+        clock: 20,
+        before: "Notes",
+      },
+    ]);
+  });
+
+  it("ignores older or equal remote clocks, unknown tabs, and tabs not on disk", () => {
+    const remote: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [
+        {
+          kind: "terminal",
+          tree: { kind: "leaf", key: "k1" },
+          customTitle: "stale",
+        },
+        {
+          kind: "terminal",
+          tree: { kind: "leaf", key: "k2" },
+          customTitle: "fresh",
+        },
+      ],
+    };
+    const plan = planLiveRenames(
+      "s",
+      [...live, liveTerminal(3, "s", 2, "unsaved")],
+      onDisk,
+      diskMeta,
+      remote,
+      { at: 10, tabs: { "t:k1": 10, "t:k2": 99 } },
+      leafKey,
+    );
+    expect(plan).toEqual([]);
+  });
+
+  it("a cleared remote title clears the local one when newer", () => {
+    const remote: SpaceState = {
+      activeTabIndex: 0,
+      tabs: [{ kind: "terminal", tree: { kind: "leaf", key: "k1" } }],
+    };
+    const plan = planLiveRenames(
+      "s",
+      live,
+      onDisk,
+      diskMeta,
+      remote,
+      {
+        at: 30,
+        tabs: { "t:k1": 30 },
+      },
+      leafKey,
+    );
+    expect(plan).toEqual([
+      {
+        tabId: 1,
+        identity: "t:k1",
+        kind: "terminal",
+        title: "",
+        clock: 30,
+        before: "old",
+      },
+    ]);
   });
 });

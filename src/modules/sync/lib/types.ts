@@ -1,4 +1,8 @@
-import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
+import type {
+  SpaceMeta,
+  SpaceState,
+  SpaceStateMeta,
+} from "@/modules/spaces/lib/store";
 import type {
   Board,
   NoteDoc,
@@ -37,8 +41,9 @@ export type DocsEnvelope = {
   tasks: Record<string, TaskList>;
 };
 
-/** Per-space layout timestamp; `koden-spaces.json` states carried none. */
-export type StateMeta = Record<string, { at: number }>;
+/** Per-space layout clocks: the space clock plus per-tab clocks and
+ * tombstones (ADR-025). 0.12.0 peers send and read only `at`. */
+export type StateMeta = Record<string, SpaceStateMeta>;
 
 /** spaceId -> deletion time. Wins over LRU updatedAt bumps but not over a
  * recreate or a content edit after the delete. */

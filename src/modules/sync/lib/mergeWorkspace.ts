@@ -1,4 +1,9 @@
-import type { SpaceMeta, SpaceState } from "@/modules/spaces/lib/store";
+import type {
+  SpaceMeta,
+  SpaceState,
+  SpaceStateMeta,
+} from "@/modules/spaces/lib/store";
+import { mergeSpaceState, type TabChange } from "./mergeState";
 import type { StateMeta, Tombstones, WorkspaceEnvelope } from "./types";
 
 const TOMBSTONE_TTL_MS = 90 * 24 * 3600_000;
@@ -66,6 +71,9 @@ export type WorkspaceMergeResult = {
    * references (activeId) through this before consulting removedSpaces. */
   idRemap: Record<string, string>;
   pushNeeded: boolean;
+  /** Per space: what adopting the remote did to local tabs (ADR-025), for
+   * the journal and the live layer. Only spaces with changes appear. */
+  stateChanges: Record<string, TabChange[]>;
 };
 
 function normIdentityPath(p: string): string {
@@ -102,10 +110,12 @@ export function isSyncableSpace(s: SpaceMeta): boolean {
 export function mergeWorkspace(
   local: WorkspaceLocal,
   remote: WorkspaceEnvelope,
+  now: number = Date.now(),
 ): WorkspaceMergeResult {
   const tombstones = mergeTombstoneMaps(
     local.tombstones,
     remote.tombstones ?? {},
+    now,
   );
 
   const localById = new Map(local.spaces.map((s) => [s.id, s]));
@@ -139,23 +149,39 @@ export function mergeWorkspace(
     changedSpaces.push(r.id);
   }
 
-  // Layout snapshots: per-space LWW on stateMeta.at. A side that has a stamp
-  // beats a side that lacks one; both unstamped keeps local (pre-sync data).
+  // Layouts merge TAB BY TAB (ADR-025): union by tab identity, per-tab
+  // clock wins, tombstones close, local order first. A side with no per-tab
+  // map (0.12.0 peer) is clocked at its space stamp throughout.
   const keptIds = new Set(spaces.map((s) => s.id));
   const states = new Map(local.states);
   const stateMeta: StateMeta = { ...local.stateMeta };
   const changedStates: string[] = [];
-  for (const [id, remoteState] of Object.entries(remote.states ?? {})) {
-    if (!keptIds.has(id)) continue;
+  const stateChanges: Record<string, TabChange[]> = {};
+  const localNewerStates = new Set<string>();
+  const remoteStates = remote.states ?? {};
+  for (const id of keptIds) {
     const localSpace = localById.get(id);
     if (localSpace && !isSyncableSpace(localSpace)) continue;
-    const lAt = local.stateMeta[id]?.at ?? 0;
-    const rAt = remote.stateMeta?.[id]?.at ?? 0;
-    if (!states.has(id) || rAt > lAt) {
-      states.set(id, remoteState);
-      stateMeta[id] = { at: rAt };
-      changedStates.push(id);
+    const l = local.states.get(id);
+    const r = remoteStates[id];
+    if (!r) {
+      if (l) localNewerStates.add(id);
+      continue;
     }
+    const m = mergeSpaceState(
+      l,
+      local.stateMeta[id],
+      r,
+      remote.stateMeta?.[id],
+      now,
+    );
+    states.set(id, m.state);
+    stateMeta[id] = m.meta;
+    const metaChanged =
+      JSON.stringify(local.stateMeta[id] ?? null) !== JSON.stringify(m.meta);
+    if (m.changed || metaChanged) changedStates.push(id);
+    if (m.changes.length > 0) stateChanges[id] = m.changes;
+    if (m.localNewer) localNewerStates.add(id);
   }
   for (const id of removedSpaces) {
     states.delete(id);
@@ -195,25 +221,25 @@ export function mergeWorkspace(
     foldedById.set(survivor.id, merged);
     changedSpaces.push(survivor.id);
 
-    let bestId: string | null = null;
-    let bestAt = -1;
+    // The survivor's layout is the tab-by-tab merge across the group, so
+    // a tab that only one duplicate knew about survives the fold.
+    let acc: { state: SpaceState; meta: SpaceStateMeta | undefined } | null =
+      null;
     for (const s of group) {
-      if (!states.has(s.id)) continue;
-      const at = stateMeta[s.id]?.at ?? 0;
-      if (
-        bestId === null ||
-        at > bestAt ||
-        (at === bestAt && s.id === survivor.id)
-      ) {
-        bestId = s.id;
-        bestAt = at;
+      const st = states.get(s.id);
+      if (!st) continue;
+      if (acc === null) {
+        acc = { state: st, meta: stateMeta[s.id] };
+        continue;
       }
+      const m = mergeSpaceState(acc.state, acc.meta, st, stateMeta[s.id], now);
+      acc = { state: m.state, meta: m.meta };
     }
-    if (bestId !== null && bestId !== survivor.id) {
-      const bestState = states.get(bestId);
-      if (bestState) {
-        states.set(survivor.id, bestState);
-        stateMeta[survivor.id] = { at: bestAt };
+    if (acc !== null) {
+      const before = states.get(survivor.id);
+      states.set(survivor.id, acc.state);
+      if (acc.meta) stateMeta[survivor.id] = acc.meta;
+      if (JSON.stringify(before ?? null) !== JSON.stringify(acc.state)) {
         changedStates.push(survivor.id);
       }
     }
@@ -250,10 +276,7 @@ export function mergeWorkspace(
       const r = remoteById.get(l.id);
       return !r || contentClock(l) > contentClock(r);
     }) ||
-    Object.entries(local.stateMeta).some(([id, m]) => {
-      if (!keptIds.has(id)) return false;
-      return (m?.at ?? 0) > (remote.stateMeta?.[id]?.at ?? 0);
-    }) ||
+    localNewerStates.size > 0 ||
     Object.entries(local.tombstones).some(
       ([id, at]) => at > (remote.tombstones?.[id] ?? 0),
     );
@@ -268,5 +291,6 @@ export function mergeWorkspace(
     removedSpaces: [...new Set(removedSpaces)],
     idRemap,
     pushNeeded,
+    stateChanges,
   };
 }
