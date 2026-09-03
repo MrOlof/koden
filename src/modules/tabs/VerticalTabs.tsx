@@ -14,6 +14,22 @@ import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import type { SpaceMeta } from "@/modules/spaces";
 import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   Cancel01Icon,
   CheckListIcon,
   CommandLineIcon,
@@ -27,7 +43,12 @@ import {
   PlusSignIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useState } from "react";
+import {
+  forwardRef,
+  type HTMLAttributes,
+  type ReactNode,
+  useState,
+} from "react";
 import { TabIcon, TabRenameInput, TabStatusPill } from "./TabBar";
 import { TabMenuItems } from "./TabMenuItems";
 import { labelFor } from "./lib/tabLabel";
@@ -56,8 +77,67 @@ type Props = {
   /** All spaces — feeds the "Move to space" submenu. */
   spaces: SpaceMeta[];
   onMoveToSpace: (tabId: number, spaceId: string) => void;
+  /** Drop `tabId` above or below `targetTabId` (drag-and-drop reorder). */
+  onReorder: (
+    tabId: number,
+    targetTabId: number,
+    edge: "top" | "bottom",
+  ) => void;
 };
 
+/** One sortable row: dnd-kit owns the transform and pointer listeners; a
+ * 5 px activation distance keeps plain clicks and double-clicks intact. It
+ * sits inside a Radix ContextMenuTrigger `asChild`, so the trigger's props
+ * and ref must be forwarded onto the element (Slot merges them in). */
+const SortableRow = forwardRef<
+  HTMLDivElement,
+  {
+    sortableId: number;
+    className: string;
+    children: ReactNode;
+  } & HTMLAttributes<HTMLDivElement>
+>(function SortableRow(
+  { sortableId, className, children, style, ...rest },
+  forwarded,
+) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: sortableId });
+  return (
+    <div
+      ref={(el) => {
+        setNodeRef(el);
+        if (typeof forwarded === "function") forwarded(el);
+        else if (forwarded) forwarded.current = el;
+      }}
+      style={{
+        ...style,
+        transform: CSS.Translate.toString(transform),
+        transition,
+        ...(isDragging
+          ? { opacity: 0.6, position: "relative" as const, zIndex: 10 }
+          : {}),
+      }}
+      className={className}
+      {...rest}
+      {...attributes}
+      {...listeners}
+    >
+      {children}
+    </div>
+  );
+});
+
+/**
+ * The "new tab" actions, shared verbatim by the "+" dropdown and the rail
+ * right-click menu so the two never drift. Rendered into a DropdownMenuContent
+ * by both callers.
+ */
 type NewTabMenuItemsProps = {
   onNew: () => void;
   onNewGrid: () => void;
@@ -70,11 +150,6 @@ type NewTabMenuItemsProps = {
   onOpenLauncher: () => void;
 };
 
-/**
- * The "new tab" actions, shared verbatim by the "+" dropdown and the rail
- * right-click menu so the two never drift. Rendered into a DropdownMenuContent
- * by both callers.
- */
 function NewTabMenuItems({
   onNew,
   onNewGrid,
@@ -159,8 +234,23 @@ export function VerticalTabs({
   onOpenLauncher,
   spaces,
   onMoveToSpace,
+  onReorder,
 }: Props) {
   const [editingId, setEditingId] = useState<number | null>(null);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const from = tabs.findIndex((t) => t.id === active.id);
+    const to = tabs.findIndex((t) => t.id === over.id);
+    if (from < 0 || to < 0) return;
+    onReorder(Number(active.id), Number(over.id), from < to ? "bottom" : "top");
+  };
   // Cursor-anchored "new tab" menu opened by right-clicking empty rail space.
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [newMenuPoint, setNewMenuPoint] = useState({ x: 0, y: 0 });
@@ -209,94 +299,108 @@ export function VerticalTabs({
         </DropdownMenu>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
-        {tabs.map((t) => {
-          const isActive = t.id === activeId;
-          const isPreview = t.kind === "editor" && (t as EditorTab).preview;
-          const isEditing = editingId === t.id && isRenamableKind(t.kind);
-          return (
-            <ContextMenu key={t.id}>
-              <ContextMenuTrigger asChild>
-                <div
-                  className={cn(
-                    "group mb-0.5 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors",
-                    isActive
-                      ? "bg-foreground/[0.07] text-foreground"
-                      : "text-muted-foreground hover:bg-foreground/[0.045] hover:text-foreground",
-                  )}
-                >
-                  {isEditing ? (
-                    <>
-                      <TabIcon tab={t} />
-                      <TabRenameInput
-                        initial={labelFor(t)}
-                        onCommit={(value) => {
-                          onRename(t.id, value);
-                          setEditingId(null);
-                        }}
-                        onCancel={() => setEditingId(null)}
-                      />
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => onSelect(t.id)}
-                      onDoubleClick={() => {
-                        if (isRenamableKind(t.kind)) setEditingId(t.id);
-                      }}
-                      onAuxClick={(e) => {
-                        if (e.button === 1 && tabs.length > 1) {
-                          e.preventDefault();
-                          onClose(t.id);
-                        }
-                      }}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-                    >
-                      <TabIcon tab={t} />
-                      <span className={cn("truncate", isPreview && "italic")}>
-                        {labelFor(t)}
-                      </span>
-                      {t.kind === "editor" && t.dirty ? (
-                        <span className="size-1.5 shrink-0 rounded-full bg-foreground/70" />
-                      ) : (
-                        <TabStatusPill tabId={t.id} />
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={onDragEnd}
+        >
+          <SortableContext
+            items={tabs.map((t) => t.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            {tabs.map((t) => {
+              const isActive = t.id === activeId;
+              const isPreview = t.kind === "editor" && (t as EditorTab).preview;
+              const isEditing = editingId === t.id && isRenamableKind(t.kind);
+              return (
+                <ContextMenu key={t.id}>
+                  <ContextMenuTrigger asChild>
+                    <SortableRow
+                      sortableId={t.id}
+                      className={cn(
+                        "group mb-0.5 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors",
+                        isActive
+                          ? "bg-foreground/[0.07] text-foreground"
+                          : "text-muted-foreground hover:bg-foreground/[0.045] hover:text-foreground",
                       )}
-                    </button>
-                  )}
-                  {!isEditing && tabs.length > 1 ? (
-                    <button
-                      type="button"
-                      aria-label="Close tab"
-                      onClick={() => onClose(t.id)}
-                      className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-60 hover:opacity-100"
                     >
-                      <HugeiconsIcon
-                        icon={Cancel01Icon}
-                        size={11}
-                        strokeWidth={2}
-                      />
-                    </button>
-                  ) : null}
-                </div>
-              </ContextMenuTrigger>
-              <ContextMenuContent
-                className="min-w-44"
-                onCloseAutoFocus={(e) => e.preventDefault()}
-              >
-                <TabMenuItems
-                  tab={t}
-                  tabCount={tabs.length}
-                  onRename={() => setEditingId(t.id)}
-                  onDuplicate={() => onDuplicate(t.id)}
-                  onNew={onNew}
-                  onClose={() => onClose(t.id)}
-                  onCloseOthers={() => onCloseOthers(t.id)}
-                  spaces={spaces}
-                  onMoveToSpace={(sid) => onMoveToSpace(t.id, sid)}
-                />
-              </ContextMenuContent>
-            </ContextMenu>
-          );
-        })}
+                      {isEditing ? (
+                        <>
+                          <TabIcon tab={t} />
+                          <TabRenameInput
+                            initial={labelFor(t)}
+                            onCommit={(value) => {
+                              onRename(t.id, value);
+                              setEditingId(null);
+                            }}
+                            onCancel={() => setEditingId(null)}
+                          />
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => onSelect(t.id)}
+                          onDoubleClick={() => {
+                            if (isRenamableKind(t.kind)) setEditingId(t.id);
+                          }}
+                          onAuxClick={(e) => {
+                            if (e.button === 1 && tabs.length > 1) {
+                              e.preventDefault();
+                              onClose(t.id);
+                            }
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                        >
+                          <TabIcon tab={t} />
+                          <span
+                            className={cn("truncate", isPreview && "italic")}
+                          >
+                            {labelFor(t)}
+                          </span>
+                          {t.kind === "editor" && t.dirty ? (
+                            <span className="size-1.5 shrink-0 rounded-full bg-foreground/70" />
+                          ) : (
+                            <TabStatusPill tabId={t.id} />
+                          )}
+                        </button>
+                      )}
+                      {!isEditing && tabs.length > 1 ? (
+                        <button
+                          type="button"
+                          aria-label="Close tab"
+                          onClick={() => onClose(t.id)}
+                          className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-60 hover:opacity-100"
+                        >
+                          <HugeiconsIcon
+                            icon={Cancel01Icon}
+                            size={11}
+                            strokeWidth={2}
+                          />
+                        </button>
+                      ) : null}
+                    </SortableRow>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent
+                    className="min-w-44"
+                    onCloseAutoFocus={(e) => e.preventDefault()}
+                  >
+                    <TabMenuItems
+                      tab={t}
+                      tabCount={tabs.length}
+                      onRename={() => setEditingId(t.id)}
+                      onDuplicate={() => onDuplicate(t.id)}
+                      onNew={onNew}
+                      onClose={() => onClose(t.id)}
+                      onCloseOthers={() => onCloseOthers(t.id)}
+                      spaces={spaces}
+                      onMoveToSpace={(sid) => onMoveToSpace(t.id, sid)}
+                    />
+                  </ContextMenuContent>
+                </ContextMenu>
+              );
+            })}
+          </SortableContext>
+        </DndContext>
       </div>
       <DropdownMenu open={newMenuOpen} onOpenChange={setNewMenuOpen}>
         {/* Zero-size anchor pinned to the cursor; the menu positions off it. */}

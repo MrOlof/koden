@@ -2990,6 +2990,7 @@ export default function App() {
                           onOpenLauncher={showLauncher}
                           spaces={spaces}
                           onMoveToSpace={handleMoveTab}
+                          onReorder={handleReorderTab}
                         />
                       </ResizablePanel>
                       <ResizableHandle withHandle />

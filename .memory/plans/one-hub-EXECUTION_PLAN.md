@@ -104,3 +104,13 @@ Both devices on 0.12.0 (laptop installed over ssh), host ai-server.
   (anything, then back) BEFORE updating, so HQ re-pushes the split with a
   newer clock; the laptop's duplicate "Notes" tab clears on its next boot.
 - Then rerun steps 3-8 on 0.12.2.
+
+## 2026-09-03 13:12, third run on 0.12.2: live split PASS (Kosta: "seems to work now")
+
+Host verified: the new tab (terminal + note + tasks split) is on the host as
+a split, last pushed by the laptop after adopting it, structure and name
+clocks intact. Steps 1, 2, 3, 4, 6 PASS. Remaining: 5 (rename on either
+side, other follows), 7 (delete a space, gone on the other after its boot,
+stays gone), 8 (network drop, recover alone). The pre-0.12.2 TEST tab is
+still bare on the host with its standalone Notes tab (rescue rename not
+done; the note content survives in docs), harmless.
